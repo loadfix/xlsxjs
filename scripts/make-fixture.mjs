@@ -606,3 +606,53 @@ await writeFixture('merged', {
     writeFileSync(out, buf);
     console.log(`wrote ${out} (${buf.length} bytes)`);
 }
+
+// ── outlines-and-names ─────────────────────────────────────────────────────
+// Exercises the outline-levels slice (on row + col) together with the
+// workbook-scoped defined-names registry. Row outline levels go 0/1/2/1/0
+// so the middle rows form a two-level group; column B carries outlineLevel=1.
+// sheetFormatPr advertises the max observed levels; sheetPr/outlinePr flips
+// summaryRight to false so the struct mirrors what Excel persists.
+// Two definedNames: one workbook-scoped, one print-area scoped to sheet 0.
+{
+    const outDir = resolve(repo, 'tests/render-test/outlines-and-names');
+    mkdirSync(outDir, { recursive: true });
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', contentTypes);
+    zip.file('_rels/.rels', rootRels);
+    zip.file('xl/_rels/workbook.xml.rels', workbookRels);
+    zip.file('xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+  <definedNames>
+    <definedName name="TotalRange">Sheet1!$A$1:$C$5</definedName>
+    <definedName name="_xlnm.Print_Area" localSheetId="0" hidden="1">Sheet1!$A$1:$C$3</definedName>
+  </definedNames>
+</workbook>`);
+    zip.file('xl/sharedStrings.xml', sharedStringsXml(['a', 'b', 'c', 'd', 'e']));
+    // Row outline levels 0, 1, 2, 1, 0; column B carries outlineLevel=1.
+    // sheetFormatPr advertises the max levels; sheetPr/outlinePr flips
+    // summaryRight to "0" so the parser roundtrips a non-default value.
+    zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetPr><outlinePr summaryBelow="1" summaryRight="0"/></sheetPr>
+  <sheetFormatPr defaultRowHeight="15" outlineLevelRow="2" outlineLevelCol="1"/>
+  <cols>
+    <col min="2" max="2" outlineLevel="1"/>
+  </cols>
+  <sheetData>
+    <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>0</v></c><c r="C1" t="s"><v>0</v></c></row>
+    <row r="2" outlineLevel="1"><c r="A2" t="s"><v>1</v></c><c r="B2" t="s"><v>1</v></c><c r="C2" t="s"><v>1</v></c></row>
+    <row r="3" outlineLevel="2"><c r="A3" t="s"><v>2</v></c><c r="B3" t="s"><v>2</v></c><c r="C3" t="s"><v>2</v></c></row>
+    <row r="4" outlineLevel="1"><c r="A4" t="s"><v>3</v></c><c r="B4" t="s"><v>3</v></c><c r="C4" t="s"><v>3</v></c></row>
+    <row r="5"><c r="A5" t="s"><v>4</v></c><c r="B5" t="s"><v>4</v></c><c r="C5" t="s"><v>4</v></c></row>
+  </sheetData>
+</worksheet>`);
+    const buf = await zip.generateAsync({ type: 'nodebuffer' });
+    const out = resolve(outDir, 'workbook.xlsx');
+    writeFileSync(out, buf);
+    console.log(`wrote ${out} (${buf.length} bytes)`);
+}

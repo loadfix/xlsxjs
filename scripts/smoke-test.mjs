@@ -60,6 +60,7 @@ const tallies = {
     unknownPatternFills: new Map(),
     droppedPartPrefixes: new Map(),
     extLstUris: new Map(),
+    definedNames: new Map(),  // name-prefix → count (e.g. "_xlnm.Print_Area", "_xlnm._FilterDatabase", user)
     errors: [],
 };
 
@@ -165,6 +166,18 @@ for (const file of files) {
     report.cfTypes = Object.fromEntries(cfTypeCounts);
     report.unknownIconSets = [...unknownIconSetsHere];
 
+    // Defined names: count user-facing + internal (_xlnm.*) separately so
+    // the roll-up makes it obvious which kind dominates real-world files.
+    if (parsed.definedNames?.length) {
+        report.definedNames = parsed.definedNames.length;
+        for (const dn of parsed.definedNames) {
+            // Fold all _xlnm.* entries under their specific name; user names
+            // roll up as "(user)".
+            const key = dn.name.startsWith('_xlnm.') ? dn.name : '(user)';
+            bump(tallies.definedNames, key);
+        }
+    }
+
     // Count patternFill types we didn't honour (only 'solid' lands today).
     // We look at the raw styles.xml by reading wb.parts directly to avoid
     // losing the pattern type info in the parsed model.
@@ -243,6 +256,7 @@ for (const r of reports) {
     if (r.parse !== 'ok' || r.render !== 'ok') continue;
     console.log(`    sheets=${r.sheetCount}  cells=${r.cells}  rich=${r.richCells}  formulas=${r.formulaCells}  merges=${r.merges}  images=${r.images}  tables=${r.tables}  charts=${r.charts}  pivots=${r.pivots}`);
     if (Object.keys(r.cfTypes).length) console.log(`    cf rules: ${JSON.stringify(r.cfTypes)}`);
+    if (r.definedNames) console.log(`    definedNames: ${r.definedNames}`);
     if (r.unknownIconSets?.length) console.log(`    ⚠  unknown iconSet(s): ${r.unknownIconSets.join(', ')}`);
     if (r.unknownPatternFills) console.log(`    ⚠  non-solid fills: ${JSON.stringify(r.unknownPatternFills)}`);
     if (r.unresolvedColors) console.log(`    ⚠  unresolved theme colours: ${r.unresolvedColors}`);
@@ -267,6 +281,7 @@ printMap('unsupported cf rule types',  tallies.unsupportedCfRuleTypes);
 printMap('unknown iconSet names',      tallies.unknownIconSets);
 printMap('unsupported pattern fills',  tallies.unknownPatternFills);
 printMap('dropped part directories',   tallies.droppedPartPrefixes);
+printMap('defined name prefixes',      tallies.definedNames);
 
 // Sheet-level <extLst> URIs, across every sheet of every file. URIs are
 // guid-like strings so we print them in full — the count column + a short
