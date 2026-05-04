@@ -1,0 +1,98 @@
+<style data-xlsxjs="">.xlsx { font-family: system-ui, sans-serif; }
+.xlsx table { border-collapse: separate; border-spacing: 0; }
+.xlsx th, .xlsx td { border: 1px solid #d0d0d0; padding: 2px 6px; }
+.xlsx th { background: #f3f3f3; font-weight: normal; color: #555; }
+.xlsx td.xlsx-numeric { text-align: right; font-variant-numeric: tabular-nums; }
+.xlsx .xlsx-sheet-name { margin: 1rem 0 0.25rem; font-size: 1rem; font-weight: 600; }
+.xlsx .xlsx-frozen-col { position: sticky; left: 0; z-index: 1; background: inherit; }
+.xlsx .xlsx-frozen-row { position: sticky; top: 0; z-index: 2; background: inherit; }
+.xlsx .xlsx-frozen-both { position: sticky; left: 0; top: 0; z-index: 3; background: inherit; }
+.xlsx .xlsx-autofilter::after { content: " ▾"; color: #888; font-size: 0.85em; }
+.xlsx .xlsx-validation-list::after { content: " ▾"; color: #888; font-size: 0.85em; }
+.xlsx a.xlsx-hyperlink { color: #0563c1; text-decoration: underline; }
+.xlsx .xlsx-table-caption { font-size: 0.85em; color: #666; margin: 0.25rem 0 0; }
+.xlsx .xlsx-chart-placeholder {
+    border: 1px dashed #999; padding: 1em; margin: 0.5em 0;
+    color: #666; font-size: 0.9em; text-align: center;
+}
+.xlsx .xlsx-shape {
+    border: 1px solid #e0e0e0; border-radius: 2px;
+    padding: 0.5em; margin: 0.5em 0;
+    color: #555; font-size: 0.9em;
+}
+.xlsx .xlsx-shape[data-kind="connector"] {
+    border-style: dashed; color: #888;
+}
+.xlsx .xlsx-shape pre {
+    margin: 0; white-space: pre-line;
+    font-family: inherit; font-size: inherit;
+}
+.xlsx .xlsx-spill-anchor { outline: 1px dashed #0066cc; outline-offset: -1px; }
+.xlsx .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
+.xlsx .xlsx-threaded { color: #0066cc; margin-left: 4px; cursor: help; }
+.xlsx .xlsx-shrink-to-fit { font-size: clamp(0.55em, 0.95em, 1em); overflow: hidden; }
+.xlsx.xlsx-no-gridlines th, .xlsx.xlsx-no-gridlines td { border: none; }
+.xlsx.xlsx-no-headers thead tr > th:first-child,
+.xlsx.xlsx-no-headers tbody tr > th:first-child { display: none; }
+.xlsx.xlsx-no-headers thead tr:first-child { display: none; }
+.xlsx .xlsx-outline-1 > th:first-child { padding-left: 0.5rem; }
+.xlsx .xlsx-outline-2 > th:first-child { padding-left: 1rem; }
+.xlsx .xlsx-outline-3 > th:first-child { padding-left: 1.5rem; }
+.xlsx .xlsx-outline-4 > th:first-child { padding-left: 2rem; }
+.xlsx .xlsx-outline-5 > th:first-child { padding-left: 2.5rem; }
+.xlsx .xlsx-outline-6 > th:first-child { padding-left: 3rem; }
+.xlsx .xlsx-outline-7 > th:first-child { padding-left: 3.5rem; }
+.xlsx col.xlsx-outline-1 { border-left: 2px solid #ddd; }
+.xlsx col.xlsx-outline-2 { border-left: 3px solid #ccc; }
+.xlsx col.xlsx-outline-3 { border-left: 4px solid #bbb; }
+.xlsx .xlsx-header, .xlsx .xlsx-footer {
+    display: grid; grid-template-columns: 1fr 1fr 1fr;
+    font-size: 0.85em; color: #666; margin: 0.5em 0;
+}</style>
+<section class="xlsx" data-sheet-name="Align">
+<div class="xlsx-sheet-name">Align</div>
+<table>
+<colgroup>
+<col>
+<col>
+</colgroup>
+<thead>
+<tr>
+<th>
+</th>
+<th>A</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<th>1</th>
+<td style="white-space: normal; word-break: break-word;">line one
+line two</td>
+</tr>
+<tr>
+<th>2</th>
+<td style="transform: rotate(-90deg); transform-origin: center center; display: inline-block;">ROT90</td>
+</tr>
+<tr>
+<th>3</th>
+<td style="writing-mode: vertical-lr;">STACK</td>
+</tr>
+<tr>
+<th>4</th>
+<td style="text-align: left; padding-left: 1.5em;">indented</td>
+</tr>
+<tr>
+<th>5</th>
+<td style="text-align: right; direction: rtl;">rtl text</td>
+</tr>
+<tr>
+<th>6</th>
+<td class="xlsx-shrink-to-fit">shrinkme text that is quite long</td>
+</tr>
+<tr>
+<th>7</th>
+<td style="text-align: justify; text-align-last: justify; vertical-align: middle;">distrib</td>
+</tr>
+</tbody>
+</table>
+</section>

@@ -30,7 +30,9 @@
     "serve": "node scripts/dev-server.mjs",
     "dev": "npm run build && npm run serve",
     "test": "playwright test",
-    "test:render": "npm run build && node scripts/test-render.mjs"
+    "test:render": "npm run build && node scripts/test-render.mjs",
+    "test:golden": "npm run build && node scripts/golden-diff.mjs",
+    "test:golden:capture": "npm run build && node scripts/golden-diff.mjs --capture"
   },
   "files": [
     "dist"
