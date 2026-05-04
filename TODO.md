@@ -22,10 +22,6 @@ Cleaned up 2026-05-04 to reflect reality after Waves 1–5.
   read-only indicator. No rendering side effect (cells are already read-only).
 - [ ] **Alt text on tables** (`table/@altText`, `table/@altTextSummary`) —
   accessibility label on defined tables; extend `TableDef`.
-- [ ] **Cell metadata / dynamic-array spill** (`xl/metadata.xml` + `c/@cm`,
-  `c/@vm`) — linked data types and spill-range metadata. Without this, rich
-  data types render as plain strings. Parse the metadata index and surface
-  it on the Cell model so consumers can style spill regions.
 - [ ] **Custom icon-set rule lists** (`iconSet/@custom='1'` + `cfIcon`
   children) — per-threshold icon overrides. We honour the default palette
   for the named set but drop per-rule overrides.
@@ -85,6 +81,11 @@ Cleaned up 2026-05-04 to reflect reality after Waves 1–5.
 
 ## Resolved in fork
 
+- ✅ **Cell metadata / dynamic-array spill** (`xl/metadata.xml` + `c/@cm`,
+  `c/@vm`) — `Workbook.metadata` exposes resolved `cellMetadata` /
+  `valueMetadata` blocks; `Cell.cellMetadataIndex` / `valueMetadataIndex` /
+  `isSpillAnchor` carry per-cell wiring; the renderer tags spill-anchor
+  cells with `.xlsx-spill-anchor`.
 - ✅ **Tiny wins** (encrypted file detection, `gray125` filter,
   `calcChain`/`printerSettings` filtered from dropped-parts tally).
 - ✅ **Classic comments** (`xl/comments*.xml`) — `Sheet.comments`, inline

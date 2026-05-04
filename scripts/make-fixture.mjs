@@ -1272,3 +1272,77 @@ await writeFixture('merged', {
     writeFileSync(out, buf);
     console.log(`wrote ${out} (${buf.length} bytes)`);
 }
+
+// ── cell-metadata ──────────────────────────────────────────────────────────
+// Exercises the xl/metadata.xml path. One cellMetadata block defines a
+// dynamic-array (XLDAPR) spill-anchor; A1 carries c/@cm="1" pointing at it,
+// B1 carries no metadata reference. Parser should:
+//   - populate Workbook.metadata with one cellMetadata block whose
+//     dynamicArray === true
+//   - flip Cell.isSpillAnchor on A1 only
+// Renderer should tag A1's <td> with .xlsx-spill-anchor.
+{
+    const outDir = resolve(repo, 'tests/render-test/cell-metadata');
+    mkdirSync(outDir, { recursive: true });
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+  <Override PartName="/xl/metadata.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheetMetadata+xml"/>
+</Types>`);
+    zip.file('_rels/.rels', rootRels);
+    zip.file('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.microsoft.com/office/2006/relationships/xlMetadata" Target="metadata.xml"/>
+</Relationships>`);
+    zip.file('xl/workbook.xml', workbookXml('Spill'));
+    // Two strings: anchor + plain neighbour.
+    zip.file('xl/sharedStrings.xml', sharedStringsXml(['anchor', 'plain']));
+    // A1 references cm=1 (→ cellMetadata[0]); B1 has no cm/vm.
+    zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="s" cm="1"><v>0</v></c>
+      <c r="B1" t="s"><v>1</v></c>
+    </row>
+  </sheetData>
+</worksheet>`);
+    // metadata.xml:
+    //   - one metadataType (XLDAPR).
+    //   - one futureMetadata entry carrying <xda:dynamicArrayProperties fDynamic="1"/>.
+    //   - one cellMetadata block: <rc t="1" v="0"/> → resolves to XLDAPR[0]
+    //     (the spill-anchor flag).
+    zip.file('xl/metadata.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<metadata xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+          xmlns:xda="http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray">
+  <metadataTypes count="1">
+    <metadataType name="XLDAPR" minSupportedVersion="120000" copy="1" pasteAll="1"
+                  pasteValues="1" merge="1" splitFirst="1" rowColShift="1"
+                  clearFormats="1" clearComments="1" assign="1" coerce="1"
+                  cellMeta="1"/>
+  </metadataTypes>
+  <futureMetadata name="XLDAPR" count="1">
+    <bk>
+      <extLst>
+        <ext uri="{BDBB8CDC-FA1E-496E-A857-3C3F30C029C3}">
+          <xda:dynamicArrayProperties fDynamic="1" fCollapsed="0"/>
+        </ext>
+      </extLst>
+    </bk>
+  </futureMetadata>
+  <cellMetadata count="1">
+    <bk><rc t="1" v="0"/></bk>
+  </cellMetadata>
+</metadata>`);
+    const buf = await zip.generateAsync({ type: 'nodebuffer' });
+    const out = resolve(outDir, 'workbook.xlsx');
+    writeFileSync(out, buf);
+    console.log(`wrote ${out} (${buf.length} bytes)`);
+}

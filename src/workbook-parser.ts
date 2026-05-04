@@ -106,6 +106,39 @@ export interface Cell {
     // Phonetic-ruby annotations inherited from the shared-string / inline-
     // string source. Null when the source <si>/<is> declared no <rPh>.
     phonetics: PhoneticRun[] | null;
+    // Index into Workbook.metadata.cellMetadata, resolved from c/@cm. null
+    // when the cell has no cm attribute. 0-based in our model even though
+    // the XML side is 1-based.
+    cellMetadataIndex: number | null;
+    // Index into Workbook.metadata.valueMetadata, resolved from c/@vm.
+    // Same null/0-based convention as cellMetadataIndex.
+    valueMetadataIndex: number | null;
+    // Shortcut: true when the resolved cellMetadata block is a dynamic-array
+    // (XLDAPR) type and the futureMetadata fDynamic flag is set. Lets the
+    // renderer tag spill-anchor cells without walking the indirection chain.
+    isSpillAnchor: boolean;
+}
+
+// A single block in the cellMetadata / valueMetadata list.
+export interface CellMetadataBlock {
+    // Index into the metadataTypes array; 0-based in our model even though
+    // the XML side is 1-based.
+    typeIndex: number;
+    // For dynamic-array types (XLDAPR), true when this cell is a spill anchor.
+    // False for any other metadata type, or when the resolved futureMetadata
+    // block had fDynamic="0".
+    dynamicArray: boolean;
+}
+
+// Workbook-wide cell metadata lifted from xl/metadata.xml. Excel 365 uses
+// this part to describe dynamic-array spill anchors (XLDAPR) and linked /
+// rich data types; xlsxjs exposes the resolved blocks and lets the renderer
+// tag spill-anchor cells via Cell.isSpillAnchor.
+export interface WorkbookMetadata {
+    // cellMetadata[i] is the block at 1-based index i+1 on the XML side.
+    cellMetadata: CellMetadataBlock[];
+    // Same for valueMetadata.
+    valueMetadata: CellMetadataBlock[];
 }
 
 export interface MergedRange {
@@ -467,6 +500,9 @@ export interface Workbook {
     // areas, print titles, autoFilter state) — no filtering here so
     // consumers see everything Excel persists.
     definedNames: DefinedName[];
+    // Resolved xl/metadata.xml blocks. Null when the package has no
+    // metadata part.
+    metadata: WorkbookMetadata | null;
 }
 
 const NS = {
@@ -478,6 +514,7 @@ const NS = {
     c:     'http://schemas.openxmlformats.org/drawingml/2006/chart',
     cx:    'http://schemas.microsoft.com/office/drawing/2014/chartex',
     tc:    'http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments',
+    xda:   'http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray',
 };
 
 export class WorkbookParser {
@@ -515,6 +552,9 @@ export class WorkbookParser {
 
         const sheetMeta = parseSheetList(workbookXml);
         const { date1904, definedNames } = parseWorkbookMeta(workbookXml);
+        const metadata = parts['xl/metadata.xml']
+            ? parseWorkbookMetadata(parts['xl/metadata.xml'])
+            : null;
         const sheets: Sheet[] = [];
         for (let i = 0; i < sheetMeta.length; i++) {
             const { name, rId, state } = sheetMeta[i];
@@ -535,11 +575,94 @@ export class WorkbookParser {
             const comments = resolveCommentsForSheet(xmlPath, parts);
             const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
             const hyperlinkTargets = resolveHyperlinkTargets(xmlPath, parts);
-            sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, shapes, pivots, comments, threadedComments, hyperlinkTargets, i, definedNames));
+            sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, shapes, pivots, comments, threadedComments, hyperlinkTargets, i, definedNames, metadata));
         }
 
-        return { sheets, styles, theme, persons, date1904, definedNames };
+        return { sheets, styles, theme, persons, date1904, definedNames, metadata };
     }
+}
+
+// Parse xl/metadata.xml into a resolved WorkbookMetadata. We care about two
+// things:
+//   - <metadataTypes> — name → index map so we know which cellMetadata
+//     blocks are dynamic-array (XLDAPR) vs. other types (XLRICHVALUE etc.).
+//   - <futureMetadata name="XLDAPR"> — each <bk>/<extLst>/<ext>/<xda:…> child
+//     indicates whether that future-metadata index is a dynamic-array flag
+//     (fDynamic="1" = spill anchor; "0" = suppressed).
+//   - <cellMetadata> / <valueMetadata> — each <bk> wraps one or more <rc>
+//     entries; we read the first <rc t="typeIndex" v="valueIndex"/> pair.
+//     The type's name + the resolved futureMetadata block combine to tell
+//     the renderer whether this block flips Cell.isSpillAnchor.
+export function parseWorkbookMetadata(xml: string): WorkbookMetadata {
+    const doc = parseXml(xml);
+
+    // 1-based XML index → type name. Absent / out-of-range indexes fall
+    // through to null in the resolver.
+    const typeNames: string[] = [];
+    const typeEls = doc.getElementsByTagNameNS(NS.main, 'metadataType');
+    for (let i = 0; i < typeEls.length; i++) {
+        typeNames.push(typeEls[i].getAttribute('name') ?? '');
+    }
+
+    // Map metadata type name → list of bool flags (one per <bk> entry).
+    // For XLDAPR, the flag is fDynamic; other types stay empty (we don't
+    // interpret them). The <bk> ordering is 0-based from xlsxjs's perspective
+    // and matches the `v` attribute on <rc t="…" v="…"/>.
+    const futureFlagsByType = new Map<string, boolean[]>();
+    const fmEls = doc.getElementsByTagNameNS(NS.main, 'futureMetadata');
+    for (let i = 0; i < fmEls.length; i++) {
+        const fm = fmEls[i];
+        const name = fm.getAttribute('name') ?? '';
+        const bkEls = fm.getElementsByTagNameNS(NS.main, 'bk');
+        const flags: boolean[] = [];
+        for (let j = 0; j < bkEls.length; j++) {
+            const bk = bkEls[j];
+            let dynamic = false;
+            // Dynamic-array flag lives under bk/extLst/ext/xda:dynamicArrayProperties.
+            const daProps = bk.getElementsByTagNameNS(NS.xda, 'dynamicArrayProperties').item(0);
+            if (daProps) {
+                const attr = daProps.getAttribute('fDynamic');
+                dynamic = attr === '1' || attr === 'true';
+            }
+            flags.push(dynamic);
+        }
+        futureFlagsByType.set(name, flags);
+    }
+
+    // Resolve a single <bk> block under <cellMetadata> or <valueMetadata>.
+    // Each <bk> has one or more <rc t="typeIdx1based" v="valueIdx0based"/>;
+    // we take the first, which is Excel's convention for the XLDAPR case.
+    const resolveBlock = (bk: Element): CellMetadataBlock => {
+        const rc = bk.getElementsByTagNameNS(NS.main, 'rc').item(0);
+        const t = rc ? Number(rc.getAttribute('t')) : NaN;
+        const v = rc ? Number(rc.getAttribute('v')) : NaN;
+        const typeIndex = Number.isFinite(t) && t >= 1 ? t - 1 : -1;
+        const typeName = typeIndex >= 0 && typeIndex < typeNames.length
+            ? typeNames[typeIndex]
+            : '';
+        let dynamicArray = false;
+        if (typeName === 'XLDAPR') {
+            const flags = futureFlagsByType.get('XLDAPR');
+            if (flags && Number.isFinite(v) && v >= 0 && v < flags.length) {
+                dynamicArray = flags[v];
+            }
+        }
+        return { typeIndex, dynamicArray };
+    };
+
+    const readList = (listTag: string): CellMetadataBlock[] => {
+        const out: CellMetadataBlock[] = [];
+        const wrap = doc.getElementsByTagNameNS(NS.main, listTag).item(0);
+        if (!wrap) return out;
+        const bks = wrap.getElementsByTagNameNS(NS.main, 'bk');
+        for (let i = 0; i < bks.length; i++) out.push(resolveBlock(bks[i]));
+        return out;
+    };
+
+    return {
+        cellMetadata: readList('cellMetadata'),
+        valueMetadata: readList('valueMetadata'),
+    };
 }
 
 // Parse the small set of workbook-wide flags we care about from xl/workbook.xml.
@@ -1401,6 +1524,7 @@ function parseSheet(
     hyperlinkTargets: Map<string, string> = new Map(),
     sheetIndex: number = 0,
     definedNames: DefinedName[] = [],
+    metadata: WorkbookMetadata | null = null,
 ): Sheet {
     const doc = parseXml(xml);
     const rowEls = doc.getElementsByTagNameNS(NS.main, 'row');
@@ -1438,7 +1562,7 @@ function parseSheet(
         const cellEls = rowEl.getElementsByTagNameNS(NS.main, 'c');
         const cells: Cell[] = [];
         for (let j = 0; j < cellEls.length; j++) {
-            const cell = parseCell(cellEls[j], rowIndex, sharedStrings);
+            const cell = parseCell(cellEls[j], rowIndex, sharedStrings, metadata);
             if (!cell) continue;
             cells.push(cell);
             if (cell.col > maxCol) maxCol = cell.col;
@@ -1927,7 +2051,12 @@ function parseCols(doc: Document): ColumnWidth[] {
     return out;
 }
 
-function parseCell(c: Element, fallbackRow: number, sharedStrings: SharedString[]): Cell | null {
+function parseCell(
+    c: Element,
+    fallbackRow: number,
+    sharedStrings: SharedString[],
+    metadata: WorkbookMetadata | null = null,
+): Cell | null {
     const ref = c.getAttribute('r');
     let col = 0, row = fallbackRow;
     if (ref) {
@@ -1944,7 +2073,32 @@ function parseCell(c: Element, fallbackRow: number, sharedStrings: SharedString[
     const formula = fEl ? (fEl.textContent ?? '') : null;
     const styleAttr = c.getAttribute('s');
     const styleIndex = styleAttr != null && Number.isFinite(Number(styleAttr)) ? Number(styleAttr) : -1;
-    const base = { col, row, styleIndex, formula };
+
+    // Metadata indices (c/@cm, c/@vm) — 1-based on the XML side; store 0-based.
+    const resolveMetaIdx = (attr: string, list: CellMetadataBlock[] | undefined): number | null => {
+        const raw = c.getAttribute(attr);
+        if (raw == null || raw === '') return null;
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n <= 0) return null;
+        const zero = Math.floor(n) - 1;
+        if (!list) return zero;
+        // Out-of-range indexes still populate so consumers can see the
+        // producer's intent; the isSpillAnchor flag just falls through to
+        // false.
+        return zero;
+    };
+    const cellMetadataIndex = resolveMetaIdx('cm', metadata?.cellMetadata);
+    const valueMetadataIndex = resolveMetaIdx('vm', metadata?.valueMetadata);
+    let isSpillAnchor = false;
+    if (cellMetadataIndex !== null && metadata) {
+        const block = metadata.cellMetadata[cellMetadataIndex];
+        if (block && block.dynamicArray) isSpillAnchor = true;
+    }
+
+    const base = {
+        col, row, styleIndex, formula,
+        cellMetadataIndex, valueMetadataIndex, isSpillAnchor,
+    };
 
     switch (type) {
         case 's': {
