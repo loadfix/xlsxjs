@@ -686,6 +686,49 @@ async function renderFixture(path, options) {
     assert(fn('1234', 'General').text === '1234', '24i: General integer');
 }
 
+// ── 25. Threaded comments: parent + reply thread, 💬 marker title ─────────
+{
+    const { wb, container } = await renderFixture('threaded-comments');
+    const sheet = wb.parsed.sheets[0];
+
+    // Workbook persons registry parsed: two authors.
+    assert(wb.parsed.persons.size === 2, `25a: persons registry should have 2 entries (got ${wb.parsed.persons.size})`);
+    assert([...wb.parsed.persons.values()].includes('Alice'), '25b: Alice should be registered');
+    assert([...wb.parsed.persons.values()].includes('Bob'), '25c: Bob should be registered');
+
+    // Sheet.threadedComments populated with the parent + reply.
+    assert(sheet.threadedComments.length === 2, `25d: expected 2 threaded comments (got ${sheet.threadedComments.length})`);
+    const byAuthor = sheet.threadedComments.reduce((acc, c) => { acc[c.author ?? 'null'] = c; return acc; }, {});
+    assert(byAuthor['Alice'] && byAuthor['Alice'].parentId === null, '25e: Alice is the thread starter');
+    assert(byAuthor['Bob'] && byAuthor['Bob'].parentId === byAuthor['Alice'].id,
+        `25f: Bob's comment should reference Alice's id as parentId (got ${byAuthor['Bob']?.parentId})`);
+    assert(byAuthor['Alice'].col === 0 && byAuthor['Alice'].row === 0, '25g: anchored at A1');
+    assert(byAuthor['Alice'].text === 'Please double-check this figure.', `25h: Alice text (got ${byAuthor['Alice']?.text})`);
+    assert(byAuthor['Bob'].text === 'Checked — looks correct.', `25i: Bob text (got ${byAuthor['Bob']?.text})`);
+
+    // DOM: one 💬 marker on A1, its title contains both authors + both texts
+    // in chronological (parent-first) order.
+    const markers = container.querySelectorAll('span.xlsx-threaded');
+    assert(markers.length === 1, `25j: expected 1 threaded marker (got ${markers.length})`);
+    const marker = markers[0];
+    assert(marker.classList.contains('xlsx-comment-marker'), '25k: marker carries .xlsx-comment-marker');
+    assert(marker.getAttribute('role') === 'note', '25l: marker role=note');
+    assert(marker.textContent === '💬', `25m: marker glyph (got ${marker.textContent})`);
+    const title = marker.getAttribute('title') ?? '';
+    assert(title.includes('Alice'), `25n: title should mention Alice (got "${title}")`);
+    assert(title.includes('Bob'), `25o: title should mention Bob (got "${title}")`);
+    assert(title.includes('double-check'), `25p: title should include Alice's text (got "${title}")`);
+    assert(title.includes('Checked'), `25q: title should include Bob's reply (got "${title}")`);
+    assert(title.indexOf('Alice') < title.indexOf('Bob'), `25r: parent (Alice) should precede reply (Bob) in title`);
+
+    // Security: title text made it in via setAttribute — no <, >, or &
+    // interpretation.  Cell text (shared string) is plain 'Review this',
+    // not polluted by the comment body.
+    const a1Td = container.querySelectorAll('section.xlsx tbody tr td')[0];
+    assert(a1Td.firstChild.nodeType === 3 /* text */ || a1Td.textContent.startsWith('Review this'),
+        `25s: A1 cell text should start with cell value, not comment text (got "${a1Td.textContent}")`);
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

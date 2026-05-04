@@ -2,7 +2,7 @@
 // sheet, each containing an <h2> sheet name and a <table> of the cells.
 // Numeric cells get a numeric-aligned class; other kinds render as text.
 
-import type { Workbook, Sheet, Cell, MergedRange, RichTextRun, FrozenPanes } from './workbook-parser';
+import type { Workbook, Sheet, Cell, MergedRange, RichTextRun, FrozenPanes, ThreadedCommentEntry } from './workbook-parser';
 import { indexToColumnLetters } from './utils';
 import { h } from './html';
 import type { Options } from './xlsx-preview';
@@ -53,6 +53,7 @@ function renderStyle(className: string): HTMLStyleElement {
 .${className} .xlsx-frozen-both { position: sticky; left: 0; top: 0; z-index: 3; background: inherit; }
 .${className} .xlsx-autofilter::after { content: " ▾"; color: #888; font-size: 0.85em; }
 .${className} .xlsx-table-caption { font-size: 0.85em; color: #666; margin: 0.25rem 0 0; }
+.${className} .xlsx-threaded { color: #0066cc; margin-left: 4px; cursor: help; }
     `.trim();
     return style;
 }
@@ -341,6 +342,17 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, o
     const dxfByCell = resolveConditionalFormats(sheet, styles);
     const graphicalByCell = resolveGraphicalConditionalFormats(sheet, theme);
 
+    // Threaded comments grouped by anchor cell. Thread entries carry
+    // parent/reply structure; we keep them in document order here and let
+    // the title-formatter order parents before their replies.
+    const threadedByCell = new Map<string, ThreadedCommentEntry[]>();
+    for (const entry of sheet.threadedComments) {
+        const key = `${entry.row},${entry.col}`;
+        const list = threadedByCell.get(key);
+        if (list) list.push(entry);
+        else threadedByCell.set(key, [entry]);
+    }
+
     // Row dimensions by row index — applied to <tr>. Per-row height is set
     // on the <tr> (browsers honour this); hidden rows get display:none.
     const rowDim = new Map<number, typeof sheet.rowDimensions[0]>();
@@ -372,6 +384,8 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, o
             if (autoFilter && r === autoFilter.row && c >= autoFilter.col && c <= autoFilter.endCol) {
                 td.classList.add('xlsx-autofilter');
             }
+            const threaded = threadedByCell.get(`${r},${c}`);
+            if (threaded && threaded.length) appendThreadedCommentMarker(td, threaded);
             const merge = mergeByAnchor.get(`${r},${c}`);
             if (merge) {
                 if (merge.colSpan > 1) td.setAttribute('colspan', String(merge.colSpan));
@@ -422,6 +436,51 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, o
         section.appendChild(fig);
     }
     return section;
+}
+
+// Append a 💬 marker to a cell carrying one or more threaded comments.
+// The marker's `title` attribute holds the rendered thread — parents
+// first, their replies immediately after, in chronological (dT) order.
+// Author + text are attacker-controlled strings: they only ever reach
+// the DOM via setAttribute('title', …), never innerHTML.
+function appendThreadedCommentMarker(td: HTMLTableCellElement, entries: ThreadedCommentEntry[]): void {
+    const marker = document.createElement('span');
+    marker.className = 'xlsx-comment-marker xlsx-threaded';
+    marker.setAttribute('role', 'note');
+    marker.setAttribute('title', formatThreadTitle(entries));
+    marker.textContent = '💬';
+    td.appendChild(marker);
+}
+
+// Arrange thread entries so each parent is immediately followed by its
+// replies, with both parent and reply lists sorted chronologically by dT.
+// Entries with no parent whose parentId references nothing in this group
+// are treated as thread starters. Entries whose parent is missing are
+// emitted at the end so no data is lost.
+function formatThreadTitle(entries: ThreadedCommentEntry[]): string {
+    const byId = new Map<string, ThreadedCommentEntry>();
+    for (const e of entries) byId.set(e.id, e);
+
+    const sortByDate = (arr: ThreadedCommentEntry[]) =>
+        arr.slice().sort((a, b) => (a.date ?? '').localeCompare(b.date ?? ''));
+
+    const starters = sortByDate(entries.filter((e) => !e.parentId || !byId.has(e.parentId)));
+    const repliesByParent = new Map<string, ThreadedCommentEntry[]>();
+    for (const e of entries) {
+        if (!e.parentId || !byId.has(e.parentId)) continue;
+        const list = repliesByParent.get(e.parentId);
+        if (list) list.push(e);
+        else repliesByParent.set(e.parentId, [e]);
+    }
+
+    const ordered: ThreadedCommentEntry[] = [];
+    for (const starter of starters) {
+        ordered.push(starter);
+        const replies = repliesByParent.get(starter.id);
+        if (replies) for (const r of sortByDate(replies)) ordered.push(r);
+    }
+
+    return ordered.map((e) => `${e.author ?? 'Unknown'}: ${e.text}`).join('\n');
 }
 
 function tagFrozen(td: HTMLTableCellElement, row: number, col: number, panes: FrozenPanes): void {

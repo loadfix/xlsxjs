@@ -358,6 +358,71 @@ await writeFixture('formulas', {
 </worksheet>`,
 });
 
+// ── threaded-comments ──────────────────────────────────────────────────────
+// Excel 365's modern comment model: a workbook-wide person registry under
+// xl/persons/person.xml + per-sheet xl/threadedComments/threadedComment{N}.xml.
+// Two authors (Alice, Bob) and two comments at A1 forming a parent+reply
+// thread, plus the sheet rels pointing the sheet at the threadedComments
+// part and the workbook rels pointing at the persons part.
+{
+    const outDir = resolve(repo, 'tests/render-test/threaded-comments');
+    mkdirSync(outDir, { recursive: true });
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+  <Override PartName="/xl/threadedComments/threadedComment1.xml" ContentType="application/vnd.ms-excel.threadedcomments+xml"/>
+  <Override PartName="/xl/persons/person.xml" ContentType="application/vnd.ms-excel.person+xml"/>
+</Types>`);
+    zip.file('_rels/.rels', rootRels);
+    // Workbook rels: sheet + sharedStrings + person registry.
+    zip.file('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.microsoft.com/office/2017/10/relationships/person" Target="persons/person.xml"/>
+</Relationships>`);
+    zip.file('xl/workbook.xml', workbookXml('Thread'));
+    zip.file('xl/sharedStrings.xml', sharedStringsXml(['Review this']));
+    zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="A1" t="s"><v>0</v></c></row>
+  </sheetData>
+</worksheet>`);
+    // Sheet rels → threadedComments part.
+    zip.file('xl/worksheets/_rels/sheet1.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.microsoft.com/office/2017/10/relationships/threadedComment" Target="../threadedComments/threadedComment1.xml"/>
+</Relationships>`);
+    // Two authors.
+    zip.file('xl/persons/person.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<personList xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"
+            xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <person displayName="Alice" id="{AAAAAAAA-1111-2222-3333-444444444444}" userId="alice@example.com" providerId="AD"/>
+  <person displayName="Bob" id="{BBBBBBBB-1111-2222-3333-444444444444}" userId="bob@example.com" providerId="AD"/>
+</personList>`);
+    // Parent+reply thread at A1.
+    zip.file('xl/threadedComments/threadedComment1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"
+                   xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <threadedComment ref="A1" dT="2024-01-15T10:00:00" personId="{AAAAAAAA-1111-2222-3333-444444444444}" id="{C0000000-0000-0000-0000-000000000001}">
+    <text>Please double-check this figure.</text>
+  </threadedComment>
+  <threadedComment ref="A1" dT="2024-01-15T10:05:00" personId="{BBBBBBBB-1111-2222-3333-444444444444}" id="{C0000000-0000-0000-0000-000000000002}" parentId="{C0000000-0000-0000-0000-000000000001}">
+    <text>Checked — looks correct.</text>
+  </threadedComment>
+</ThreadedComments>`);
+    const buf = await zip.generateAsync({ type: 'nodebuffer' });
+    const out = resolve(outDir, 'workbook.xlsx');
+    writeFileSync(out, buf);
+    console.log(`wrote ${out} (${buf.length} bytes)`);
+}
+
 // ── merged ─────────────────────────────────────────────────────────────────
 // Horizontal merge on the title banner, custom column widths, a vertical
 // merge in the "Region" column.
