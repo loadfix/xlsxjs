@@ -2,8 +2,8 @@
 
 What's still open. The "Resolved in fork" block at the bottom tracks
 features that have shipped on `master` and live in the harness / fixtures.
-Last reconciled 2026-05-04 after Wave 9 (chart rendering, SmartArt tree,
-interactive form controls).
+Last reconciled 2026-05-04 after Wave 10 (chart scatter/area/stacked,
+interactive slicers + timeline slider, SmartArt hierarchy SVG).
 
 ## Open — medium items (one slice each)
 
@@ -11,34 +11,33 @@ _Empty — all medium slices shipped in Wave 7._
 
 ## Open — big projects (library-scale)
 
-- [ ] **Chart rendering (extended)** — Wave 9 ships column / bar / line /
-  pie for classic `c:chartSpace`. Still open: scatter / area, stacked +
-  3D variants, dual axes, trendlines, and every chartEx `cx:chartSpace`
-  (treemap / sunburst / waterfall / funnel / pareto / box-whisker /
-  histogram / map). Would eventually want a DrawingML subset + richer
-  axis/series layout.
-- [ ] **SmartArt (extended)** — Wave 9 ships hierarchy-tree detection +
-  an indented `<ul>` aside (`Sheet.smartArt` with full parent-child
-  structure). Still open: painting the actual diagram (hierarchy boxes,
-  connector arrows, cycle / matrix / radial layouts per `layout1.xml`).
-- [ ] **Slicer / timeline interactivity** — detect-only shipped in
-  Wave 8 (`Sheet.slicers` / `Sheet.timelines`). Open item is painting the
-  clickable filter-chip / timeline-slider UI and wiring the selection to
-  live pivot re-materialisation.
+- [ ] **Chart rendering (further)** — Waves 9-10 ship column / bar / line /
+  pie / scatter / area and stacked + percentStacked variants. Still open:
+  3D, stock, bubble, surface, radar, dual axes, trendlines, scatter smoothing,
+  stacked line, and every chartEx `cx:chartSpace` variant (treemap / sunburst /
+  waterfall / funnel / pareto / box-whisker / histogram / map).
+- [ ] **SmartArt layouts (further)** — Wave 10 ships the top-down hierarchy
+  layout as inline SVG (opt-in via `smartArtLayout: 'svg' | 'both'`).
+  Still open: orgchart branch-rail connectors, cycle (evenly-spaced around
+  a circle with curved arrows), matrix / radial / bracketed / process
+  layouts from `layout1.xml`.
+- [ ] **Pivot table interactivity** — filtering, grouping, drill-down UI.
+  Materialised values already render correctly; this is interaction on top.
+- [ ] **Slicer / timeline re-materialisation** — Wave 10 ships opt-in
+  chips + dual-handle slider (`interactiveSlicers: true`) that fire
+  `xlsx:slicer-change` / `xlsx:timeline-change` CustomEvents. Still open:
+  actually re-running the pivot data through the new filter server-side or
+  in-browser when the event fires.
 - [ ] **OLE payload extraction** — detect-only shipped in Wave 8
   (`Sheet.embeddings` + opt-in `inlineEmbeddings` → data: URL for
   package MIMEs). Open item is handing OLE CFB `.bin` payloads through an
   OLE CFB reader so embedded Word/Excel streams can be rendered inline
   rather than just surfaced as metadata.
-- [ ] **Pivot table interactivity** — filtering, grouping, drill-down UI.
-  Materialised values already render correctly; this is interaction on top.
-- [ ] **Form-control interactivity (extended)** — Wave 9 ships opt-in
-  live widgets (`Options.interactiveFormControls`) for checkbox / radio /
-  scrollbar / spinner / combo / list / button that update the `linkedCell`
-  on change. Still open: sheet-prefixed linkedCell refs
-  (`Sheet2!$A$1`), macro-assigned button click dispatch, and the legacy
-  VML fallback for producers that write controls via `xl/drawings/vmlDrawing*.vml`
-  without a ctrlProp part.
+- [ ] **Form-control interactivity (further)** — Wave 9 ships opt-in
+  live widgets (`interactiveFormControls`). Still open: sheet-prefixed
+  linkedCell refs (`Sheet2!$A$1`), macro-assigned button click dispatch, and
+  the legacy VML fallback for producers that write controls via
+  `xl/drawings/vmlDrawing*.vml` without a ctrlProp part.
 - [ ] **Encryption: actually decrypt** — password-protected `.xlsx` are OLE
   CFB containers. Today we detect them and throw. Decryption needs SHA-512
   + AES-CBC (+ RC4-40 for legacy) and an OLE CFB reader. Real project;
@@ -46,8 +45,36 @@ _Empty — all medium slices shipped in Wave 7._
 
 ## Resolved in fork
 
-Most recent first (Wave 9 landed 2026-05-04). Earlier groupings blurred
+Most recent first (Wave 10 landed 2026-05-04). Earlier groupings blurred
 together in the interest of a readable tail.
+
+### Wave 10 (extensions, 2026-05-04)
+- ✅ **Chart scatter / area / stacked variants** — `ChartModel.kind` adds
+  `'scatter'` + `'area'`; `ChartModel.grouping` (`'standard' | 'stacked' |
+  'percentStacked' | null`) captures the `<c:grouping>` element on
+  bar / column / line / area. `ChartSeries.xValues` surfaces scatter's
+  `<c:xVal>`. Renderer paints stacked/percentStacked bar+column, scatter
+  circles (markers-only), and area paths (closed-fill at 70% opacity,
+  stacking when grouping demands). Fixture: `tests/render-test/charts-ext/`.
+  Still deferred: 3D / stock / surface / radar / chartEx variants,
+  scatter smoothing, stacked line.
+- ✅ **Interactive slicers + timeline** — `Options.interactiveSlicers`
+  (default off) swaps the detect-only slicer `<ul>` for a row of
+  `<button class="xlsx-slicer-chip" aria-pressed>` toggle chips (one per
+  cache item, not just selected). `SheetSlicer.allItems` now surfaces the
+  full item list; `SheetTimeline.bounds` exposes the cache's
+  `<state><bounds/>` date range so the interactive renderer can emit a
+  `<div class="xlsx-timeline-slider">` with two `<input type="range">`
+  handles. Chip clicks / handle drags fire `xlsx:slicer-change` and
+  `xlsx:timeline-change` CustomEvents on the aside; xlsxjs does not
+  re-materialise the pivot.
+- ✅ **SmartArt hierarchy SVG** — `renderSmartArtSvg(model)` paints the
+  tree as a top-down hierarchy: rounded-rect nodes sized ~100×40 with
+  a depth-indexed palette, centred labels, straight `<line>` connectors.
+  `Options.smartArtLayout` adds `'tree'` (default, byte-stable),
+  `'svg'` (SVG only), and `'both'` (SVG then `<ul>`). Orgchart and
+  cycle layouts currently fall back to the hierarchy renderer; native
+  variants to come.
 
 ### Wave 9 (first-class rendering + interactivity, 2026-05-04)
 - ✅ **Classic chart rendering** — `parseChart` (`src/chart-parser.ts`) +

@@ -37,7 +37,7 @@ The public surface is:
   `sanitizeHexColor`, `sanitizeFontFamily`, `sanitizeMediaMime`,
   `isSafeHyperlinkHref`, `bytesToDataUrl`, `a1ToR1c1`, `r1c1ToA1`,
   `emuToPx`, `evaluateRule`, `parseChart`, `renderChart`, `parseSmartArt`,
-  `applyFormControlUpdate`.
+  `renderSmartArtSvg`, `applyFormControlUpdate`.
 
 Options of note:
 
@@ -55,6 +55,13 @@ Options of note:
   HTML inputs whose change events update the `linkedCell` cell in the
   rendered DOM. Default `false` (the detect-only aside from Wave 8 ships
   unchanged).
+- `interactiveSlicers: boolean` — opt in to clickable slicer chips +
+  dual-handle timeline slider. Changes fire `xlsx:slicer-change` /
+  `xlsx:timeline-change` CustomEvents on the aside. Default `false`.
+- `smartArtLayout: 'tree' | 'svg' | 'both'` — controls how SmartArt
+  diagrams render. `'tree'` (default, byte-stable) emits only the indented
+  `<ul>`; `'svg'` emits only the inline SVG hierarchy; `'both'` emits both
+  (SVG first for visual, `<ul>` after for accessibility / text).
 
 See `src/xlsx-preview.ts` for the full options list.
 
@@ -79,10 +86,12 @@ informational `<aside>` elements. Form-control widgets become live
 on opt-in (`interactiveFormControls: true`); slicer/timeline UI and
 pivot interactivity are still consumer territory.
 
-Classic chartSpace charts (column / bar / line / pie) render as inline
-SVG via `ChartModel` + `renderChart`. SmartArt hierarchy diagrams
-surface on `Sheet.smartArt` with the parsed tree and render as a nested
-`<ul>` aside (actual diagram geometry is consumer territory for now).
+Classic chartSpace charts (column / bar / line / pie / scatter / area,
+including stacked + percentStacked variants) render as inline SVG via
+`ChartModel` + `renderChart`. SmartArt hierarchy diagrams surface on
+`Sheet.smartArt` with the parsed tree and render as a nested `<ul>`
+aside by default; opt in to `smartArtLayout: 'svg'` / `'both'` for an
+inline SVG hierarchy via `renderSmartArtSvg`.
 
 Images render as absolutely-positioned `<figure>`s inside a zero-height
 `.xlsx-image-layer` above the `<table>`, so anchor coordinates place the
@@ -101,7 +110,7 @@ fallbacks, and double borders.
 ```bash
 npm install
 npm run build
-npm run test:render   # jsdom depth harness (99 scenarios)
+npm run test:render   # jsdom depth harness (105 scenarios)
 npm run test:golden   # golden HTML diff against result.html snapshots
 npm test              # Playwright browser smoke (real Chrome, port :3002)
 npm run dev           # static demo server at :8767
