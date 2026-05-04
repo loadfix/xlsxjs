@@ -2,7 +2,7 @@
 // sheet, each containing an <h2> sheet name and a <table> of the cells.
 // Numeric cells get a numeric-aligned class; other kinds render as text.
 
-import type { Workbook, Sheet, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, ThreadedCommentEntry } from './workbook-parser';
+import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, ThreadedCommentEntry } from './workbook-parser';
 import { indexToColumnLetters } from './utils';
 import { h } from './html';
 import type { Options } from './xlsx-preview';
@@ -31,6 +31,9 @@ export class HtmlRenderer {
         const nodes: Node[] = [];
         nodes.push(renderStyle(options.className));
         for (const sheet of workbook.sheets) {
+            // Skip hidden and veryHidden sheets — the demo's sheet-switcher
+            // omits them too so section/index pairings stay in sync.
+            if (sheet.state !== 'visible') continue;
             nodes.push(renderSheet(sheet, workbook.styles, workbook.theme, workbook.date1904, options));
         }
         return nodes;
@@ -60,6 +63,10 @@ function renderStyle(className: string): HTMLStyleElement {
 .${className} .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
 .${className} .xlsx-threaded { color: #0066cc; margin-left: 4px; cursor: help; }
 .${className} .xlsx-shrink-to-fit { font-size: clamp(0.55em, 0.95em, 1em); overflow: hidden; }
+.${className}.xlsx-no-gridlines th, .${className}.xlsx-no-gridlines td { border: none; }
+.${className}.xlsx-no-headers thead tr > th:first-child,
+.${className}.xlsx-no-headers tbody tr > th:first-child { display: none; }
+.${className}.xlsx-no-headers thead tr:first-child { display: none; }
     `.trim();
     return style;
 }
@@ -282,6 +289,7 @@ function resolveConditionalFormats(sheet: Sheet, styles: Styles | null): Map<str
 
 function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, date1904: boolean, options: Options): HTMLElement {
     const section = h('section', { class: options.className, 'data-sheet-name': sheet.name }) as HTMLElement;
+    applySheetView(section, sheet.view, theme);
     section.appendChild(h('div', { class: 'xlsx-sheet-name' }, [sheet.name]));
 
     const table = h('table') as HTMLTableElement;
@@ -527,6 +535,29 @@ function formatThreadTitle(entries: ThreadedCommentEntry[]): string {
     }
 
     return ordered.map((e) => `${e.author ?? 'Unknown'}: ${e.text}`).join('\n');
+}
+
+// Apply <sheetView>/<sheetPr> display hints to the section element.
+//   - rightToLeft       → section.dir = 'rtl'
+//   - !showGridLines    → .xlsx-no-gridlines class (CSS strips cell borders)
+//   - !showRowColHeaders→ .xlsx-no-headers class (CSS hides the header row
+//                         and the row-number gutter)
+//   - zoomScale !== 100 → section.style.zoom = (zoomScale / 100)
+//   - tabColor          → data-tab-color="#rrggbb" (no visual render)
+function applySheetView(section: HTMLElement, view: SheetView, theme: Theme | null): void {
+    if (view.rightToLeft) section.setAttribute('dir', 'rtl');
+    if (!view.showGridLines) section.classList.add('xlsx-no-gridlines');
+    if (!view.showRowColHeaders) section.classList.add('xlsx-no-headers');
+    if (view.zoomScale !== null && view.zoomScale !== 100) {
+        // Chrome honours the non-standard `zoom` property directly; Firefox
+        // would need `transform: scale(…)` as a fallback but we keep this
+        // simple — the property is ignored without errors elsewhere.
+        section.style.zoom = String(view.zoomScale / 100);
+    }
+    if (view.tabColor) {
+        const hex = resolveColor(view.tabColor, theme);
+        if (hex) section.setAttribute('data-tab-color', hex);
+    }
 }
 
 function tagFrozen(td: HTMLTableCellElement, row: number, col: number, panes: FrozenPanes): void {

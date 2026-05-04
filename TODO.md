@@ -169,13 +169,18 @@ already tracked elsewhere in this file is excluded.*
   reader. `formatNumber` takes an options bag with `date1904` that flips the
   epoch from 1899-12-30 to 1904-01-01 (no leap-bug fudge). `html-renderer.ts`
   threads the flag through per sheet. Harness scenario 37.
+- **Sheet visibility + view state** (`feat/sheet-view-state`) — `Sheet.state`
+  carries the `<sheet @state>` value (`visible` / `hidden` / `veryHidden`);
+  non-visible sheets are skipped by the renderer. A new `Sheet.view`
+  (`SheetView`) parses `<sheetView>` attributes `rightToLeft`,
+  `showGridLines`, `showRowColHeaders`, `zoomScale`, plus the
+  `<sheetPr><tabColor/>` colour. The renderer flips `section.dir="rtl"`,
+  adds `.xlsx-no-gridlines` / `.xlsx-no-headers` classes (CSS strips cell
+  borders / hides the gutter + header row), sets `section.style.zoom` for
+  non-100% zoom, and surfaces the resolved tab colour on
+  `data-tab-color`. Harness scenarios 38–40.
 
 ### Display & layout
-- **Sheet visibility state** (`workbook/sheets/sheet/@state` = `hidden`|`veryHidden`) — hidden and very-hidden sheets render as regular visible sheets; Excel's viewer omits them by default.
-- **Sheet tab colour** (`worksheet/sheetPr/tabColor`) — colored tab strip; shown as a DOM hook for consumers rendering a sheet-tab bar.
-- **Right-to-left sheet direction** (`worksheet/sheetViews/sheetView/@rightToLeft`) — swaps column A to the right edge and reverses row/column headers for Hebrew/Arabic sheets.
-- **Gridline / heading visibility toggles** (`sheetView/@showGridLines`, `@showRowColHeaders`) — sheets authored with gridlines off still render with them on in xlsxjs.
-- **Zoom level** (`sheetView/@zoomScale`, `@zoomScaleNormal`) — author-stored zoom; a 150% view on the source sheet renders at 100% here.
 - **Page breaks and print area** (`worksheet/rowBreaks`, `colBreaks`, `definedName@name='_xlnm.Print_Area'`) — the dashed break markers and print-preview shading Excel draws in Page Break Preview aren't surfaced at all.
 - **Header / footer text** (`worksheet/headerFooter/oddHeader`, `oddFooter`) — three-zone (&L/&C/&R) header/footer strings that show in Page Layout view.
 - **Split panes without freeze** (`pane/@state='split'`) — currently ignored; splits without freeze render as a single scrolling pane.

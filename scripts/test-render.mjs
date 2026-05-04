@@ -1061,6 +1061,71 @@ async function renderFixture(path, options) {
         `37d: fixture should expose date1904=false by default (got ${wb.parsed.date1904})`);
 }
 
+// ── 38. Sheet state: hidden/veryHidden drop the section; visible renders ──
+{
+    const { wb, container } = await renderFixture('sheet-view-state');
+    const sheets = wb.parsed.sheets;
+    assert(sheets.length === 3, `38a: expected 3 sheets in the parsed model (got ${sheets.length})`);
+    assert(sheets[0].name === 'Alpha' && sheets[0].state === 'visible',
+        `38b: Alpha should be visible (got ${sheets[0].state})`);
+    assert(sheets[1].name === 'Beta' && sheets[1].state === 'hidden',
+        `38c: Beta should be hidden (got ${sheets[1].state})`);
+    assert(sheets[2].name === 'Gamma' && sheets[2].state === 'visible',
+        `38d: Gamma should be visible (got ${sheets[2].state})`);
+
+    // Renderer drops hidden sheets entirely — only Alpha + Gamma emit sections.
+    const sections = container.querySelectorAll('section.xlsx');
+    assert(sections.length === 2, `38e: expected 2 rendered sections (Alpha + Gamma), got ${sections.length}`);
+    assert(sections[0].getAttribute('data-sheet-name') === 'Alpha', '38f: first section is Alpha');
+    assert(sections[1].getAttribute('data-sheet-name') === 'Gamma', '38g: second section is Gamma');
+}
+
+// ── 39. Sheet view: RTL + gridlines off on Gamma ───────────────────────────
+{
+    const { wb, container } = await renderFixture('sheet-view-state');
+    const gamma = wb.parsed.sheets[2];
+    assert(gamma.view.rightToLeft === true, `39a: Gamma view.rightToLeft should be true (got ${gamma.view.rightToLeft})`);
+    assert(gamma.view.showGridLines === false, `39b: Gamma view.showGridLines should be false (got ${gamma.view.showGridLines})`);
+    assert(gamma.view.showRowColHeaders === true, `39c: Gamma view.showRowColHeaders should default to true (got ${gamma.view.showRowColHeaders})`);
+    // Alpha carries the defaults.
+    const alpha = wb.parsed.sheets[0];
+    assert(alpha.view.rightToLeft === false, `39d: Alpha view.rightToLeft default false (got ${alpha.view.rightToLeft})`);
+    assert(alpha.view.showGridLines === true, `39e: Alpha view.showGridLines default true (got ${alpha.view.showGridLines})`);
+    assert(alpha.view.tabColor === null, `39f: Alpha view.tabColor default null (got ${JSON.stringify(alpha.view.tabColor)})`);
+
+    // DOM: section 1 = Gamma (sections array after Beta is dropped).
+    const sections = container.querySelectorAll('section.xlsx');
+    const gammaSection = sections[1];
+    assert(gammaSection.getAttribute('dir') === 'rtl',
+        `39g: Gamma section should have dir="rtl" (got "${gammaSection.getAttribute('dir')}")`);
+    assert(gammaSection.classList.contains('xlsx-no-gridlines'),
+        `39h: Gamma section should carry .xlsx-no-gridlines (got classes "${gammaSection.className}")`);
+    // Alpha section should not carry these flags.
+    const alphaSection = sections[0];
+    assert(alphaSection.getAttribute('dir') !== 'rtl',
+        `39i: Alpha section should NOT be rtl (got "${alphaSection.getAttribute('dir')}")`);
+    assert(!alphaSection.classList.contains('xlsx-no-gridlines'),
+        '39j: Alpha section should NOT carry .xlsx-no-gridlines');
+}
+
+// ── 40. Sheet view: tabColor surfaces as data-tab-color ───────────────────
+{
+    const { wb, container } = await renderFixture('sheet-view-state');
+    const gamma = wb.parsed.sheets[2];
+    assert(gamma.view.tabColor !== null, '40a: Gamma view.tabColor should be parsed');
+    assert(gamma.view.tabColor.kind === 'rgb' && gamma.view.tabColor.value === '#ff0000',
+        `40b: Gamma tabColor should be rgb #ff0000 (got ${JSON.stringify(gamma.view.tabColor)})`);
+
+    const sections = container.querySelectorAll('section.xlsx');
+    const gammaSection = sections[1];
+    assert(gammaSection.getAttribute('data-tab-color') === '#ff0000',
+        `40c: Gamma data-tab-color should be "#ff0000" (got "${gammaSection.getAttribute('data-tab-color')}")`);
+    // Alpha has no tab colour set.
+    const alphaSection = sections[0];
+    assert(alphaSection.getAttribute('data-tab-color') === null,
+        `40d: Alpha should have no data-tab-color (got "${alphaSection.getAttribute('data-tab-color')}")`);
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

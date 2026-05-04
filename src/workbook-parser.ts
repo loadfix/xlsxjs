@@ -186,8 +186,31 @@ export interface ThreadedCommentEntry {
     parentId: string | null;  // null for thread starter
 }
 
+// Per-sheet view state surfaced from <sheetViews><sheetView ...>/> plus the
+// tab colour under <sheetPr><tabColor/>. These are display-only hints —
+// xlsxjs renders them as section-level attributes / classes so consumers can
+// react (skip hidden sheets, flip direction, paint a tab strip, etc.).
+export interface SheetView {
+    // True when <sheetView rightToLeft="1"/>; the renderer flips the section's
+    // `dir` attribute to "rtl".
+    rightToLeft: boolean;
+    // False only when <sheetView showGridLines="0"/> — default is true.
+    showGridLines: boolean;
+    // False only when <sheetView showRowColHeaders="0"/> — default is true.
+    showRowColHeaders: boolean;
+    // Zoom percentage (100 = 100%). Null when no zoomScale was declared.
+    zoomScale: number | null;
+    // <sheetPr><tabColor .../>. Parsed via parseColorElement so the same rgb
+    // / theme+tint / indexed paths as cell fills resolve it.
+    tabColor: ColorRef | null;
+}
+
 export interface Sheet {
     name: string;
+    // From the <sheet state="…"/> attribute on xl/workbook.xml's <sheets>.
+    // 'visible' is the default; 'hidden' and 'veryHidden' suppress rendering
+    // (the former is user-toggleable in Excel, the latter VBA-only).
+    state: 'visible' | 'hidden' | 'veryHidden';
     rows: Cell[][]; // sparse: rows[rowIndex] may be undefined
     maxCol: number;
     maxRow: number;
@@ -204,6 +227,10 @@ export interface Sheet {
     extensions: SheetExtensionUri[];
     comments: SheetComment[];
     threadedComments: ThreadedCommentEntry[];
+    // Per-sheet display state. Never null — a sheet with no <sheetView> gets
+    // the documented defaults (showGridLines=true, showRowColHeaders=true,
+    // rightToLeft=false, zoomScale=null, tabColor=null).
+    view: SheetView;
 }
 
 export interface Workbook {
@@ -269,7 +296,7 @@ export class WorkbookParser {
         const { date1904 } = parseWorkbookMeta(workbookXml);
         const sheets: Sheet[] = [];
         for (let i = 0; i < sheetMeta.length; i++) {
-            const { name, rId } = sheetMeta[i];
+            const { name, rId, state } = sheetMeta[i];
             let xmlPath: string | null = null;
             const rel = rId ? rels.get(rId) : undefined;
             if (rel) {
@@ -286,7 +313,7 @@ export class WorkbookParser {
             const pivots = resolvePivotsForSheet(xmlPath, parts);
             const comments = resolveCommentsForSheet(xmlPath, parts);
             const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
-            sheets.push(parseSheet(name, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments));
+            sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments));
         }
 
         return { sheets, styles, theme, persons, date1904 };
@@ -779,15 +806,22 @@ function parseXml(xml: string): Document {
     return new DOMParser().parseFromString(xml, 'application/xml');
 }
 
-function parseSheetList(workbookXml: string): { name: string; rId: string | null }[] {
+function parseSheetList(workbookXml: string): { name: string; rId: string | null; state: 'visible' | 'hidden' | 'veryHidden' }[] {
     const doc = parseXml(workbookXml);
     const nodes = doc.getElementsByTagNameNS(NS.main, 'sheet');
-    const out: { name: string; rId: string | null }[] = [];
+    const out: { name: string; rId: string | null; state: 'visible' | 'hidden' | 'veryHidden' }[] = [];
     for (let i = 0; i < nodes.length; i++) {
         const rId = nodes[i].getAttributeNS(NS.rel, 'id');
+        // <sheet state="…"> is one of visible / hidden / veryHidden. Absent
+        // attribute defaults to visible; any unrecognised value falls back to
+        // visible so we don't silently drop sheets on malformed producers.
+        const stateAttr = nodes[i].getAttribute('state');
+        const state: 'visible' | 'hidden' | 'veryHidden' =
+            stateAttr === 'hidden' || stateAttr === 'veryHidden' ? stateAttr : 'visible';
         out.push({
             name: nodes[i].getAttribute('name') ?? `Sheet${i + 1}`,
             rId: rId || null,
+            state,
         });
     }
     return out;
@@ -888,6 +922,7 @@ function parseRun(el: Element): RichTextRun {
 
 function parseSheet(
     name: string,
+    state: 'visible' | 'hidden' | 'veryHidden',
     xml: string,
     sharedStrings: SharedString[],
     tables: TableDef[] = [],
@@ -954,12 +989,50 @@ function parseSheet(
     const frozenPanes = parseFrozenPanes(doc);
     const autoFilter = parseAutoFilter(doc);
     const extensions = collectExtensionUris(doc);
+    const view = parseSheetView(doc);
 
     return {
-        name, rows, maxCol, maxRow, merges, columns, rowDimensions,
+        name, state, rows, maxCol, maxRow, merges, columns, rowDimensions,
         conditionalFormatting, frozenPanes, autoFilter, tables, images,
-        charts, pivots, extensions, comments, threadedComments,
+        charts, pivots, extensions, comments, threadedComments, view,
     };
+}
+
+// Read per-sheet display state. The <sheetView> element lives under
+// <sheetViews> (first entry wins when Excel writes multiple, e.g. split
+// panes); the <tabColor> lives under <sheetPr> at the sheet root. All
+// defaults follow ECMA-376 §18.3.1.87 — grid lines and headers default
+// to true, everything else defaults to "no value".
+function parseSheetView(doc: Document): SheetView {
+    const defaults: SheetView = {
+        rightToLeft: false,
+        showGridLines: true,
+        showRowColHeaders: true,
+        zoomScale: null,
+        tabColor: null,
+    };
+    const sv = doc.getElementsByTagNameNS(NS.main, 'sheetView').item(0);
+    if (sv) {
+        defaults.rightToLeft = sv.getAttribute('rightToLeft') === '1';
+        const sgl = sv.getAttribute('showGridLines');
+        // Absent attribute → default true; explicit "0" → false.
+        if (sgl === '0') defaults.showGridLines = false;
+        const sh = sv.getAttribute('showRowColHeaders');
+        if (sh === '0') defaults.showRowColHeaders = false;
+        const zs = sv.getAttribute('zoomScale');
+        if (zs !== null) {
+            const n = Number(zs);
+            if (Number.isFinite(n) && n > 0) defaults.zoomScale = n;
+        }
+    }
+    // <sheetPr><tabColor .../> — scoped under the sheet-root's <sheetPr>
+    // child. parseColorElement handles rgb / theme+tint / indexed uniformly.
+    const sheetPr = doc.getElementsByTagNameNS(NS.main, 'sheetPr').item(0);
+    if (sheetPr) {
+        const tc = sheetPr.getElementsByTagNameNS(NS.main, 'tabColor').item(0);
+        if (tc) defaults.tabColor = parseColorElement(tc);
+    }
+    return defaults;
 }
 
 // Walk every <ext uri="…"> in the sheet xml (sheet-level <extLst>, and any

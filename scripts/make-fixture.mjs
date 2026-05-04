@@ -606,3 +606,71 @@ await writeFixture('merged', {
     writeFileSync(out, buf);
     console.log(`wrote ${out} (${buf.length} bytes)`);
 }
+
+// ── sheet-view-state ───────────────────────────────────────────────────────
+// Hand-built XLSX exercising the per-sheet display state:
+//   Alpha — visible, default view.
+//   Beta  — state="hidden"; renderer drops the section entirely.
+//   Gamma — visible, rightToLeft + showGridLines=0 + <sheetPr><tabColor rgb=FF0000/>.
+// The workbook rels pair each <sheet r:id> with the correct worksheet file so
+// the parser's rId→target resolution is also exercised.
+{
+    const outDir = resolve(repo, 'tests/render-test/sheet-view-state');
+    mkdirSync(outDir, { recursive: true });
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>`);
+    zip.file('_rels/.rels', rootRels);
+    zip.file('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/>
+</Relationships>`);
+    zip.file('xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Alpha" sheetId="1" r:id="rId1"/>
+    <sheet name="Beta"  sheetId="2" state="hidden" r:id="rId2"/>
+    <sheet name="Gamma" sheetId="3" r:id="rId3"/>
+  </sheets>
+</workbook>`);
+    // Alpha — default view, one cell.
+    zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>alpha</t></is></c></row>
+  </sheetData>
+</worksheet>`);
+    // Beta — hidden via workbook.xml's state attribute.
+    zip.file('xl/worksheets/sheet2.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>beta</t></is></c></row>
+  </sheetData>
+</worksheet>`);
+    // Gamma — RTL + gridlines off + red tab colour. <sheetPr> must come
+    // before <sheetViews> per the worksheet schema sequence.
+    zip.file('xl/worksheets/sheet3.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetPr><tabColor rgb="FFFF0000"/></sheetPr>
+  <sheetViews>
+    <sheetView rightToLeft="1" showGridLines="0" workbookViewId="0"/>
+  </sheetViews>
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>gamma</t></is></c></row>
+  </sheetData>
+</worksheet>`);
+    const buf = await zip.generateAsync({ type: 'nodebuffer' });
+    const out = resolve(outDir, 'workbook.xlsx');
+    writeFileSync(out, buf);
+    console.log(`wrote ${out} (${buf.length} bytes)`);
+}
