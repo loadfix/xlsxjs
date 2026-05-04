@@ -1,4 +1,5 @@
 import { Workbook } from './workbook';
+export { XlsxEncryptedError } from './workbook';
 import { WorkbookParser } from './workbook-parser';
 import { HtmlRenderer } from './html-renderer';
 import { h } from './html';

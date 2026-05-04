@@ -9,6 +9,28 @@
     (global = typeof globalThis !== 'undefined' ? globalThis : global || self, factory(global.xlsx = {}));
 })(this, (function (exports) { 'use strict';
 
+    class XlsxEncryptedError extends Error {
+        constructor() {
+            super('xlsx-preview: this file is encrypted (OLE CFB container). xlsxjs does not decrypt — remove the password in Excel and re-save.');
+            this.name = 'XlsxEncryptedError';
+        }
+    }
+    const OLE_CFB_MAGIC = [0xd0, 0xcf, 0x11, 0xe0];
+    async function bytesOf(data) {
+        if (data instanceof Uint8Array)
+            return data;
+        if (data instanceof ArrayBuffer)
+            return new Uint8Array(data);
+        if (typeof data?.arrayBuffer === 'function') {
+            return new Uint8Array(await data.arrayBuffer());
+        }
+        return null;
+    }
+    function isOleCfb(bytes) {
+        if (!bytes || bytes.length < 4)
+            return false;
+        return OLE_CFB_MAGIC.every((b, i) => bytes[i] === b);
+    }
     class Workbook {
         constructor() {
             this.parts = {};
@@ -17,6 +39,9 @@
         }
         static async load(data, parser) {
             const wb = new Workbook();
+            const bytes = await bytesOf(data);
+            if (isOleCfb(bytes))
+                throw new XlsxEncryptedError();
             const zip = await JSZip.loadAsync(data);
             const readIfPresent = async (path) => {
                 const f = zip.file(path);
@@ -2463,6 +2488,7 @@
         return wb;
     }
 
+    exports.XlsxEncryptedError = XlsxEncryptedError;
     exports.a1ToR1c1 = a1ToR1c1;
     exports.applyTint = applyTint;
     exports.defaultOptions = defaultOptions;

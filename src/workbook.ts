@@ -6,6 +6,34 @@ import { WorkbookParser, Workbook as ParsedWorkbook } from './workbook-parser';
 
 declare const JSZip: any;
 
+// Password-protected .xlsx files are OLE Compound File Binary containers,
+// not zips. Detecting this up front lets callers distinguish "bad zip" from
+// "encrypted" without having to interpret JSZip's error text.
+export class XlsxEncryptedError extends Error {
+    constructor() {
+        super('xlsx-preview: this file is encrypted (OLE CFB container). xlsxjs does not decrypt — remove the password in Excel and re-save.');
+        this.name = 'XlsxEncryptedError';
+    }
+}
+
+const OLE_CFB_MAGIC = [0xd0, 0xcf, 0x11, 0xe0];
+
+async function bytesOf(data: Blob | ArrayBuffer | Uint8Array): Promise<Uint8Array | null> {
+    if (data instanceof Uint8Array) return data;
+    if (data instanceof ArrayBuffer) return new Uint8Array(data);
+    // Blob → ArrayBuffer. Feature-detect because Node Buffer / jsdom Blob
+    // both satisfy the interface but via different paths.
+    if (typeof (data as Blob)?.arrayBuffer === 'function') {
+        return new Uint8Array(await (data as Blob).arrayBuffer());
+    }
+    return null;
+}
+
+function isOleCfb(bytes: Uint8Array | null): boolean {
+    if (!bytes || bytes.length < 4) return false;
+    return OLE_CFB_MAGIC.every((b, i) => bytes[i] === b);
+}
+
 export class Workbook {
     parts: Record<string, string> = {};
     // Binary media parts (xl/media/*). Kept as data: URLs so the renderer
@@ -15,6 +43,9 @@ export class Workbook {
 
     static async load(data: Blob | ArrayBuffer | Uint8Array, parser: WorkbookParser): Promise<Workbook> {
         const wb = new Workbook();
+        // Cheap pre-flight: detect OLE CFB magic before JSZip chokes on it.
+        const bytes = await bytesOf(data);
+        if (isOleCfb(bytes)) throw new XlsxEncryptedError();
         const zip = await JSZip.loadAsync(data);
 
         const readIfPresent = async (path: string): Promise<string | null> => {

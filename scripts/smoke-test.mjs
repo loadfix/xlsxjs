@@ -140,16 +140,19 @@ for (const file of files) {
     // Count patternFill types we didn't honour (only 'solid' lands today).
     // We look at the raw styles.xml by reading wb.parts directly to avoid
     // losing the pattern type info in the parsed model.
+    //
+    // `gray125` is Excel's default fills[1] on every workbook; we render
+    // nothing for it (correct), and surfacing it in the report drowns out
+    // real signal. Skip it.
     const stylesXml = wb.parts['xl/styles.xml'];
     if (stylesXml) {
         const fillMatches = [...stylesXml.matchAll(/patternType="([^"]+)"/g)];
         const patternCounts = new Map();
         for (const m of fillMatches) {
             const pt = m[1];
-            if (pt !== 'solid' && pt !== 'none') {
-                bump(patternCounts, pt);
-                bump(tallies.unknownPatternFills, pt);
-            }
+            if (pt === 'solid' || pt === 'none' || pt === 'gray125') continue;
+            bump(patternCounts, pt);
+            bump(tallies.unknownPatternFills, pt);
         }
         if (patternCounts.size) report.unknownPatternFills = Object.fromEntries(patternCounts);
     }
@@ -183,11 +186,15 @@ for (const file of files) {
     // what's worth building next.
     const zip = await JSZip.loadAsync(buf);
     const kept = new Set(Object.keys(wb.parts).concat(Object.keys(wb.media)));
+    // Render-irrelevant parts. calcChain is a formula dependency graph;
+    // printerSettings is binary printer config. Intentionally dropped.
+    const RENDER_IRRELEVANT = /^xl\/(calcChain\.xml|printerSettings\/|customProperty|connections\.xml)/;
     for (const p of Object.keys(zip.files)) {
         if (zip.files[p].dir) continue;
         if (!p.startsWith('xl/')) continue;          // skip [Content_Types].xml etc.
         if (p.endsWith('.rels')) continue;           // we don't parse rels we don't need
         if (kept.has(p)) continue;
+        if (RENDER_IRRELEVANT.test(p)) continue;
         // Categorise by first sub-directory under xl/ (or the filename when
         // the part sits in xl/ directly). e.g. "xl/pivotCache/..." → "pivotCache".
         const rest = p.slice('xl/'.length);
