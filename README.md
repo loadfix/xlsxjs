@@ -34,13 +34,18 @@ The public surface is:
   path: parse + render in one call.
 - `defaultOptions` — the options object used when none is passed.
 - Test-visible helpers: `formatNumber`, `parseStyles`, `resolveEffectiveXf`,
-  `sanitizeHexColor`, `sanitizeFontFamily`, `isSafeHyperlinkHref`, `a1ToR1c1`,
-  `r1c1ToA1`, `emuToPx`, `evaluateRule`.
+  `sanitizeHexColor`, `sanitizeFontFamily`, `sanitizeMediaMime`,
+  `isSafeHyperlinkHref`, `bytesToDataUrl`, `a1ToR1c1`, `r1c1ToA1`,
+  `emuToPx`, `evaluateRule`.
 
 Options of note:
 
 - `showFormulas: boolean` — replace cell text with the `<f>` formula.
 - `formulaNotation: 'a1' | 'r1c1'` — which formula dialect to render.
+- `inlineEmbeddings: boolean` — opt in to base64-inlining embedded files
+  (PDFs, inner xlsx/docx/pptx, images) as `data:` URLs with an
+  `<a download>` affordance. 32 MiB cap + MIME allowlist; OLE CFB `.bin`
+  streams stay un-inlined.
 
 See `src/xlsx-preview.ts` for the full options list.
 
@@ -56,6 +61,14 @@ Drawings beyond raster images (`xdr:sp` text boxes / WordArt and
 geometry, text body, and anchor coordinates; the renderer emits an
 `<aside class="xlsx-shape">` per shape with an inline SVG for recognised
 presets (rect, ellipse, line, triangle, arrows, callouts, flowchart shapes).
+
+Form controls (`Sheet.formControls`), slicers (`Sheet.slicers`),
+timelines (`Sheet.timelines`), and OLE / package embeddings
+(`Sheet.embeddings`) all surface as detect-only models with metadata —
+kind, anchor, linkedCell, selectedItems, progId, etc. — and render as
+informational `<aside>` elements. xlsxjs does not paint the live
+interactive widgets; consumers who want real widgets can hydrate against
+the data-attributes.
 
 Images render as absolutely-positioned `<figure>`s inside a zero-height
 `.xlsx-image-layer` above the `<table>`, so anchor coordinates place the
@@ -74,7 +87,7 @@ fallbacks, and double borders.
 ```bash
 npm install
 npm run build
-npm run test:render   # jsdom depth harness (85 scenarios)
+npm run test:render   # jsdom depth harness (92 scenarios)
 npm run test:golden   # golden HTML diff against result.html snapshots
 npm test              # Playwright browser smoke (real Chrome, port :3002)
 npm run dev           # static demo server at :8767

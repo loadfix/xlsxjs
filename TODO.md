@@ -2,8 +2,8 @@
 
 What's still open. The "Resolved in fork" block at the bottom tracks
 features that have shipped on `master` and live in the harness / fixtures.
-Last reconciled 2026-05-04 after Wave 7 (golden diff, in-flow images,
-shape SVGs, expression rules, security review).
+Last reconciled 2026-05-04 after Wave 8 (form controls, slicers/timelines,
+OLE embeddings — all detect-only).
 
 ## Open — medium items (one slice each)
 
@@ -18,13 +18,20 @@ _Empty — all medium slices shipped in Wave 7._
 - [ ] **SmartArt** (`xl/diagrams/*.xml` — `data1.xml` + `layout1.xml` +
   `quickStyle1.xml`) — hierarchy / process diagrams. Outer shape container
   surfaces today but the graph layout is untouched.
-- [ ] **Form controls** (`xl/ctrlProps/*.xml` + VML fallback) — buttons,
-  checkboxes, dropdowns. The outer `<xdr:sp>` surfaces as a SheetShape;
-  checked/unchecked state and macro labels aren't decoded.
-- [ ] **Slicers and timelines** — widgets rendered over pivot tables. We
-  detect them (`Sheet.pivots`) but don't paint the filter chip UI.
-- [ ] **OLE objects / embedded files** (`xl/embeddings/*.bin`) — embedded
-  PDFs, Word docs, equations. Render as missing content today.
+- [ ] **Form-control interactivity** — detect-only shipped in Wave 8
+  (`Sheet.formControls` + `<aside class="xlsx-form-control">`). Open item
+  is rendering live clickable widgets (radios/checkboxes update
+  `linkedCell` on click, scrollbar drives `val`, etc.). Needs a VML
+  decoder for legacy `xl/drawings/vmlDrawing*.vml` checkbox state.
+- [ ] **Slicer / timeline interactivity** — detect-only shipped in
+  Wave 8 (`Sheet.slicers` / `Sheet.timelines`). Open item is painting the
+  clickable filter-chip / timeline-slider UI and wiring the selection to
+  live pivot re-materialisation.
+- [ ] **OLE payload extraction** — detect-only shipped in Wave 8
+  (`Sheet.embeddings` + opt-in `inlineEmbeddings` → data: URL for
+  package MIMEs). Open item is handing OLE CFB `.bin` payloads through an
+  OLE CFB reader so embedded Word/Excel streams can be rendered inline
+  rather than just surfaced as metadata.
 - [ ] **Pivot table interactivity** — filtering, grouping, drill-down UI.
   Materialised values already render correctly; this is interaction on top.
 - [ ] **Encryption: actually decrypt** — password-protected `.xlsx` are OLE
@@ -34,8 +41,34 @@ _Empty — all medium slices shipped in Wave 7._
 
 ## Resolved in fork
 
-Most recent first (Wave 7 landed 2026-05-04). Earlier groupings blurred
+Most recent first (Wave 8 landed 2026-05-04). Earlier groupings blurred
 together in the interest of a readable tail.
+
+### Wave 8 (detect-only slices, 2026-05-04)
+- ✅ **Form-control detection** — `Sheet.formControls: SheetFormControl[]`
+  surfaces kind (button / checkbox / radio / combo / list / scrollbar /
+  spinner / groupBox / label / dialog), label, `linkedCell`, `inputRange`,
+  `checked`, `min` / `max` / `inc` / `page` / `val`, `dropLines`, `altText`.
+  The renderer emits `<aside class="xlsx-form-control">` inside the
+  image-layer with data attributes + ☐/☑/○/● glyphs for boolean controls
+  and a `<legend>` for group boxes. No live widget — consumers hydrate
+  against the DOM.
+- ✅ **Slicer + timeline detection** — `Sheet.slicers: SheetSlicer[]` and
+  `Sheet.timelines: SheetTimeline[]`. Slicer fields: name, caption,
+  cache, sourceName, columnCount, style, showCaption, rowHeight,
+  selectedItems. Timeline fields: name, caption, cache, sourceName,
+  level (years/quarters/months/days), selectedRange, showHeader /
+  showSelectionLabel / showTimeLevel / showHorizontalScrollbar, style.
+  Renderer emits `<aside class="xlsx-slicer">` + `<aside class="xlsx-timeline">`
+  after the table with caption headers and selected-item `<li>`s.
+- ✅ **OLE / package embedding detection** — `Sheet.embeddings: SheetEmbedding[]`
+  surfaces kind ('ole' | 'package'), contentType, fileName, progId, anchor
+  coords, size, altText. Binaries stay raw by default; `inlineEmbeddings: true`
+  in Options projects the payload through `bytesToDataUrl` (32 MiB cap) with
+  a MIME allowlist (pdf / xlsx / docx / pptx / txt / images), emitting an
+  `<a download>` child. OLE `.bin` CFB payloads are never inlined (outside
+  the allowlist) even with the flag on — raw CFB bytes never reach a
+  `data:` URL.
 
 ### Wave 7 (medium items, 2026-05-04)
 - ✅ **Golden HTML diff mode** — `scripts/golden-diff.mjs` captures each
