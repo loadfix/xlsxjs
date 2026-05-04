@@ -2391,6 +2391,134 @@ async function renderFixture(path, options) {
     assert(topPx === 0, `78i: figure top === 0 at row 0 anchor (got "${fig.style.top}")`);
 }
 
+
+// ── 79. shape-presets: parser surfaces all six SheetShapes ───────────────
+// The shape-presets fixture ships six shapes in two rows: rect, ellipse,
+// line (as cxnSp), triangle, rightArrow, and flowChartDecision. Line is
+// a connector (kind="connector"); the other five are kind="shape". We
+// assert preset / kind per slot plus the twoCellAnchor endCol/endRow so
+// any future parser reorder is caught.
+{
+    const { wb } = await renderFixture('shape-presets');
+    const sheet = wb.parsed.sheets[0];
+    assert(Array.isArray(sheet.shapes), '79a: Sheet.shapes should be an array');
+    assert(sheet.shapes.length === 6,
+        `79b: expected 6 shapes in fixture (got ${sheet.shapes.length})`);
+    assert(sheet.images.length === 0,
+        `79c: fixture has no images (got ${sheet.images.length})`);
+    assert(sheet.charts.length === 0,
+        `79d: fixture has no charts (got ${sheet.charts.length})`);
+
+    const presets = sheet.shapes.map((s) => s.preset);
+    for (const wanted of ['rect', 'ellipse', 'line', 'triangle', 'rightArrow', 'flowChartDecision']) {
+        assert(presets.includes(wanted),
+            `79e: fixture should include preset "${wanted}" (got presets=${JSON.stringify(presets)})`);
+    }
+
+    // Kind partitioning: only the `line` shape is a connector.
+    const connectors = sheet.shapes.filter((s) => s.kind === 'connector');
+    assert(connectors.length === 1,
+        `79f: exactly one connector expected (got ${connectors.length})`);
+    assert(connectors[0].preset === 'line',
+        `79g: the connector's preset should be "line" (got ${JSON.stringify(connectors[0].preset)})`);
+
+    // All shapes are twoCellAnchor → endCol/endRow are populated.
+    for (const s of sheet.shapes) {
+        assert(s.endCol !== null && s.endRow !== null,
+            `79h: shape ${JSON.stringify(s.preset)} should carry endCol/endRow (got ${s.endCol}/${s.endRow})`);
+    }
+}
+
+// ── 80. shape-presets renderer: every known preset aside carries <svg> ──
+// For each of the six fixture shapes, the rendered <aside class="xlsx-shape">
+// should contain a direct-child <svg>. The plain-aside fallback is
+// verified too: an ad-hoc unknown preset parses and surfaces with no SVG
+// child. We use `renderShapePreset` directly (re-exported as a library
+// helper is out of scope — this one is an in-renderer module) to sanity
+// check the unknown-preset path.
+{
+    const { container } = await renderFixture('shape-presets');
+    const asides = container.querySelectorAll('section.xlsx aside.xlsx-shape');
+    assert(asides.length === 6,
+        `80a: expected 6 shape asides (got ${asides.length})`);
+
+    for (const aside of asides) {
+        const preset = aside.getAttribute('data-preset');
+        const svg = aside.querySelector(':scope > svg');
+        assert(!!svg,
+            `80b: aside data-preset="${preset}" should contain a direct-child <svg>`);
+        // SVG must carry the viewBox we render at (0 0 100 100) so CSS
+        // can size it freely.
+        assert(svg?.getAttribute('viewBox') === '0 0 100 100',
+            `80c: aside data-preset="${preset}" <svg> should carry viewBox="0 0 100 100" (got "${svg?.getAttribute('viewBox')}")`);
+    }
+
+    // The existing shapes-and-textboxes fixture also has a `rect` +
+    // `line` preset pair, so its asides must pick up SVGs too — confirms
+    // we didn't break the other render path.
+    const other = await renderFixture('shapes-and-textboxes');
+    const otherAsides = other.container.querySelectorAll('section.xlsx aside.xlsx-shape');
+    for (const aside of otherAsides) {
+        const svg = aside.querySelector(':scope > svg');
+        assert(!!svg,
+            `80d: shapes-and-textboxes aside (preset=${aside.getAttribute('data-preset')}) should also carry an <svg> child`);
+    }
+
+    // The text-box from shapes-and-textboxes also has a <pre> — the <svg>
+    // and <pre> should be siblings, both direct children of the aside.
+    const shapeAside = Array.from(otherAsides).find((el) => el.getAttribute('data-kind') === 'shape');
+    if (shapeAside) {
+        const pre = shapeAside.querySelector(':scope > pre');
+        assert(!!pre, '80e: text-box aside should keep its <pre> child alongside the <svg>');
+    }
+}
+
+// ── 81. shape-presets: specific preset → specific SVG primitive ──────────
+// Spot-check three presets so a future refactor of the SVG palette can't
+// silently demote any of them to a generic `<rect>`. ellipse → <ellipse>
+// (or <circle>), rightArrow → <path>, triangle → <polygon>.
+{
+    const { container } = await renderFixture('shape-presets');
+    const asides = Array.from(container.querySelectorAll('section.xlsx aside.xlsx-shape'));
+    const byPreset = {};
+    for (const a of asides) {
+        const p = a.getAttribute('data-preset');
+        if (p) byPreset[p] = a;
+    }
+
+    const ellipseAside = byPreset['ellipse'];
+    assert(!!ellipseAside, '81a: ellipse preset aside present');
+    if (ellipseAside) {
+        const el = ellipseAside.querySelector(':scope > svg ellipse, :scope > svg circle');
+        assert(!!el,
+            `81b: ellipse preset should render an <ellipse> or <circle> (got SVG inner: ${ellipseAside.querySelector('svg')?.innerHTML})`);
+    }
+
+    const arrowAside = byPreset['rightArrow'];
+    assert(!!arrowAside, '81c: rightArrow preset aside present');
+    if (arrowAside) {
+        const pathEl = arrowAside.querySelector(':scope > svg path');
+        assert(!!pathEl,
+            `81d: rightArrow preset should render a <path> (got SVG inner: ${arrowAside.querySelector('svg')?.innerHTML})`);
+    }
+
+    const triAside = byPreset['triangle'];
+    assert(!!triAside, '81e: triangle preset aside present');
+    if (triAside) {
+        const poly = triAside.querySelector(':scope > svg polygon');
+        assert(!!poly,
+            `81f: triangle preset should render a <polygon> (got SVG inner: ${triAside.querySelector('svg')?.innerHTML})`);
+    }
+
+    const lineAside = byPreset['line'];
+    assert(!!lineAside, '81g: line preset aside present');
+    if (lineAside) {
+        const lineEl = lineAside.querySelector(':scope > svg line');
+        assert(!!lineEl,
+            `81h: line preset should render a <line> (got SVG inner: ${lineAside.querySelector('svg')?.innerHTML})`);
+    }
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
