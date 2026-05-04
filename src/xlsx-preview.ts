@@ -2,6 +2,7 @@ import { Workbook } from './workbook';
 export { XlsxEncryptedError, sanitizeMediaMime, bytesToDataUrl, MAX_EMBEDDING_BYTES } from './workbook';
 import { WorkbookParser } from './workbook-parser';
 import { HtmlRenderer } from './html-renderer';
+export { applyFormControlUpdate } from './html-renderer';
 import { h } from './html';
 
 export type { Workbook as ParsedWorkbook, Sheet, SheetView, Cell, RichTextRun, SharedString, PhoneticRun, FrozenPanes, AutoFilter, TableDef, SheetChart, SheetPivot, SheetSlicer, SheetTimeline, SheetExtensionUri, SheetImage, SheetEmbedding, SheetComment, ThreadedCommentEntry, SheetOutline, DefinedName, ColumnWidth, RowDimension, Hyperlink, DataValidationList, PageBreaks, PrintAreaRange, HeaderFooter, HeaderFooterZones } from './workbook-parser';
@@ -34,6 +35,13 @@ export interface Options {
     // model and DOM memory. Oversized payloads (>32 MiB) or MIMEs outside
     // the sanitizer's allowlist keep `dataUrl` null even when this is true.
     inlineEmbeddings: boolean;
+    // Opt-in live form-control widgets. When true, the renderer swaps the
+    // detect-only <aside class="xlsx-form-control"> body for a real form
+    // input (checkbox / radio / range / number / select / button) tied to
+    // the control's `linkedCell`. The aside's data-attributes still surface
+    // so consumers can still inspect the control's metadata. Default off to
+    // keep Wave-8 golden output byte-stable.
+    interactiveFormControls: boolean;
     h: typeof h;
 }
 
@@ -44,6 +52,7 @@ export const defaultOptions: Options = {
     showFormulas: false,
     formulaNotation: 'a1',
     inlineEmbeddings: false,
+    interactiveFormControls: false,
     h,
 };
 

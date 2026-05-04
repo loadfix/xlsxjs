@@ -3307,6 +3307,157 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 93. interactive form-controls: opt-in swaps <aside> body for inputs ──
+// With Options.interactiveFormControls=true the detect-only glyph/label
+// body is replaced by a real HTML input tied to the control's linkedCell.
+// Checkbox → <input type="checkbox" checked>, radio → <input type="radio">
+// with a stable name attr, scrollbar → <input type="range" min/max/value>,
+// combo → <select> with one <option> per cell in inputRange, button →
+// <button type="button">label</button>. Default-off (Wave 8 snapshot)
+// remains byte-stable — asserted by test:golden.
+{
+    const { container } = await renderFixture('form-controls', { interactiveFormControls: true });
+    const asides = container.querySelectorAll('section.xlsx aside.xlsx-form-control');
+    assert(asides.length === 5,
+        `93a: expected 5 <aside class="xlsx-form-control"> elements (got ${asides.length})`);
+
+    const byKind = new Map();
+    for (const a of asides) byKind.set(a.getAttribute('data-kind'), a);
+
+    // Checkbox: <input type="checkbox" checked /> preceded by the glyph span.
+    const cb = byKind.get('checkbox');
+    if (cb) {
+        const input = cb.querySelector('input[type="checkbox"]');
+        assert(!!input, '93b: checkbox aside should contain <input type="checkbox">');
+        assert(input?.checked === true,
+            `93c: checkbox input should start checked (got ${input?.checked})`);
+        // The leading glyph span is still present so consumer CSS hooks still work.
+        assert(cb.querySelector('.xlsx-form-control-glyph') !== null,
+            '93d: checkbox aside should still carry a leading glyph span');
+    }
+
+    // Radio: <input type="radio"> with a stable name attribute (no attacker
+    // content — we derive the name from the control's inputRange or anchor).
+    const rb = byKind.get('radio');
+    if (rb) {
+        const input = rb.querySelector('input[type="radio"]');
+        assert(!!input, '93e: radio aside should contain <input type="radio">');
+        assert(typeof input?.getAttribute('name') === 'string' && input.getAttribute('name').length > 0,
+            `93f: radio input should carry a name attribute (got ${JSON.stringify(input?.getAttribute('name'))})`);
+        assert(/^xlsx-radio-/.test(input?.getAttribute('name') ?? ''),
+            `93g: radio input name should start with "xlsx-radio-" (got ${JSON.stringify(input?.getAttribute('name'))})`);
+    }
+
+    // Scrollbar: <input type="range" min="0" max="100" value="42">.
+    const scroll = byKind.get('scrollbar');
+    if (scroll) {
+        const input = scroll.querySelector('input[type="range"]');
+        assert(!!input, '93h: scrollbar aside should contain <input type="range">');
+        assert(input?.getAttribute('min') === '0',
+            `93i: scrollbar min should be "0" (got ${JSON.stringify(input?.getAttribute('min'))})`);
+        assert(input?.getAttribute('max') === '100',
+            `93j: scrollbar max should be "100" (got ${JSON.stringify(input?.getAttribute('max'))})`);
+        assert(input?.value === '42',
+            `93k: scrollbar initial value should be "42" (got ${JSON.stringify(input?.value)})`);
+    }
+
+    // Combo: <select> with 4 <option>s populated from $E$1:$E$4
+    // (Red / Green / Blue / Yellow per the fixture).
+    const combo = byKind.get('combo');
+    if (combo) {
+        const select = combo.querySelector('select');
+        assert(!!select, '93l: combo aside should contain a <select> element');
+        const opts = select?.querySelectorAll('option') ?? [];
+        assert(opts.length === 4,
+            `93m: combo should have 4 <option>s from inputRange (got ${opts.length})`);
+        const texts = [...opts].map((o) => o.textContent);
+        assert(texts.includes('Red') && texts.includes('Yellow'),
+            `93n: combo option texts should include Red + Yellow (got ${JSON.stringify(texts)})`);
+    }
+
+    // Button: <button type="button">Click me</button>.
+    const btn = byKind.get('button');
+    if (btn) {
+        const b = btn.querySelector('button');
+        assert(!!b, '93o: button aside should contain a <button>');
+        assert(b?.getAttribute('type') === 'button',
+            `93p: button type attribute should be "button" (got ${JSON.stringify(b?.getAttribute('type'))})`);
+        assert(b?.textContent === 'Click me',
+            `93q: button textContent should be "Click me" (got ${JSON.stringify(b?.textContent)})`);
+    }
+
+    // Linked-cell metadata still reaches the DOM as data-attrs so consumers
+    // that inspect the aside can still read it.
+    if (cb) {
+        assert(cb.getAttribute('data-linked-cell') === '$A$1',
+            `93r: checkbox data-linked-cell should still be "$A$1" (got ${JSON.stringify(cb.getAttribute('data-linked-cell'))})`);
+    }
+}
+
+// ── 94. interactive form-controls: change/input events mutate linked td ──
+// The linked cell's <td> textContent reflects the new value after the
+// widget fires its change/input event. Checkbox writes 'TRUE'/'FALSE' as
+// Excel does; scrollbar writes the slider's numeric value as a string.
+// This is UI-only — the parsed model is never mutated.
+{
+    const { container } = await renderFixture('form-controls', { interactiveFormControls: true });
+
+    // Flip the checkbox (initially checked) and dispatch a synthetic change
+    // event. The linked cell is $A$1 (row 0, col 0); after the event its
+    // <td> textContent should read 'FALSE'.
+    const cb = container.querySelector('aside.xlsx-form-control[data-kind="checkbox"] input[type="checkbox"]');
+    assert(!!cb, '94a: checkbox input should be present in the interactive render');
+    if (cb) {
+        cb.checked = false;
+        cb.dispatchEvent(new window.Event('change', { bubbles: true }));
+        const tr = container.querySelectorAll('section.xlsx tbody tr')[0];
+        // Skip the <th> row-number gutter; the A1 cell sits at children[1].
+        const td = tr?.children[1];
+        assert(td?.textContent === 'FALSE',
+            `94b: after unchecking, linked cell $A$1 should read "FALSE" (got ${JSON.stringify(td?.textContent)})`);
+    }
+
+    // Drag the scrollbar to 60 and dispatch an input event. Linked cell
+    // is $A$4 → row 3, col 0. Initial value ('42' from the fixture) should
+    // flip to '60'.
+    const sc = container.querySelector('aside.xlsx-form-control[data-kind="scrollbar"] input[type="range"]');
+    assert(!!sc, '94c: scrollbar input should be present in the interactive render');
+    if (sc) {
+        sc.value = '60';
+        sc.dispatchEvent(new window.Event('input', { bubbles: true }));
+        const tr = container.querySelectorAll('section.xlsx tbody tr')[3];
+        const td = tr?.children[1];
+        assert(td?.textContent === '60',
+            `94d: after sliding to 60, linked cell $A$4 should read "60" (got ${JSON.stringify(td?.textContent)})`);
+    }
+
+    // Sheet-prefixed linkedCell (Sheet2!$A$1) is intentionally NOT
+    // supported in Wave 9 — the library warns + skips the update. We
+    // exercise the exported helper directly to make the skip visible.
+    const { applyFormControlUpdate } = globalThis.xlsx;
+    assert(typeof applyFormControlUpdate === 'function',
+        '94e: applyFormControlUpdate should be exposed as part of the UMD surface');
+    if (typeof applyFormControlUpdate === 'function') {
+        const firstTr = container.querySelectorAll('section.xlsx tbody tr')[0];
+        const before = firstTr?.children[1]?.textContent;
+        // Capture warnings during the skip so we can assert the library
+        // logged before returning.
+        const originalWarn = console.warn;
+        const warnings = [];
+        console.warn = (msg) => warnings.push(msg);
+        try {
+            applyFormControlUpdate(container, 'Sheet2!$A$1', 'anything');
+        } finally {
+            console.warn = originalWarn;
+        }
+        const after = firstTr?.children[1]?.textContent;
+        assert(before === after,
+            `94f: sheet-prefixed linkedCell update should NOT mutate the td (got before=${JSON.stringify(before)}, after=${JSON.stringify(after)})`);
+        assert(warnings.some((w) => typeof w === 'string' && w.includes('sheet-prefixed')),
+            `94g: sheet-prefixed skip should log a console.warn (got ${JSON.stringify(warnings)})`);
+    }
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

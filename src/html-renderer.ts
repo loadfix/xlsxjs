@@ -4,7 +4,7 @@
 
 import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, SheetShape, SheetSlicer, SheetTimeline, SheetImage, SheetEmbedding, SheetFormControl, RowDimension, ThreadedCommentEntry, Hyperlink, PhoneticRun } from './workbook-parser';
 import { isSafeHyperlinkHref } from './workbook-parser';
-import { indexToColumnLetters, emuToPx } from './utils';
+import { indexToColumnLetters, emuToPx, parseCellRef } from './utils';
 import { h } from './html';
 import type { Options } from './xlsx-preview';
 import { lookupNumberFormat, resolveEffectiveXf, sanitizeFontFamily, type Styles, type CellXf, type FontStyle, type FillStyle, type BorderStyle, type Dxf } from './styles';
@@ -58,7 +58,7 @@ export class HtmlRenderer {
             // Skip hidden and veryHidden sheets — the demo's sheet-switcher
             // omits them too so section/index pairings stay in sync.
             if (sheet.state !== 'visible') continue;
-            nodes.push(renderSheet(sheet, workbook.styles, workbook.theme, workbook.date1904, options));
+            nodes.push(renderSheet(sheet, workbook, options));
         }
         return nodes;
     }
@@ -439,7 +439,10 @@ function resolveConditionalFormats(sheet: Sheet, styles: Styles | null, date1904
     return out;
 }
 
-function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, date1904: boolean, options: Options): HTMLElement {
+function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLElement {
+    const styles = workbook.styles;
+    const theme = workbook.theme;
+    const date1904 = workbook.date1904;
     const section = h('section', { class: options.className, 'data-sheet-name': sheet.name }) as HTMLElement;
     applySheetView(section, sheet.view, theme);
     // Sheet-protection state surfaces as a data attribute so consumers can
@@ -691,7 +694,7 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
             imageLayer.appendChild(renderImage(img, widthByCol, hiddenCols, rowDim));
         }
         for (const fc of sheet.formControls) {
-            imageLayer.appendChild(renderFormControl(fc, widthByCol, hiddenCols, rowDim));
+            imageLayer.appendChild(renderFormControl(fc, widthByCol, hiddenCols, rowDim, options, sheet, workbook));
         }
         for (const emb of anchoredEmbeddings) {
             const aside = renderEmbedding(emb);
@@ -949,6 +952,9 @@ function renderFormControl(
     widthByCol: Map<number, number>,
     hiddenCols: Set<number>,
     rowDim: Map<number, RowDimension>,
+    options: Options,
+    sheet: Sheet,
+    workbook: Workbook,
 ): HTMLElement {
     const aside = document.createElement('aside');
     aside.className = 'xlsx-form-control';
@@ -976,6 +982,15 @@ function renderFormControl(
     const top = sumRowsPx(fc.row, rowDim) + emuToPx(fc.rowOff);
     aside.style.left = `${left}px`;
     aside.style.top = `${top}px`;
+
+    // Interactive path: when Options.interactiveFormControls is on, swap
+    // the detect-only glyph/label body for a real input. The aside still
+    // carries its data-attrs so consumers who want to inspect metadata can.
+    // Default-off keeps Wave-8 golden snapshots byte-stable.
+    if (options.interactiveFormControls) {
+        populateInteractiveFormControl(aside, fc, sheet, workbook);
+        return aside;
+    }
 
     // Glyph for the boolean controls — placed ahead of the label so the
     // aside's flex layout lines it up. Consumers who want different
@@ -1011,6 +1026,282 @@ function renderFormControl(
         aside.appendChild(txt);
     }
     return aside;
+}
+
+// Populate an interactive form-control aside with a real input element.
+// The aside already carries all the metadata data-attrs — we just attach
+// a widget + change/input listener that updates the linked cell's <td>
+// via applyFormControlUpdate. Radio groups are keyed on inputRange (or a
+// synthesized id from the col/row pair) so multiple radios share a name.
+// All attacker-controlled strings (labels, option text) reach the DOM via
+// textContent / setAttribute only.
+function populateInteractiveFormControl(
+    aside: HTMLElement,
+    fc: SheetFormControl,
+    sheet: Sheet,
+    workbook: Workbook,
+): void {
+    switch (fc.kind) {
+        case 'checkbox': {
+            // Leading glyph span so consumer CSS can still hook the icon.
+            // The glyph text tracks the input's state so the visual indicator
+            // stays in sync on change.
+            const glyph = document.createElement('span');
+            glyph.className = 'xlsx-form-control-glyph';
+            glyph.textContent = fc.checked ? '☑' : '☐';
+            aside.appendChild(glyph);
+            const input = document.createElement('input');
+            input.type = 'checkbox';
+            input.checked = !!fc.checked;
+            input.addEventListener('change', () => {
+                glyph.textContent = input.checked ? '☑' : '☐';
+                if (fc.linkedCell) {
+                    const container = resolveRenderRoot(aside);
+                    if (container) {
+                        applyFormControlUpdate(container, fc.linkedCell, input.checked ? 'TRUE' : 'FALSE');
+                    }
+                }
+            });
+            aside.appendChild(input);
+            if (fc.label) {
+                const label = document.createElement('span');
+                label.className = 'xlsx-form-control-label';
+                label.textContent = fc.label;
+                aside.appendChild(label);
+            }
+            return;
+        }
+        case 'radio': {
+            const glyph = document.createElement('span');
+            glyph.className = 'xlsx-form-control-glyph';
+            glyph.textContent = fc.checked ? '●' : '○';
+            aside.appendChild(glyph);
+            const input = document.createElement('input');
+            input.type = 'radio';
+            // Stable group id: prefer a synthesized key from the anchor
+            // column (Excel's radios tend to share a column inside a
+            // groupBox). Never interpolate attacker-controlled strings
+            // into the name attribute — `radioGroupKey` is built from
+            // integers only.
+            input.name = radioGroupName(fc, sheet);
+            input.checked = !!fc.checked;
+            input.addEventListener('change', () => {
+                glyph.textContent = input.checked ? '●' : '○';
+                if (fc.linkedCell && input.checked) {
+                    const container = resolveRenderRoot(aside);
+                    if (container) {
+                        applyFormControlUpdate(container, fc.linkedCell, 'TRUE');
+                    }
+                }
+            });
+            aside.appendChild(input);
+            if (fc.label) {
+                const label = document.createElement('span');
+                label.className = 'xlsx-form-control-label';
+                label.textContent = fc.label;
+                aside.appendChild(label);
+            }
+            return;
+        }
+        case 'scrollbar': {
+            const input = document.createElement('input');
+            input.type = 'range';
+            if (fc.min !== null) input.min = String(fc.min);
+            if (fc.max !== null) input.max = String(fc.max);
+            if (fc.inc !== null) input.step = String(fc.inc);
+            if (fc.val !== null) input.value = String(fc.val);
+            input.addEventListener('input', () => {
+                if (fc.linkedCell) {
+                    const container = resolveRenderRoot(aside);
+                    if (container) {
+                        applyFormControlUpdate(container, fc.linkedCell, input.value);
+                    }
+                }
+            });
+            aside.appendChild(input);
+            return;
+        }
+        case 'spinner': {
+            const input = document.createElement('input');
+            input.type = 'number';
+            if (fc.min !== null) input.min = String(fc.min);
+            if (fc.max !== null) input.max = String(fc.max);
+            if (fc.inc !== null) input.step = String(fc.inc);
+            if (fc.val !== null) input.value = String(fc.val);
+            input.addEventListener('input', () => {
+                if (fc.linkedCell) {
+                    const container = resolveRenderRoot(aside);
+                    if (container) {
+                        applyFormControlUpdate(container, fc.linkedCell, input.value);
+                    }
+                }
+            });
+            aside.appendChild(input);
+            return;
+        }
+        case 'combo':
+        case 'list': {
+            const select = document.createElement('select');
+            const optionTexts = fc.inputRange ? resolveInputRangeValues(fc.inputRange, sheet, workbook) : [];
+            for (const text of optionTexts) {
+                const opt = document.createElement('option');
+                opt.textContent = text;
+                // The option's value is the option text. setAttribute
+                // keeps attacker-controlled strings HTML-encoded.
+                opt.setAttribute('value', text);
+                select.appendChild(opt);
+            }
+            select.addEventListener('change', () => {
+                if (fc.linkedCell) {
+                    const container = resolveRenderRoot(aside);
+                    if (container) {
+                        applyFormControlUpdate(container, fc.linkedCell, select.value);
+                    }
+                }
+            });
+            aside.appendChild(select);
+            return;
+        }
+        case 'button': {
+            const btn = document.createElement('button');
+            btn.setAttribute('type', 'button');
+            if (fc.label) btn.textContent = fc.label;
+            // No action is wired — macros / VBA are out of scope. Button
+            // labels are attacker-controlled XLSX strings but land via
+            // textContent only.
+            aside.appendChild(btn);
+            return;
+        }
+        case 'groupBox': {
+            const legend = document.createElement('legend');
+            if (fc.label) legend.textContent = fc.label;
+            aside.appendChild(legend);
+            return;
+        }
+        case 'label':
+        case 'dialog':
+        case 'unknown':
+        default: {
+            if (fc.label) {
+                const txt = document.createElement('span');
+                txt.className = 'xlsx-form-control-label';
+                txt.textContent = fc.label;
+                aside.appendChild(txt);
+            }
+            return;
+        }
+    }
+}
+
+// Build a stable, non-attacker-derived name attribute for a radio input. We
+// prefer the inputRange (which is an A1 cell reference we already validate
+// via parseCellRef) when present; otherwise we fall back to the anchor
+// cell coordinates. The sheet's declared name never enters this string —
+// that's attacker content and the `name` attribute flows into HTML form
+// semantics.
+function radioGroupName(fc: SheetFormControl, sheet: Sheet): string {
+    // inputRange is an A1 range like `$E$1:$E$4` — safe ASCII only. We
+    // still route it through a strict regex to reject surprises. If
+    // the range doesn't match, or isn't present, use the anchor col.
+    const rangeOk = fc.inputRange && /^\$?[A-Z]+\$?[0-9]+(:\$?[A-Z]+\$?[0-9]+)?$/.test(fc.inputRange);
+    const sheetIndexKey = String(Math.max(0, fc.col));
+    const key = rangeOk ? fc.inputRange! : `${sheetIndexKey}`;
+    // Sanitise further for HTML: the regex above already guaranteed
+    // ASCII-only, but we strip any `$` so browsers don't surface a `$`-
+    // prefixed name attribute. The sheet name is intentionally NOT part
+    // of the string (would be attacker content).
+    const sanitized = key.replace(/[$:]/g, '_');
+    void sheet; // the sheet name is deliberately NOT part of the group id.
+    return `xlsx-radio-${sanitized}`;
+}
+
+// Resolve a combo/list control's inputRange to a flat list of option
+// strings by reading the cells in the range from the parsed workbook.
+// Sheet-prefixed ranges (e.g. `Sheet2!$E$1:$E$4`) are not supported in
+// Wave 9 — those return an empty array so the combo still renders as an
+// empty <select>. A1 range parsing is intentionally strict: a malformed
+// range short-circuits to [].
+function resolveInputRangeValues(inputRange: string, sheet: Sheet, _workbook: Workbook): string[] {
+    // Strip `$` anchors and the leading sheet prefix (if any).
+    if (inputRange.includes('!')) {
+        // Sheet-prefixed range — not supported in Wave 9.
+        console.warn(`xlsx-preview: sheet-prefixed form-control inputRange "${inputRange}" not supported; skipping`);
+        return [];
+    }
+    const clean = inputRange.replace(/\$/g, '');
+    const m = /^([A-Z]+[0-9]+)(?::([A-Z]+[0-9]+))?$/.exec(clean);
+    if (!m) return [];
+    const start = parseCellRef(m[1]);
+    if (!start) return [];
+    const end = m[2] ? parseCellRef(m[2]) : start;
+    if (!end) return [];
+    const out: string[] = [];
+    for (let r = start.row; r <= end.row; r++) {
+        for (let c = start.col; c <= end.col; c++) {
+            const cell = sheet.rows[r]?.find((x) => x.col === c);
+            if (cell && cell.value !== '') out.push(cell.value);
+        }
+    }
+    return out;
+}
+
+// Walk up from a form-control aside to the closest section.xlsx or the
+// containing document fragment so applyFormControlUpdate can find the td
+// that hosts the linked cell. The aside lives inside the image layer
+// inside its section, so the nearest `section.xlsx` is the right root.
+function resolveRenderRoot(el: HTMLElement): HTMLElement | null {
+    let cur: HTMLElement | null = el;
+    while (cur) {
+        if (cur.tagName === 'SECTION' && cur.classList.contains('xlsx')) return cur;
+        cur = cur.parentElement;
+    }
+    return null;
+}
+
+// Replace the textContent of the <td> at linkedCell's row/col with the
+// stringified newValue. linkedCell is an A1 ref (with optional `$`
+// anchors). Sheet-prefixed refs (`Sheet2!$A$1`) are not supported in
+// Wave 9 — they log a console.warn and skip the update.
+//
+// container is the root element the form controls were rendered into
+// (typically `section.xlsx` or a parent that contains one). We search
+// for the first matching `<td>` inside the first `section.xlsx tbody`:
+// xlsxjs renders each row as `<th row-number><td>…</td>…` so the td at
+// column `col` is at children[col + 1].
+//
+// This is a UI-only side effect. The parsed workbook model is NOT
+// mutated — consumers who need to persist state should read the td
+// textContent off the DOM themselves.
+export function applyFormControlUpdate(
+    container: HTMLElement,
+    linkedCell: string,
+    newValue: string,
+): void {
+    if (linkedCell.includes('!')) {
+        console.warn(`xlsx-preview: sheet-prefixed linkedCell "${linkedCell}" not supported; skipping update`);
+        return;
+    }
+    const clean = linkedCell.replace(/\$/g, '');
+    const ref = parseCellRef(clean);
+    if (!ref) return;
+    // Find the first section.xlsx inside (or equal to) the container; that's
+    // the sheet the form control sits on. Multi-sheet workbooks: consumers
+    // calling applyFormControlUpdate directly are responsible for passing
+    // the right section (the event-handler path above picks the enclosing
+    // section automatically).
+    const section = container.classList?.contains('xlsx') && container.tagName === 'SECTION'
+        ? container
+        : container.querySelector('section.xlsx');
+    if (!section) return;
+    const tbody = section.querySelector('tbody');
+    if (!tbody) return;
+    const tr = tbody.children[ref.row];
+    if (!tr) return;
+    // Each rendered row starts with a <th> (row number) gutter cell,
+    // so the data cell at column `col` lives at children[col + 1].
+    const td = tr.children[ref.col + 1];
+    if (!td) return;
+    td.textContent = newValue;
 }
 
 // Build an `<aside class="xlsx-slicer">` carrying the slicer's caption +
