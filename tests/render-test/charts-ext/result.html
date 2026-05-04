@@ -1,0 +1,328 @@
+<style data-xlsxjs="">.xlsx { font-family: system-ui, sans-serif; }
+.xlsx table { border-collapse: separate; border-spacing: 0; }
+.xlsx th, .xlsx td { border: 1px solid #d0d0d0; padding: 2px 6px; }
+.xlsx th { background: #f3f3f3; font-weight: normal; color: #555; }
+.xlsx td.xlsx-numeric { text-align: right; font-variant-numeric: tabular-nums; }
+.xlsx .xlsx-sheet-name { margin: 1rem 0 0.25rem; font-size: 1rem; font-weight: 600; }
+.xlsx .xlsx-frozen-col { position: sticky; left: 0; z-index: 1; background: inherit; }
+.xlsx .xlsx-frozen-row { position: sticky; top: 0; z-index: 2; background: inherit; }
+.xlsx .xlsx-frozen-both { position: sticky; left: 0; top: 0; z-index: 3; background: inherit; }
+.xlsx .xlsx-autofilter::after { content: " ▾"; color: #888; font-size: 0.85em; }
+.xlsx .xlsx-validation-list::after { content: " ▾"; color: #888; font-size: 0.85em; }
+.xlsx a.xlsx-hyperlink { color: #0563c1; text-decoration: underline; }
+.xlsx .xlsx-table-caption { font-size: 0.85em; color: #666; margin: 0.25rem 0 0; }
+.xlsx .xlsx-chart-placeholder {
+    border: 1px dashed #999; padding: 1em; margin: 0.5em 0;
+    color: #666; font-size: 0.9em; text-align: center;
+}
+.xlsx .xlsx-shape {
+    border: 1px solid #e0e0e0; border-radius: 2px;
+    padding: 0.5em; margin: 0.5em 0;
+    color: #555; font-size: 0.9em;
+    position: relative;
+}
+.xlsx .xlsx-shape[data-preset] { border-color: transparent; }
+.xlsx .xlsx-shape[data-kind="connector"] {
+    border-style: dashed; color: #888;
+}
+.xlsx .xlsx-shape[data-kind="connector"][data-preset] { border-style: none; }
+.xlsx .xlsx-shape > svg {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    pointer-events: none; z-index: 0;
+}
+.xlsx .xlsx-shape > pre {
+    margin: 0; white-space: pre-line;
+    font-family: inherit; font-size: inherit;
+    position: relative; z-index: 1;
+}
+.xlsx figure.xlsx-chart {
+    margin: 0.5em 0; padding: 0;
+}
+.xlsx figure.xlsx-chart > svg {
+    display: block; max-width: 100%;
+}
+.xlsx .xlsx-form-control {
+    position: absolute;
+    display: inline-flex; align-items: center; gap: 4px;
+    border: 1px dashed #bbb; border-radius: 2px;
+    padding: 2px 6px; margin: 0;
+    color: #333; background: rgba(255, 255, 255, 0.85);
+    font-size: 0.85em; pointer-events: auto;
+}
+.xlsx .xlsx-form-control[data-kind="button"] {
+    border-style: solid; background: #f3f3f3;
+}
+.xlsx .xlsx-form-control[data-kind="groupBox"] {
+    border-style: solid; background: transparent;
+}
+.xlsx .xlsx-form-control[data-kind="scrollbar"],
+.xlsx .xlsx-form-control[data-kind="spinner"] {
+    background: #eef2f7; color: #555;
+}
+.xlsx .xlsx-form-control > .xlsx-form-control-glyph {
+    font-size: 1em; line-height: 1; color: #333;
+}
+.xlsx .xlsx-form-control > legend {
+    font-size: 0.85em; color: #333; padding: 0 4px;
+}
+.xlsx .xlsx-spill-anchor { outline: 1px dashed #0066cc; outline-offset: -1px; }
+.xlsx .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
+.xlsx .xlsx-threaded { color: #0066cc; margin-left: 4px; cursor: help; }
+.xlsx .xlsx-shrink-to-fit { font-size: clamp(0.55em, 0.95em, 1em); overflow: hidden; }
+.xlsx.xlsx-no-gridlines th, .xlsx.xlsx-no-gridlines td { border: none; }
+.xlsx.xlsx-no-headers thead tr > th:first-child,
+.xlsx.xlsx-no-headers tbody tr > th:first-child { display: none; }
+.xlsx.xlsx-no-headers thead tr:first-child { display: none; }
+.xlsx .xlsx-outline-1 > th:first-child { padding-left: 0.5rem; }
+.xlsx .xlsx-outline-2 > th:first-child { padding-left: 1rem; }
+.xlsx .xlsx-outline-3 > th:first-child { padding-left: 1.5rem; }
+.xlsx .xlsx-outline-4 > th:first-child { padding-left: 2rem; }
+.xlsx .xlsx-outline-5 > th:first-child { padding-left: 2.5rem; }
+.xlsx .xlsx-outline-6 > th:first-child { padding-left: 3rem; }
+.xlsx .xlsx-outline-7 > th:first-child { padding-left: 3.5rem; }
+.xlsx col.xlsx-outline-1 { border-left: 2px solid #ddd; }
+.xlsx col.xlsx-outline-2 { border-left: 3px solid #ccc; }
+.xlsx col.xlsx-outline-3 { border-left: 4px solid #bbb; }
+.xlsx .xlsx-header, .xlsx .xlsx-footer {
+    display: grid; grid-template-columns: 1fr 1fr 1fr;
+    font-size: 0.85em; color: #666; margin: 0.5em 0;
+}</style>
+<section class="xlsx" data-sheet-name="ChartsExt">
+<div class="xlsx-sheet-name">ChartsExt</div>
+<table>
+<colgroup>
+<col>
+<col>
+</colgroup>
+<thead>
+<tr>
+<th>
+</th>
+<th>A</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<th>1</th>
+<td>Charts-ext sheet</td>
+</tr>
+</tbody>
+</table>
+<figure class="xlsx-chart" data-chart-kind="classic" data-chart-type="barChart" data-chart-plot="column" data-anchor-col="0" data-anchor-row="0" data-anchor-end-col="5" data-anchor-end-row="14">
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="300" viewBox="0 0 480 300" class="xlsx-chart-svg">
+<text x="240" y="20" fill="#333" font-family="system-ui, sans-serif" font-size="14" text-anchor="middle" font-weight="600" class="xlsx-chart-title">Sales by Region, Stacked</text>
+<g class="xlsx-chart-yaxis">
+<line x1="80" x2="340" y1="240" y2="240" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="244" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">0</text>
+<line x1="80" x2="340" y1="200" y2="200" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="204" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">40</text>
+<line x1="80" x2="340" y1="160" y2="160" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="164" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">80</text>
+<line x1="80" x2="340" y1="120" y2="120" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="124" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">120</text>
+<line x1="80" x2="340" y1="80" y2="80" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="84" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">160</text>
+<line x1="80" x2="340" y1="40" y2="40" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="44" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">200</text>
+<line x1="80" x2="80" y1="40" y2="240" stroke="#888" stroke-width="1">
+</line>
+</g>
+<g class="xlsx-chart-xaxis">
+<text x="112.5" y="254" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="middle">Q1</text>
+<text x="177.5" y="254" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="middle">Q2</text>
+<text x="242.5" y="254" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="middle">Q3</text>
+<text x="307.5" y="254" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="middle">Q4</text>
+<line x1="80" x2="340" y1="240" y2="240" stroke="#888" stroke-width="1">
+</line>
+</g>
+<g class="xlsx-chart-series" data-series-index="0" data-series-name="North">
+<rect x="93" y="210" width="38" height="30" fill="#5b9bd5">
+</rect>
+<rect x="158" y="195" width="38" height="45" fill="#5b9bd5">
+</rect>
+<rect x="223" y="190" width="38" height="50" fill="#5b9bd5">
+</rect>
+<rect x="288" y="180" width="38" height="60" fill="#5b9bd5">
+</rect>
+</g>
+<g class="xlsx-chart-series" data-series-index="1" data-series-name="South">
+<rect x="93" y="190" width="38" height="20" fill="#ed7d31">
+</rect>
+<rect x="158" y="170" width="38" height="25" fill="#ed7d31">
+</rect>
+<rect x="223" y="155" width="38" height="35" fill="#ed7d31">
+</rect>
+<rect x="288" y="150" width="38" height="30" fill="#ed7d31">
+</rect>
+</g>
+<g class="xlsx-chart-series" data-series-index="2" data-series-name="East">
+<rect x="93" y="180" width="38" height="10" fill="#70ad47">
+</rect>
+<rect x="158" y="155" width="38" height="15" fill="#70ad47">
+</rect>
+<rect x="223" y="135" width="38" height="20" fill="#70ad47">
+</rect>
+<rect x="288" y="125.00000000000001" width="38" height="24.999999999999986" fill="#70ad47">
+</rect>
+</g>
+<g class="xlsx-chart-legend">
+<g class="xlsx-chart-legend-entry">
+<rect x="356" y="44" width="10" height="10" fill="#5b9bd5">
+</rect>
+<text x="372" y="53" fill="#333" font-family="system-ui, sans-serif" font-size="11">North</text>
+</g>
+<g class="xlsx-chart-legend-entry">
+<rect x="356" y="60" width="10" height="10" fill="#ed7d31">
+</rect>
+<text x="372" y="69" fill="#333" font-family="system-ui, sans-serif" font-size="11">South</text>
+</g>
+<g class="xlsx-chart-legend-entry">
+<rect x="356" y="76" width="10" height="10" fill="#70ad47">
+</rect>
+<text x="372" y="85" fill="#333" font-family="system-ui, sans-serif" font-size="11">East</text>
+</g>
+</g>
+</svg>
+</figure>
+<figure class="xlsx-chart" data-chart-kind="classic" data-chart-type="scatterChart" data-chart-plot="scatter" data-anchor-col="0" data-anchor-row="15" data-anchor-end-col="5" data-anchor-end-row="29">
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="300" viewBox="0 0 480 300" class="xlsx-chart-svg">
+<text x="240" y="20" fill="#333" font-family="system-ui, sans-serif" font-size="14" text-anchor="middle" font-weight="600" class="xlsx-chart-title">Height vs Weight</text>
+<g class="xlsx-chart-yaxis">
+<line x1="80" x2="340" y1="240" y2="240" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="244" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">0</text>
+<line x1="80" x2="340" y1="200" y2="200" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="204" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">20</text>
+<line x1="80" x2="340" y1="160" y2="160" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="164" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">40</text>
+<line x1="80" x2="340" y1="120" y2="120" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="124" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">60</text>
+<line x1="80" x2="340" y1="80" y2="80" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="84" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">80</text>
+<line x1="80" x2="340" y1="40" y2="40" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="44" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">100</text>
+<line x1="80" x2="80" y1="40" y2="240" stroke="#888" stroke-width="1">
+</line>
+</g>
+<g class="xlsx-chart-xaxis">
+<line x1="80" x2="80" y1="240" y2="244" stroke="#888" stroke-width="1">
+</line>
+<text x="80" y="254" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="middle">0</text>
+<line x1="132" x2="132" y1="240" y2="244" stroke="#888" stroke-width="1">
+</line>
+<text x="132" y="254" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="middle">40</text>
+<line x1="184" x2="184" y1="240" y2="244" stroke="#888" stroke-width="1">
+</line>
+<text x="184" y="254" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="middle">80</text>
+<line x1="236" x2="236" y1="240" y2="244" stroke="#888" stroke-width="1">
+</line>
+<text x="236" y="254" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="middle">120</text>
+<line x1="288" x2="288" y1="240" y2="244" stroke="#888" stroke-width="1">
+</line>
+<text x="288" y="254" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="middle">160</text>
+<line x1="340" x2="340" y1="240" y2="244" stroke="#888" stroke-width="1">
+</line>
+<text x="340" y="254" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="middle">200</text>
+<line x1="80" x2="340" y1="240" y2="240" stroke="#888" stroke-width="1">
+</line>
+</g>
+<g class="xlsx-chart-series" data-series-index="0" data-series-name="Sample">
+<circle cx="288.00" cy="130.00" r="4" fill="#4472c4" stroke="#fff" stroke-width="1">
+</circle>
+<circle cx="294.50" cy="116.00" r="4" fill="#4472c4" stroke="#fff" stroke-width="1">
+</circle>
+<circle cx="301.00" cy="100.00" r="4" fill="#4472c4" stroke="#fff" stroke-width="1">
+</circle>
+<circle cx="307.50" cy="84.00" r="4" fill="#4472c4" stroke="#fff" stroke-width="1">
+</circle>
+<circle cx="314.00" cy="70.00" r="4" fill="#4472c4" stroke="#fff" stroke-width="1">
+</circle>
+</g>
+<g class="xlsx-chart-legend">
+<g class="xlsx-chart-legend-entry">
+<rect x="356" y="44" width="10" height="10" fill="#4472c4">
+</rect>
+<text x="372" y="53" fill="#333" font-family="system-ui, sans-serif" font-size="11">Sample</text>
+</g>
+</g>
+</svg>
+</figure>
+<figure class="xlsx-chart" data-chart-kind="classic" data-chart-type="areaChart" data-chart-plot="area" data-anchor-col="0" data-anchor-row="30" data-anchor-end-col="5" data-anchor-end-row="44">
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="300" viewBox="0 0 480 300" class="xlsx-chart-svg">
+<text x="240" y="20" fill="#333" font-family="system-ui, sans-serif" font-size="14" text-anchor="middle" font-weight="600" class="xlsx-chart-title">CPU Usage</text>
+<g class="xlsx-chart-yaxis">
+<line x1="80" x2="340" y1="240" y2="240" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="244" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">0</text>
+<line x1="80" x2="340" y1="200" y2="200" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="204" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">10</text>
+<line x1="80" x2="340" y1="160" y2="160" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="164" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">20</text>
+<line x1="80" x2="340" y1="120" y2="120" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="124" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">30</text>
+<line x1="80" x2="340" y1="80" y2="80" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="84" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">40</text>
+<line x1="80" x2="340" y1="40" y2="40" stroke="#ddd" stroke-width="1">
+</line>
+<text x="74" y="44" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="end">50</text>
+<line x1="80" x2="80" y1="40" y2="240" stroke="#888" stroke-width="1">
+</line>
+</g>
+<g class="xlsx-chart-xaxis">
+<text x="101.66666666666667" y="254" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="middle">T1</text>
+<text x="145" y="254" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="middle">T2</text>
+<text x="188.33333333333334" y="254" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="middle">T3</text>
+<text x="231.66666666666669" y="254" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="middle">T4</text>
+<text x="275" y="254" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="middle">T5</text>
+<text x="318.33333333333337" y="254" fill="#333" font-family="system-ui, sans-serif" font-size="10" text-anchor="middle">T6</text>
+<line x1="80" x2="340" y1="240" y2="240" stroke="#888" stroke-width="1">
+</line>
+</g>
+<g class="xlsx-chart-series" data-series-index="0" data-series-name="web01">
+<path d="M 80.00 160.00 L 132.00 140.00 L 184.00 120.00 L 236.00 152.00 L 288.00 168.00 L 340.00 144.00 L 340.00 240.00 L 288.00 240.00 L 236.00 240.00 L 184.00 240.00 L 132.00 240.00 L 80.00 240.00 Z" fill="#5b9bd5" fill-opacity="0.7" stroke="#5b9bd5" stroke-width="1.5" stroke-opacity="1">
+</path>
+</g>
+<g class="xlsx-chart-series" data-series-index="1" data-series-name="web02">
+<path d="M 80.00 180.00 L 132.00 168.00 L 184.00 152.00 L 236.00 120.00 L 288.00 112.00 L 340.00 128.00 L 340.00 240.00 L 288.00 240.00 L 236.00 240.00 L 184.00 240.00 L 132.00 240.00 L 80.00 240.00 Z" fill="#ed7d31" fill-opacity="0.7" stroke="#ed7d31" stroke-width="1.5" stroke-opacity="1">
+</path>
+</g>
+<g class="xlsx-chart-series" data-series-index="2" data-series-name="web03">
+<path d="M 80.00 200.00 L 132.00 192.00 L 184.00 196.00 L 236.00 184.00 L 288.00 160.00 L 340.00 168.00 L 340.00 240.00 L 288.00 240.00 L 236.00 240.00 L 184.00 240.00 L 132.00 240.00 L 80.00 240.00 Z" fill="#70ad47" fill-opacity="0.7" stroke="#70ad47" stroke-width="1.5" stroke-opacity="1">
+</path>
+</g>
+<g class="xlsx-chart-legend">
+<g class="xlsx-chart-legend-entry">
+<rect x="356" y="44" width="10" height="10" fill="#5b9bd5">
+</rect>
+<text x="372" y="53" fill="#333" font-family="system-ui, sans-serif" font-size="11">web01</text>
+</g>
+<g class="xlsx-chart-legend-entry">
+<rect x="356" y="60" width="10" height="10" fill="#ed7d31">
+</rect>
+<text x="372" y="69" fill="#333" font-family="system-ui, sans-serif" font-size="11">web02</text>
+</g>
+<g class="xlsx-chart-legend-entry">
+<rect x="356" y="76" width="10" height="10" fill="#70ad47">
+</rect>
+<text x="372" y="85" fill="#333" font-family="system-ui, sans-serif" font-size="11">web03</text>
+</g>
+</g>
+</svg>
+</figure>
+</section>
