@@ -307,6 +307,61 @@ export interface SheetPivot {
     endCol: number; endRow: number;
 }
 
+// An Excel 2010+ slicer surfaced from xl/slicers/slicerN.xml + its cache
+// under xl/slicerCaches/slicerCacheN.xml. Detection-only — xlsxjs does NOT
+// render the clickable slicer UI; the model carries enough metadata for a
+// consumer to synthesise one (caption, selected items, source column
+// name, dimensioning hints). Selected items are the plain-text values
+// Excel kept with `s="1"` under <items> — presenting them alone is a
+// faithful read-only summary of the slicer's current state.
+export interface SheetSlicer {
+    name: string;           // <slicer name="…"/>
+    caption: string | null; // <slicer caption="…"/> — header label
+    cache: string;          // <slicer cache="…"/> — slicerCacheDefinition name
+    // Pivot-source column the slicer filters by. Lifted from the slicer
+    // cache's <tabular pivotCacheId="…"> → <items>, with the field label
+    // coming from <slicerCacheDefinition sourceName="…"/>. Null when the
+    // cache is either missing or not the tabular variant.
+    sourceName: string | null;
+    columnCount: number | null;    // <slicer columnCount="…"/>  — tile columns
+    style: string | null;          // <slicer style="…"/>        — Excel built-in
+    showCaption: boolean;          // <slicer showCaption="…"/>  — defaults true
+    rowHeight: number | null;      // <slicer rowHeight="…"/>    — EMU
+    // Plain-text values with @s="1" in the slicer cache's <items>. Empty
+    // array when the cache declared no selection (Excel treats that as
+    // "all selected", but surfacing an empty selection list is the honest
+    // read-only representation).
+    selectedItems: string[];
+}
+
+// An Excel 2013+ timeline (date slicer) surfaced from xl/timelines/
+// timelineN.xml + its cache under xl/timelineCaches/timelineCacheN.xml.
+// Detection-only — xlsxjs does NOT render the draggable timeline track;
+// the model carries the caption, the current level (years/quarters/
+// months/days), and the currently-selected range endpoints.
+export interface SheetTimeline {
+    name: string;           // <timeline name="…"/>
+    caption: string | null; // <timeline caption="…"/> — header label
+    cache: string;          // <timeline cache="…"/>   — timelineCacheDefinition name
+    // Pivot-source field (usually a date column). Lifted from the timeline
+    // cache's @sourceName. Null when the cache is missing or didn't carry
+    // the attribute.
+    sourceName: string | null;
+    // Current timeline granularity. Excel writes this as the @level attr on
+    // <timeline> (or <timelineViewState>), using one of the four lexical
+    // forms listed here. Null when absent or unrecognised.
+    level: 'years' | 'quarters' | 'months' | 'days' | null;
+    // Selected date range. Both endpoints are left as raw strings (Excel's
+    // `startDate` / `endDate` attrs are ISO-like "yyyy-mm-ddThh:mm:ss"
+    // fragments); null when neither is declared.
+    selectedRange: { start: string | null; end: string | null } | null;
+    showHeader: boolean;            // default true
+    showSelectionLabel: boolean;    // default true
+    showTimeLevel: boolean;         // default true
+    showHorizontalScrollbar: boolean; // default true
+    style: string | null;           // <timeline style="…"/>
+}
+
 // Count of sheet-level <extLst><ext uri="…"> entries. Surfaced so the smoke
 // tool can roll up unknown extension uses (sparklines, dynamic-array spill,
 // protected ranges, etc.) without re-scanning the raw XML.
@@ -512,6 +567,8 @@ export interface Sheet {
     charts: SheetChart[];
     shapes: SheetShape[];
     pivots: SheetPivot[];
+    slicers: SheetSlicer[];
+    timelines: SheetTimeline[];
     extensions: SheetExtensionUri[];
     comments: SheetComment[];
     threadedComments: ThreadedCommentEntry[];
@@ -569,6 +626,10 @@ const NS = {
     cx:    'http://schemas.microsoft.com/office/drawing/2014/chartex',
     tc:    'http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments',
     xda:   'http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray',
+    // Excel 2010 x14 — slicer, slicerCache + friends.
+    x14:   'http://schemas.microsoft.com/office/spreadsheetml/2009/9/main',
+    // Excel 2013 x15 — timelines. (x14 slicers live in x14; timelines in x15.)
+    x15:   'http://schemas.microsoft.com/office/spreadsheetml/2010/11/main',
 };
 
 export class WorkbookParser {
@@ -626,10 +687,11 @@ export class WorkbookParser {
             const tables = resolveTablesForSheet(xmlPath, parts);
             const { images, charts, shapes } = resolveDrawingsForSheet(xmlPath, parts, media);
             const pivots = resolvePivotsForSheet(xmlPath, parts);
+            const { slicers, timelines } = resolveSlicersAndTimelinesForSheet(xmlPath, parts);
             const comments = resolveCommentsForSheet(xmlPath, parts);
             const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
             const hyperlinkTargets = resolveHyperlinkTargets(xmlPath, parts);
-            sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, shapes, pivots, comments, threadedComments, hyperlinkTargets, i, definedNames, metadata));
+            sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, shapes, pivots, slicers, timelines, comments, threadedComments, hyperlinkTargets, i, definedNames, metadata));
         }
 
         return { sheets, styles, theme, persons, date1904, definedNames, metadata };
@@ -992,6 +1054,319 @@ function parsePivotTable(xml: string): SheetPivot | null {
         endCol: Math.max(a.col, b.col),
         endRow: Math.max(a.row, b.row),
     };
+}
+
+// Slicer / timeline detection. The sheet's rels can carry three flavours of
+// link into the slicer / timeline chain:
+//   1. A `.../slicer` rel → xl/slicers/slicerN.xml  (one <slicers> list
+//      per file, each <slicer> references a cache by @name).
+//   2. A `.../timeline` rel → xl/timelines/timelineN.xml (one <timelines>
+//      list per file, each <timeline> references a timelineCache by @name).
+//   3. Nothing — the references live behind an `<extLst>` block on the
+//      worksheet (URIs {A8765BA9-…} for slicers, {7E03D99C-…} for
+//      timelines). Both URIs wrap an `<x14:slicerList>` or
+//      `<x15:timelineRefs>` with `<x14:slicer r:id="…"/>` / similar inside
+//      the same sheet's rels — we still resolve through the sheet rels.
+//
+// Rather than walk the extLst explicitly, we scan the sheet's rels for
+// anything whose type ends in /slicer or /timeline; that catches both the
+// direct-rel producers (Excel 2013+, some LibreOffice versions) and the
+// extLst-wrapped producers (Excel 2010/2016 "classic" slicers) without
+// needing two code paths.
+//
+// Caches live at xl/slicerCaches/ and xl/timelineCaches/. Each cache's
+// name attribute is what the per-sheet widget references via @cache. We
+// build two workbook-wide name → XML Maps so both widgets can look up
+// their cache in O(1) without re-resolving package-wide rels.
+function resolveSlicersAndTimelinesForSheet(
+    sheetPath: string,
+    parts: Record<string, string>,
+): { slicers: SheetSlicer[]; timelines: SheetTimeline[] } {
+    const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
+    const relsXml = parts[relsPath];
+    const slicers: SheetSlicer[] = [];
+    const timelines: SheetTimeline[] = [];
+    if (!relsXml) return { slicers, timelines };
+    const rels = parseRelationships(relsXml);
+    const dir = sheetPath.replace(/\/[^/]+$/, '');
+
+    // Index every slicerCache / timelineCache part in the package by the
+    // cache's declared @name. Using a Map (not a plain object) keeps
+    // attacker-controlled cache names off Object.prototype.
+    const slicerCacheByName = indexSlicerCaches(parts);
+    const timelineCacheByName = indexTimelineCaches(parts);
+
+    for (const [, rel] of rels) {
+        const type = rel.type;
+        const isSlicer = type.endsWith('/slicer');
+        const isTimeline = type.endsWith('/timeline');
+        if (!isSlicer && !isTimeline) continue;
+        const target = rel.target.startsWith('/')
+            ? rel.target.slice(1)
+            : normaliseRelPath(`${dir}/${rel.target}`);
+        const xml = parts[target];
+        if (!xml) continue;
+        if (isSlicer) {
+            slicers.push(...parseSlicerFile(xml, slicerCacheByName));
+        } else {
+            timelines.push(...parseTimelineFile(xml, timelineCacheByName));
+        }
+    }
+    return { slicers, timelines };
+}
+
+// Walk the package for xl/slicerCaches/*.xml and key by the <slicerCacheDefinition @name>
+// attribute. The x14:slicerCacheDefinition element is the root of a slicer
+// cache file; producers may omit the x14 prefix and write an unprefixed
+// <slicerCacheDefinition>, so we match by localName.
+function indexSlicerCaches(parts: Record<string, string>): Map<string, string> {
+    const out = new Map<string, string>();
+    for (const path of Object.keys(parts)) {
+        if (!/^xl\/slicerCaches\/[^/]+\.xml$/i.test(path)) continue;
+        const xml = parts[path];
+        if (!xml) continue;
+        const name = peekRootAttr(xml, 'slicerCacheDefinition', 'name');
+        if (name) out.set(name, xml);
+    }
+    return out;
+}
+
+function indexTimelineCaches(parts: Record<string, string>): Map<string, string> {
+    const out = new Map<string, string>();
+    for (const path of Object.keys(parts)) {
+        if (!/^xl\/timelineCaches\/[^/]+\.xml$/i.test(path)) continue;
+        const xml = parts[path];
+        if (!xml) continue;
+        // timelineCacheDefinition lives in the x15 namespace; we still
+        // localName-match so unprefixed producers resolve too.
+        const name = peekRootAttr(xml, 'timelineCacheDefinition', 'name');
+        if (name) out.set(name, xml);
+    }
+    return out;
+}
+
+// Pluck the first element whose localName matches `rootLocal` from `xml`
+// and return its `attr` attribute. Used to build cache-name indexes without
+// parsing the full document twice.
+function peekRootAttr(xml: string, rootLocal: string, attr: string): string | null {
+    const doc = parseXml(xml);
+    const all = doc.getElementsByTagName('*');
+    for (let i = 0; i < all.length; i++) {
+        const el = all[i];
+        if (el.localName === rootLocal) {
+            return el.getAttribute(attr);
+        }
+    }
+    return null;
+}
+
+// Parse one xl/slicers/slicerN.xml file. The root is `<slicers>` carrying
+// one or more `<slicer>` children. Each slicer references a cache by
+// @cache; we look that up in the workbook-wide index and pull the
+// sourceName + selectedItems off the cache's tabular block.
+function parseSlicerFile(xml: string, slicerCacheByName: Map<string, string>): SheetSlicer[] {
+    const doc = parseXml(xml);
+    const out: SheetSlicer[] = [];
+    // Match by localName (x14:slicer or unprefixed <slicer>). We walk the
+    // whole doc rather than using getElementsByTagNameNS so we don't miss
+    // entries written under a differently-prefixed namespace.
+    const all = doc.getElementsByTagName('*');
+    for (let i = 0; i < all.length; i++) {
+        const el = all[i];
+        if (el.localName !== 'slicer') continue;
+        const name = el.getAttribute('name');
+        const cache = el.getAttribute('cache');
+        if (!name || !cache) continue;
+        const caption = el.getAttribute('caption');
+        const columnCountAttr = el.getAttribute('columnCount');
+        const columnCount = numOrNull(columnCountAttr);
+        const style = el.getAttribute('style') || null;
+        // @showCaption defaults to true; only `"0"`/`"false"` flips it off.
+        const showCaptionAttr = el.getAttribute('showCaption');
+        const showCaption = !(showCaptionAttr === '0' || showCaptionAttr === 'false');
+        const rowHeightAttr = el.getAttribute('rowHeight');
+        const rowHeight = numOrNull(rowHeightAttr);
+
+        const cacheXml = slicerCacheByName.get(cache);
+        let sourceName: string | null = null;
+        let selectedItems: string[] = [];
+        if (cacheXml) {
+            const details = readSlicerCache(cacheXml);
+            sourceName = details.sourceName;
+            selectedItems = details.selectedItems;
+        }
+        out.push({
+            name,
+            caption: caption || null,
+            cache,
+            sourceName,
+            columnCount,
+            style,
+            showCaption,
+            rowHeight,
+            selectedItems,
+        });
+    }
+    return out;
+}
+
+// Parse one xl/timelines/timelineN.xml file. The root is `<timelines>` with
+// one or more `<timeline>` children. Excel writes the currently-displayed
+// level + selected range either as attributes directly on `<timeline>` or
+// inside a `<timelineViewState>` child — we read the level off either
+// location, preferring the inner state when both are present.
+function parseTimelineFile(xml: string, timelineCacheByName: Map<string, string>): SheetTimeline[] {
+    const doc = parseXml(xml);
+    const out: SheetTimeline[] = [];
+    const all = doc.getElementsByTagName('*');
+    for (let i = 0; i < all.length; i++) {
+        const el = all[i];
+        if (el.localName !== 'timeline') continue;
+        const name = el.getAttribute('name');
+        const cache = el.getAttribute('cache');
+        if (!name || !cache) continue;
+        const caption = el.getAttribute('caption');
+        const style = el.getAttribute('style') || null;
+        const showHeader = !truthyZero(el.getAttribute('showHeader'));
+        const showSelectionLabel = !truthyZero(el.getAttribute('showSelectionLabel'));
+        const showTimeLevel = !truthyZero(el.getAttribute('showTimeLevel'));
+        const showHorizontalScrollbar = !truthyZero(el.getAttribute('showHorizontalScrollbar'));
+
+        // View state can be a nested `<timelineViewState>` with level +
+        // selection range, OR the same attributes can appear directly on
+        // `<timeline>`. We prefer the nested block when present.
+        let level: SheetTimeline['level'] = null;
+        let selectedRange: { start: string | null; end: string | null } | null = null;
+        const nested = firstDescendantByLocalName(el, 'timelineViewState');
+        const src = nested ?? el;
+        const levelAttr = src.getAttribute('level');
+        level = normaliseTimelineLevel(levelAttr);
+        // Modern producers write selection as `<selection startDate=… endDate=…/>`
+        // under timelineViewState. Older producers write `startDate`/`endDate`
+        // attributes directly on the parent. Try both.
+        const selectionEl = firstDescendantByLocalName(src, 'selection') ?? src;
+        const startAttr = selectionEl.getAttribute('startDate');
+        const endAttr = selectionEl.getAttribute('endDate');
+        if (startAttr !== null || endAttr !== null) {
+            selectedRange = { start: startAttr, end: endAttr };
+        }
+
+        const cacheXml = timelineCacheByName.get(cache);
+        let sourceName: string | null = null;
+        if (cacheXml) sourceName = readTimelineCache(cacheXml);
+        out.push({
+            name,
+            caption: caption || null,
+            cache,
+            sourceName,
+            level,
+            selectedRange,
+            showHeader,
+            showSelectionLabel,
+            showTimeLevel,
+            showHorizontalScrollbar,
+            style,
+        });
+    }
+    return out;
+}
+
+// Inspect a slicer cache's tabular block. Returns the source field name (the
+// pivot column the slicer drives) plus every item currently flagged
+// selected. A producer may spell the root as <slicerCacheDefinition> with
+// @sourceName, OR put the source name in an inner <pivotTable name="…"/>
+// reference — we only promise the outer @sourceName form here and return
+// null when that's missing.
+function readSlicerCache(xml: string): { sourceName: string | null; selectedItems: string[] } {
+    const doc = parseXml(xml);
+    let sourceName: string | null = null;
+    const all = doc.getElementsByTagName('*');
+    for (let i = 0; i < all.length; i++) {
+        const el = all[i];
+        if (el.localName === 'slicerCacheDefinition') {
+            sourceName = el.getAttribute('sourceName');
+            break;
+        }
+    }
+    const selectedItems: string[] = [];
+    // Each <tabular> block carries an <items> list with <i x="…" s="1"/>
+    // entries. The `@s="1"` flag marks a selected item; the displayed
+    // text lives either as @n ("name") on the item or via a parent map.
+    // We accept either @n, the inner textContent, or a numeric index into
+    // a sibling `<value>` list — but in practice the Excel-written form
+    // under the tabular/items chain uses @n for string items. A numeric
+    // index without a resolvable value is dropped.
+    for (let i = 0; i < all.length; i++) {
+        const el = all[i];
+        if (el.localName !== 'tabular') continue;
+        const items = firstDescendantByLocalName(el, 'items');
+        if (!items) continue;
+        for (let j = 0; j < items.childNodes.length; j++) {
+            const node = items.childNodes[j];
+            if (node.nodeType !== 1) continue;
+            const item = node as Element;
+            if (item.localName !== 'i') continue;
+            const selected = item.getAttribute('s');
+            // Excel writes `s="1"` for selected items (explicitly filtered
+            // in) and either omits the attribute or writes `s="0"` for
+            // unselected. We treat only the truthy form as a positive
+            // selection signal.
+            if (selected !== '1' && selected !== 'true') continue;
+            const name = item.getAttribute('n') ?? item.textContent;
+            if (name && name.length > 0) selectedItems.push(name);
+        }
+    }
+    return { sourceName, selectedItems };
+}
+
+function readTimelineCache(xml: string): string | null {
+    const doc = parseXml(xml);
+    const all = doc.getElementsByTagName('*');
+    for (let i = 0; i < all.length; i++) {
+        const el = all[i];
+        if (el.localName === 'timelineCacheDefinition') {
+            return el.getAttribute('sourceName');
+        }
+    }
+    return null;
+}
+
+function firstDescendantByLocalName(root: Element, localName: string): Element | null {
+    const all = root.getElementsByTagName('*');
+    for (let i = 0; i < all.length; i++) {
+        if (all[i].localName === localName) return all[i];
+    }
+    return null;
+}
+
+function numOrNull(attr: string | null): number | null {
+    if (attr === null || attr === '') return null;
+    const n = Number(attr);
+    return Number.isFinite(n) ? n : null;
+}
+
+function truthyZero(v: string | null): boolean {
+    return v === '0' || v === 'false';
+}
+
+function normaliseTimelineLevel(raw: string | null): SheetTimeline['level'] {
+    if (!raw) return null;
+    // Excel 2013+ writes the level as a numeric code ("0".."3") on the
+    // timeline element; older/niche producers spell it out
+    // ("months" / "Months"). Accept both forms and map to the long name.
+    const lower = raw.toLowerCase();
+    if (lower === 'years' || lower === 'quarters' || lower === 'months' || lower === 'days') {
+        return lower;
+    }
+    // Numeric form: 0 = years, 1 = quarters, 2 = months, 3 = days. Any
+    // other numeric value is an unknown level, so we fall through to null.
+    const numericMap: Record<string, SheetTimeline['level']> = {
+        '0': 'years',
+        '1': 'quarters',
+        '2': 'months',
+        '3': 'days',
+    };
+    return numericMap[raw] ?? null;
 }
 
 // Classic comments: xl/comments{N}.xml. Bound to a sheet through the
@@ -1575,6 +1950,8 @@ function parseSheet(
     charts: SheetChart[] = [],
     shapes: SheetShape[] = [],
     pivots: SheetPivot[] = [],
+    slicers: SheetSlicer[] = [],
+    timelines: SheetTimeline[] = [],
     comments: SheetComment[] = [],
     threadedComments: ThreadedCommentEntry[] = [],
     hyperlinkTargets: Map<string, string> = new Map(),
@@ -1667,7 +2044,7 @@ function parseSheet(
     return {
         name, state, rows, maxCol, maxRow, merges, columns, rowDimensions,
         conditionalFormatting, frozenPanes, autoFilter, tables, images,
-        charts, shapes, pivots, extensions, comments, threadedComments, view, outline,
+        charts, shapes, pivots, slicers, timelines, extensions, comments, threadedComments, view, outline,
         hyperlinks, dataValidationLists, pageBreaks, printArea, headerFooter,
         protection,
     };
