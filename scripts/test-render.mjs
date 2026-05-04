@@ -2040,6 +2040,104 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 75. Multi-step cellStyleXfs chain: A1 picks up deep style's bold ─────
+// Fixture: cellStyleXfs[1].xfId=2 → cellStyleXfs[2] (bold). cellXfs[1] has
+// xfId=1 and applyFont=0, so the walker must follow the chain two hops to
+// reach the bold font. A single-hop resolver would have left A1 non-bold
+// (and missed any styling, since the mid style also has applyFont=0).
+{
+    const { wb, container } = await renderFixture('cellstyle-chain');
+    const styles = wb.parsed.styles;
+    assert(styles.cellStyleXfs.length === 3, `75a: cellStyleXfs should have 3 entries (got ${styles.cellStyleXfs.length})`);
+    assert(styles.cellStyleXfs[1].xfId === 2, `75b: cellStyleXfs[1].xfId should be 2 (got ${styles.cellStyleXfs[1].xfId})`);
+    assert(styles.cellStyleXfs[2].xfId === -1, `75c: cellStyleXfs[2].xfId should be -1 (got ${styles.cellStyleXfs[2].xfId})`);
+    assert(styles.cellXfs[1].xfId === 1, `75d: cellXfs[1].xfId should be 1 (got ${styles.cellXfs[1].xfId})`);
+    assert(styles.cellXfs[1].applyFont === false, '75e: cellXfs[1].applyFont should be false');
+
+    // Unit assertion: resolveEffectiveXf walks the chain to the bold font.
+    const { resolveEffectiveXf } = globalThis.xlsx;
+    assert(typeof resolveEffectiveXf === 'function', '75f: resolveEffectiveXf should be exported');
+    const eff = resolveEffectiveXf(styles, styles.cellXfs[1]);
+    assert(eff.fontId === 2, `75g: effective fontId should chain to 2 (got ${eff.fontId})`);
+
+    // DOM assertion: the rendered td must be bold (fonts[2]), not italic
+    // (fonts[1]) — the chain walker went one hop past the italic mid style.
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    const a1 = rows[0].querySelectorAll('td')[0];
+    assert(a1.style.fontWeight === 'bold', `75h: A1 should be bold via 2-hop chain (got "${a1.style.fontWeight}")`);
+    assert(a1.style.fontStyle !== 'italic', `75i: A1 should NOT be italic (got "${a1.style.fontStyle}")`);
+
+    // Cycle detection: forging a looped cellStyleXfs chain (1→2→1) must
+    // terminate. Without the `seen` guard, the walker would blow the stack
+    // or spin forever. Build a synthetic Styles object directly.
+    const cycleStyles = {
+        numFmts: new Map(),
+        fonts: styles.fonts,
+        fills: styles.fills,
+        borders: styles.borders,
+        dxfs: [],
+        cellXfs: styles.cellXfs,
+        cellStyleXfs: [
+            { ...styles.cellStyleXfs[0] },
+            { ...styles.cellStyleXfs[1], xfId: 2 },
+            { ...styles.cellStyleXfs[2], xfId: 1 }, // loops back!
+        ],
+    };
+    const start = Date.now();
+    const cycleEff = resolveEffectiveXf(cycleStyles, { ...styles.cellXfs[1], xfId: 1 });
+    const elapsed = Date.now() - start;
+    assert(elapsed < 100, `75j: cycle detection should terminate quickly (got ${elapsed}ms)`);
+    assert(typeof cycleEff.fontId === 'number', '75k: cycle walk should still return a CellXf');
+}
+
+// ── 76. Custom iconSet rule lists: per-position <cfIcon/> overrides ───────
+// Fixture: one iconSet rule with custom="1" and three <cfIcon/> children
+// that swap each position to a glyph from a different set. Values 10/50/90
+// hit the three positions in turn.
+{
+    const { wb, container } = await renderFixture('cf-custom-icons');
+    const sheet = wb.parsed.sheets[0];
+    const iconRule = sheet.conditionalFormatting.flatMap((b) => b.rules).find((r) => r.type === 'iconSet');
+    assert(!!iconRule?.iconSet, '76a: iconSet rule parsed');
+    assert(Array.isArray(iconRule.iconSet.customIcons), '76b: customIcons should be an array when custom="1"');
+    assert(iconRule.iconSet.customIcons.length === 3, `76c: customIcons should have 3 entries (got ${iconRule.iconSet.customIcons.length})`);
+    assert(iconRule.iconSet.customIcons[0]?.iconSet === '3Arrows' && iconRule.iconSet.customIcons[0]?.iconId === 0,
+        `76d: position 0 → 3Arrows/0 (got ${JSON.stringify(iconRule.iconSet.customIcons[0])})`);
+    assert(iconRule.iconSet.customIcons[1]?.iconSet === '3TrafficLights1' && iconRule.iconSet.customIcons[1]?.iconId === 1,
+        `76e: position 1 → 3TrafficLights1/1 (got ${JSON.stringify(iconRule.iconSet.customIcons[1])})`);
+    assert(iconRule.iconSet.customIcons[2]?.iconSet === '3Symbols' && iconRule.iconSet.customIcons[2]?.iconId === 2,
+        `76f: position 2 → 3Symbols/2 (got ${JSON.stringify(iconRule.iconSet.customIcons[2])})`);
+
+    // DOM: each row should get the overridden glyph.
+    //   10 → 3Arrows[0]        = down red arrow (a <path> inside a <g>)
+    //   50 → 3TrafficLights1[1] = amber circle (#ffb900)
+    //   90 → 3Symbols[2]        = green tick (a <path> stroke #107c10)
+    const iconTds = [...container.querySelectorAll('td.xlsx-cf-iconset')];
+    assert(iconTds.length === 3, `76g: 3 icon tds (got ${iconTds.length})`);
+
+    const low = iconTds.find((td) => td.textContent === '10');
+    const mid = iconTds.find((td) => td.textContent === '50');
+    const high = iconTds.find((td) => td.textContent === '90');
+    assert(low && mid && high, '76h: 10 / 50 / 90 tds all present');
+
+    // Position 0 override: 3Arrows[0] → path wrapped in a <g> with rotate(180…).
+    const lowG = low.querySelector('svg g');
+    assert(!!lowG && /rotate\(180/.test(lowG.getAttribute('transform') ?? ''),
+        `76i: value 10 should render 3Arrows[0] (rotated path; got transform="${lowG?.getAttribute('transform')}")`);
+
+    // Position 1 override: 3TrafficLights1[1] → amber circle (#ffb900).
+    const midCircle = mid.querySelector('svg circle');
+    assert(!!midCircle && midCircle.getAttribute('fill') === '#ffb900',
+        `76j: value 50 should render amber 3TrafficLights1[1] circle (got fill="${midCircle?.getAttribute('fill')}")`);
+
+    // Position 2 override: 3Symbols[2] → tick path stroke #107c10, no <circle>.
+    const highPath = high.querySelector('svg path');
+    assert(!!highPath && highPath.getAttribute('stroke') === '#107c10',
+        `76k: value 90 should render 3Symbols[2] tick (got stroke="${highPath?.getAttribute('stroke')}")`);
+    assert(!high.querySelector('svg circle'),
+        '76l: value 90 should NOT contain a <circle> (confirming the traffic-light default was overridden)');
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

@@ -141,7 +141,6 @@ Minimum check before every PR that touches source: `grep -n "<feature name>" REA
 - In-flow image positioning (currently images render after the table).
 - Gradient fills and diagonal / double borders.
 - Full expression-rule interpretation (currently only `=<cellRef> <op> <literal>`).
-- Full multi-cellStyle inheritance (e.g. cellStyle referencing another cellStyle).
 
 ## Fixture generation
 

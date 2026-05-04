@@ -16,6 +16,8 @@ import { test, expect } from '@playwright/test';
 const fixtures = [
     'alignment-flags',
     'basic',
+    'cellstyle-chain',
+    'cf-custom-icons',
     'cf-ext-databar',
     'cf-graphical',
     'cf-icons',

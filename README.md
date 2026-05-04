@@ -33,8 +33,8 @@ The public surface is:
 - `renderAsync(data, bodyContainer, styleContainer?, options)` — the common
   path: parse + render in one call.
 - `defaultOptions` — the options object used when none is passed.
-- Test-visible helpers: `formatNumber`, `parseStyles`, `sanitizeHexColor`,
-  `a1ToR1c1`, `r1c1ToA1`, `emuToPx`.
+- Test-visible helpers: `formatNumber`, `parseStyles`, `resolveEffectiveXf`,
+  `sanitizeHexColor`, `a1ToR1c1`, `r1c1ToA1`, `emuToPx`.
 
 Options of note:
 
