@@ -1,9 +1,8 @@
 # xlsx-preview
 
-Browser-side XLSX → HTML renderer. Sibling project to
-[docxjs](https://github.com/loadfix/docxjs).
+Browser-side XLSX → HTML renderer, written from scratch in TypeScript and following the architecture of the sibling [docxjs](https://github.com/loadfix/docxjs) library (TypeScript + rollup + karma, JSZip for package I/O). Not affiliated with SheetJS or other libraries that share the xlsx name.
 
-This repository is a fork of [xlsx (SheetJS)](https://github.com/SheetJS/sheetjs) by the original author. It extends the upstream library with a browser-side rendering path: opening an `.xlsx`, walking every sheet, and emitting an HTML table per sheet with column-letter headers, row-number gutters, cell formatting from `xl/styles.xml` (fonts, fills, borders, alignment, number formats), merged cells, frozen panes, autoFilter markers, parsed tables, conditional formatting (including colour scales, data bars, and icon sets), embedded images, and classic + threaded comments. Credit for the foundational library goes to the original author.
+Opens an `.xlsx`, walks every sheet, and emits an HTML table per sheet with column-letter headers, row-number gutters, cell formatting from `xl/styles.xml` (fonts, fills, borders, alignment, number formats), merged cells, frozen panes, autoFilter markers, parsed tables, conditional formatting (including colour scales, data bars, and icon sets), embedded images, and classic + threaded comments.
 
 ## Installation
 
