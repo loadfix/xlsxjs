@@ -2,7 +2,8 @@
 // sheet, each containing an <h2> sheet name and a <table> of the cells.
 // Numeric cells get a numeric-aligned class; other kinds render as text.
 
-import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, ThreadedCommentEntry } from './workbook-parser';
+import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, ThreadedCommentEntry, Hyperlink } from './workbook-parser';
+import { isSafeHyperlinkHref } from './workbook-parser';
 import { indexToColumnLetters } from './utils';
 import { h } from './html';
 import type { Options } from './xlsx-preview';
@@ -55,6 +56,8 @@ function renderStyle(className: string): HTMLStyleElement {
 .${className} .xlsx-frozen-row { position: sticky; top: 0; z-index: 2; background: inherit; }
 .${className} .xlsx-frozen-both { position: sticky; left: 0; top: 0; z-index: 3; background: inherit; }
 .${className} .xlsx-autofilter::after { content: " ▾"; color: #888; font-size: 0.85em; }
+.${className} .xlsx-validation-list::after { content: " ▾"; color: #888; font-size: 0.85em; }
+.${className} a.xlsx-hyperlink { color: #0563c1; text-decoration: underline; }
 .${className} .xlsx-table-caption { font-size: 0.85em; color: #666; margin: 0.25rem 0 0; }
 .${className} .xlsx-chart-placeholder {
     border: 1px dashed #999; padding: 1em; margin: 0.5em 0;
@@ -399,6 +402,25 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
     const rowDim = new Map<number, typeof sheet.rowDimensions[0]>();
     for (const d of sheet.rowDimensions) rowDim.set(d.row, d);
 
+    // Hyperlinks: already flattened to one entry per covered cell by the
+    // parser, so a (row,col) lookup is enough.
+    const hyperlinkByCell = new Map<string, Hyperlink>();
+    for (const h of sheet.hyperlinks) hyperlinkByCell.set(`${h.row},${h.col}`, h);
+
+    // Data-validation lists: the parser kept the range bounds + the resolved
+    // options; expand to per-cell here so the render loop can check membership
+    // in O(1). options is stored as a pipe-delimited string so commas inside
+    // the options don't break the `data-validation-options` attribute.
+    const validationByCell = new Map<string, string | null>();
+    for (const v of sheet.dataValidationLists) {
+        const opts = v.options ? v.options.join('|') : null;
+        for (let r = v.row; r <= v.endRow; r++) {
+            for (let c = v.col; c <= v.endCol; c++) {
+                validationByCell.set(`${r},${c}`, opts);
+            }
+        }
+    }
+
     const tbody = document.createElement('tbody');
     const rowCount = sheet.maxRow + 1;
     for (let r = 0; r < rowCount; r++) {
@@ -420,6 +442,12 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
             const cell = byCol[c];
             const td = document.createElement('td');
             if (cell) renderCellContent(td, cell, styles, theme, date1904, options);
+            // Hyperlink wrap: runs first so the anchor hugs the rendered
+            // content (textContent / per-run <span>s). The URL is held to the
+            // allowlist in isSafeHyperlinkHref; rejected URLs leave the cell
+            // rendered as inert text.
+            const hlink = hyperlinkByCell.get(`${r},${c}`);
+            if (hlink) wrapCellWithHyperlink(td, hlink);
             const dxf = dxfByCell.get(`${r},${c}`);
             if (dxf) applyDxf(td, dxf, theme);
             const gfx = graphicalByCell.get(`${r},${c}`);
@@ -430,6 +458,13 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
             if (frozen) tagFrozen(td, r, c, frozen);
             if (autoFilter && r === autoFilter.row && c >= autoFilter.col && c <= autoFilter.endCol) {
                 td.classList.add('xlsx-autofilter');
+            }
+            if (validationByCell.has(`${r},${c}`)) {
+                td.classList.add('xlsx-validation-list');
+                const opts = validationByCell.get(`${r},${c}`);
+                if (opts !== null && opts !== undefined) {
+                    td.setAttribute('data-validation-options', opts);
+                }
             }
             const threaded = threadedByCell.get(`${r},${c}`);
             if (threaded && threaded.length) appendThreadedCommentMarker(td, threaded);
@@ -584,6 +619,48 @@ function applySheetView(section: HTMLElement, view: SheetView, theme: Theme | nu
         const hex = resolveColor(view.tabColor, theme);
         if (hex) section.setAttribute('data-tab-color', hex);
     }
+}
+
+// Wrap a cell's rendered children in an `<a>` when the cell carries a
+// hyperlink. The URL is vetted through isSafeHyperlinkHref before it can
+// reach an href attribute; attacker URLs (`javascript:`, `data:`, etc.) are
+// rejected and the cell stays as inert text. All attacker-controlled strings
+// (tooltip, display, location, target) reach the DOM only via setAttribute,
+// so the browser does the HTML-encoding.
+function wrapCellWithHyperlink(td: HTMLTableCellElement, link: Hyperlink): void {
+    // Resolve the effective href: external `target` wins; `location` is the
+    // intra-workbook fallback and gets a leading `#` so the browser treats it
+    // as a fragment. We never interpolate the location into CSS / innerHTML.
+    let href: string | null = null;
+    if (link.target != null && link.target !== '' && isSafeHyperlinkHref(link.target)) {
+        href = link.target;
+    } else if (link.location != null && link.location !== '') {
+        // location is a workbook anchor like "Sheet2!A1". It never carries a
+        // scheme, but we still route through the allowlist so any pathological
+        // producer-written value gets rejected.
+        const frag = `#${link.location}`;
+        if (isSafeHyperlinkHref(frag)) href = frag;
+    }
+    if (href == null) return; // rejected → cell stays as plain text
+
+    const a = document.createElement('a');
+    a.className = 'xlsx-hyperlink';
+    a.setAttribute('href', href);
+    // target=_blank + rel=noopener on external links so the viewer doesn't
+    // leak its window.opener. Intra-workbook (`#…`) anchors don't need it,
+    // but applying it unconditionally keeps the DOM boring to audit.
+    a.setAttribute('target', '_blank');
+    a.setAttribute('rel', 'noopener noreferrer');
+    if (link.tooltip) a.setAttribute('title', link.tooltip);
+    // Move the cell's existing children into the anchor. If the cell is
+    // empty, fall back to the display text (attribute-only sink → setAttribute
+    // wouldn't work; use textContent instead).
+    if (td.firstChild) {
+        while (td.firstChild) a.appendChild(td.firstChild);
+    } else if (link.display) {
+        a.textContent = link.display;
+    }
+    td.appendChild(a);
 }
 
 function tagFrozen(td: HTMLTableCellElement, row: number, col: number, panes: FrozenPanes): void {

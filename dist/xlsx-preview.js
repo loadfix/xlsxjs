@@ -1124,6 +1124,25 @@
         }
     }
 
+    const SAFE_HREF_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:']);
+    function isSafeHyperlinkHref(raw) {
+        if (raw == null)
+            return true;
+        if (typeof raw !== 'string')
+            return false;
+        const trimmed = raw.trim();
+        if (trimmed === '')
+            return true;
+        if (trimmed.startsWith('#'))
+            return true;
+        try {
+            const parsed = new URL(trimmed, 'http://xlsxjs.invalid/');
+            return SAFE_HREF_SCHEMES.has(parsed.protocol);
+        }
+        catch {
+            return !/^[a-z][a-z0-9+.-]*:/i.test(trimmed);
+        }
+    }
     const NS = {
         main: 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
         rel: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
@@ -1173,7 +1192,8 @@
                 const pivots = resolvePivotsForSheet(xmlPath, parts);
                 const comments = resolveCommentsForSheet(xmlPath, parts);
                 const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
-                sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments));
+                const hyperlinkTargets = resolveHyperlinkTargets(xmlPath, parts);
+                sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments, hyperlinkTargets));
             }
             return { sheets, styles, theme, persons, date1904, definedNames };
         }
@@ -1438,6 +1458,20 @@
             if (!xml)
                 continue;
             out.push(...parseComments(xml));
+        }
+        return out;
+    }
+    function resolveHyperlinkTargets(sheetPath, parts) {
+        const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
+        const relsXml = parts[relsPath];
+        if (!relsXml)
+            return new Map();
+        const rels = parseRelationships(relsXml);
+        const out = new Map();
+        for (const [id, rel] of rels) {
+            if (!rel.type.endsWith('/hyperlink'))
+                continue;
+            out.set(id, rel.target);
         }
         return out;
     }
@@ -1738,7 +1772,7 @@
             name: firstAttr('rFont', 'val') ?? firstAttr('name', 'val'),
         };
     }
-    function parseSheet(name, state, xml, sharedStrings, tables = [], images = [], charts = [], pivots = [], comments = [], threadedComments = []) {
+    function parseSheet(name, state, xml, sharedStrings, tables = [], images = [], charts = [], pivots = [], comments = [], threadedComments = [], hyperlinkTargets = new Map()) {
         const doc = parseXml(xml);
         const rowEls = doc.getElementsByTagNameNS(NS.main, 'row');
         const rows = [];
@@ -1801,10 +1835,25 @@
         const extensions = collectExtensionUris(doc);
         const view = parseSheetView(doc);
         const outline = parseSheetOutline(doc);
+        const hyperlinks = parseHyperlinks(doc, hyperlinkTargets);
+        const dataValidationLists = parseDataValidationLists(doc);
+        for (const h of hyperlinks) {
+            if (h.col > maxCol)
+                maxCol = h.col;
+            if (h.row > maxRow)
+                maxRow = h.row;
+        }
+        for (const v of dataValidationLists) {
+            if (v.endCol > maxCol)
+                maxCol = v.endCol;
+            if (v.endRow > maxRow)
+                maxRow = v.endRow;
+        }
         return {
             name, state, rows, maxCol, maxRow, merges, columns, rowDimensions,
             conditionalFormatting, frozenPanes, autoFilter, tables, images,
             charts, pivots, extensions, comments, threadedComments, view, outline,
+            hyperlinks, dataValidationLists,
         };
     }
     function parseSheetView(doc) {
@@ -1866,6 +1915,73 @@
             }
         }
         return { maxRowLevel, maxColLevel, summaryBelow, summaryRight };
+    }
+    function parseHyperlinks(doc, targets) {
+        const out = [];
+        const list = doc.getElementsByTagNameNS(NS.main, 'hyperlinks').item(0);
+        if (!list)
+            return out;
+        const hls = list.getElementsByTagNameNS(NS.main, 'hyperlink');
+        for (let i = 0; i < hls.length; i++) {
+            const el = hls[i];
+            const ref = el.getAttribute('ref');
+            if (!ref)
+                continue;
+            const rId = el.getAttributeNS(NS.rel, 'id');
+            const target = rId ? (targets.get(rId) ?? null) : null;
+            const location = el.getAttribute('location');
+            const tooltip = el.getAttribute('tooltip');
+            const display = el.getAttribute('display');
+            const ranges = parseSqref(ref);
+            for (const range of ranges) {
+                for (let r = range.row; r <= range.endRow; r++) {
+                    for (let c = range.col; c <= range.endCol; c++) {
+                        out.push({
+                            col: c,
+                            row: r,
+                            target,
+                            location: location || null,
+                            tooltip: tooltip || null,
+                            display: display || null,
+                        });
+                    }
+                }
+            }
+        }
+        return out;
+    }
+    function parseDataValidationLists(doc) {
+        const out = [];
+        const list = doc.getElementsByTagNameNS(NS.main, 'dataValidations').item(0);
+        if (!list)
+            return out;
+        const dvs = list.getElementsByTagNameNS(NS.main, 'dataValidation');
+        for (let i = 0; i < dvs.length; i++) {
+            const el = dvs[i];
+            if (el.getAttribute('type') !== 'list')
+                continue;
+            const sqref = el.getAttribute('sqref');
+            if (!sqref)
+                continue;
+            const f1 = el.getElementsByTagNameNS(NS.main, 'formula1').item(0);
+            const formulaText = (f1?.textContent ?? '').trim();
+            let options = null;
+            const quoted = /^"(.*)"$/s.exec(formulaText);
+            if (quoted) {
+                options = quoted[1].split(',');
+            }
+            const ranges = parseSqref(sqref);
+            for (const range of ranges) {
+                out.push({
+                    col: range.col,
+                    row: range.row,
+                    endCol: range.endCol,
+                    endRow: range.endRow,
+                    options,
+                });
+            }
+        }
+        return out;
     }
     function collectExtensionUris(doc) {
         const counts = new Map();
@@ -2494,6 +2610,8 @@
 .${className} .xlsx-frozen-row { position: sticky; top: 0; z-index: 2; background: inherit; }
 .${className} .xlsx-frozen-both { position: sticky; left: 0; top: 0; z-index: 3; background: inherit; }
 .${className} .xlsx-autofilter::after { content: " ▾"; color: #888; font-size: 0.85em; }
+.${className} .xlsx-validation-list::after { content: " ▾"; color: #888; font-size: 0.85em; }
+.${className} a.xlsx-hyperlink { color: #0563c1; text-decoration: underline; }
 .${className} .xlsx-table-caption { font-size: 0.85em; color: #666; margin: 0.25rem 0 0; }
 .${className} .xlsx-chart-placeholder {
     border: 1px dashed #999; padding: 1em; margin: 0.5em 0;
@@ -2786,6 +2904,18 @@
         const rowDim = new Map();
         for (const d of sheet.rowDimensions)
             rowDim.set(d.row, d);
+        const hyperlinkByCell = new Map();
+        for (const h of sheet.hyperlinks)
+            hyperlinkByCell.set(`${h.row},${h.col}`, h);
+        const validationByCell = new Map();
+        for (const v of sheet.dataValidationLists) {
+            const opts = v.options ? v.options.join('|') : null;
+            for (let r = v.row; r <= v.endRow; r++) {
+                for (let c = v.col; c <= v.endCol; c++) {
+                    validationByCell.set(`${r},${c}`, opts);
+                }
+            }
+        }
         const tbody = document.createElement('tbody');
         const rowCount = sheet.maxRow + 1;
         for (let r = 0; r < rowCount; r++) {
@@ -2812,6 +2942,9 @@
                 const td = document.createElement('td');
                 if (cell)
                     renderCellContent(td, cell, styles, theme, date1904, options);
+                const hlink = hyperlinkByCell.get(`${r},${c}`);
+                if (hlink)
+                    wrapCellWithHyperlink(td, hlink);
                 const dxf = dxfByCell.get(`${r},${c}`);
                 if (dxf)
                     applyDxf(td, dxf, theme);
@@ -2827,6 +2960,13 @@
                     tagFrozen(td, r, c, frozen);
                 if (autoFilter && r === autoFilter.row && c >= autoFilter.col && c <= autoFilter.endCol) {
                     td.classList.add('xlsx-autofilter');
+                }
+                if (validationByCell.has(`${r},${c}`)) {
+                    td.classList.add('xlsx-validation-list');
+                    const opts = validationByCell.get(`${r},${c}`);
+                    if (opts !== null && opts !== undefined) {
+                        td.setAttribute('data-validation-options', opts);
+                    }
                 }
                 const threaded = threadedByCell.get(`${r},${c}`);
                 if (threaded && threaded.length)
@@ -2951,6 +3091,34 @@
             if (hex)
                 section.setAttribute('data-tab-color', hex);
         }
+    }
+    function wrapCellWithHyperlink(td, link) {
+        let href = null;
+        if (link.target != null && link.target !== '' && isSafeHyperlinkHref(link.target)) {
+            href = link.target;
+        }
+        else if (link.location != null && link.location !== '') {
+            const frag = `#${link.location}`;
+            if (isSafeHyperlinkHref(frag))
+                href = frag;
+        }
+        if (href == null)
+            return;
+        const a = document.createElement('a');
+        a.className = 'xlsx-hyperlink';
+        a.setAttribute('href', href);
+        a.setAttribute('target', '_blank');
+        a.setAttribute('rel', 'noopener noreferrer');
+        if (link.tooltip)
+            a.setAttribute('title', link.tooltip);
+        if (td.firstChild) {
+            while (td.firstChild)
+                a.appendChild(td.firstChild);
+        }
+        else if (link.display) {
+            a.textContent = link.display;
+        }
+        td.appendChild(a);
     }
     function tagFrozen(td, row, col, panes) {
         const inX = panes.xSplit !== null && col < panes.xSplit;
@@ -3294,6 +3462,7 @@
     exports.formatNumber = formatNumber;
     exports.indexedColor = indexedColor;
     exports.interpolateColorScale = interpolateColorScale;
+    exports.isSafeHyperlinkHref = isSafeHyperlinkHref;
     exports.lookupNumberFormat = lookupNumberFormat;
     exports.parseAsync = parseAsync;
     exports.parseColorElement = parseColorElement;

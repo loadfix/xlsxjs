@@ -9,7 +9,40 @@ import { parseCellRef } from './utils';
 import type { Options } from './xlsx-preview';
 import { parseStyles, parseColorElement, type Styles, type FontStyle, type UnderlineStyle } from './styles';
 import { parseTheme, type Theme, type ColorRef } from './theme';
-import { parseConditionalFormatting, type ConditionalFormatting } from './conditional-format';
+import { parseConditionalFormatting, parseSqref, type ConditionalFormatting } from './conditional-format';
+
+// URL schemes we'll emit as an `<a href="…">` in the rendered sheet. Anything
+// outside this set (most importantly `javascript:` / `data:` / `vbscript:` /
+// `file:` / `blob:`) is dropped to inert plain text. Fragment-only (`#foo`)
+// and relative paths (no scheme) are accepted: they can't carry script.
+// Mirrors docxjs's isSafeHyperlinkHref — keep them in lockstep.
+const SAFE_HREF_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:']);
+
+/**
+ * Returns `true` iff `raw` can be safely emitted as the `href` of an `<a>` in
+ * a read-only xlsx viewer. Accepts absolute URLs with known-safe schemes,
+ * fragment-only URLs (`#anchor`), and relative paths. `javascript:`,
+ * `data:`, `vbscript:`, `file:`, `blob:`, and every other scheme outside the
+ * allowlist are rejected.
+ */
+export function isSafeHyperlinkHref(raw: string | null | undefined): boolean {
+    if (raw == null) return true; // empty href is inert
+    if (typeof raw !== 'string') return false;
+    const trimmed = raw.trim();
+    if (trimmed === '') return true;
+    if (trimmed.startsWith('#')) return true;
+    try {
+        // Resolve against a synthetic base so relative URLs parse but never
+        // inherit the host document's base URI (which could be file:// in
+        // embedding apps and pass the scheme allowlist accidentally).
+        const parsed = new URL(trimmed, 'http://xlsxjs.invalid/');
+        return SAFE_HREF_SCHEMES.has(parsed.protocol);
+    } catch {
+        // Non-URL strings that aren't fragments are almost always relative
+        // paths like `foo/bar.html`. Treat as safe — no scheme, no sink.
+        return !/^[a-z][a-z0-9+.-]*:/i.test(trimmed);
+    }
+}
 
 export interface RichTextRun {
     text: string;
@@ -239,6 +272,31 @@ export interface SheetView {
     tabColor: ColorRef | null;
 }
 
+// A per-cell hyperlink, resolved from `<hyperlinks><hyperlink>` + the sheet's
+// rels. Range-valued sources (`ref="A1:C3"`) are expanded to one entry per
+// covered cell so the renderer can find a link by (row,col). Only the
+// top-left anchor is generally clickable in Excel but we carry the metadata
+// on every covered cell for look-up purposes.
+export interface Hyperlink {
+    col: number;
+    row: number;
+    target: string | null;    // external URL from rels (e.g. "https://…")
+    location: string | null;  // intra-workbook anchor ("Sheet2!A1")
+    tooltip: string | null;
+    display: string | null;
+}
+
+// A type="list" data-validation entry. Numbers/date/custom validations are
+// intentionally ignored — only list validations surface as a ▾ affordance.
+// When the formula1 source is a literal quoted list ("Red,Green,Blue") the
+// options are pinned on the model; range-reference sources (Sheet2!$A$1:$A$5)
+// leave options=null and only the ▾ indicator renders.
+export interface DataValidationList {
+    col: number; row: number;
+    endCol: number; endRow: number;
+    options: string[] | null;
+}
+
 export interface Sheet {
     name: string;
     // From the <sheet state="…"/> attribute on xl/workbook.xml's <sheets>.
@@ -266,6 +324,8 @@ export interface Sheet {
     // rightToLeft=false, zoomScale=null, tabColor=null).
     view: SheetView;
     outline: SheetOutline;
+    hyperlinks: Hyperlink[];
+    dataValidationLists: DataValidationList[];
 }
 
 export interface Workbook {
@@ -352,7 +412,8 @@ export class WorkbookParser {
             const pivots = resolvePivotsForSheet(xmlPath, parts);
             const comments = resolveCommentsForSheet(xmlPath, parts);
             const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
-            sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments));
+            const hyperlinkTargets = resolveHyperlinkTargets(xmlPath, parts);
+            sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments, hyperlinkTargets));
         }
 
         return { sheets, styles, theme, persons, date1904, definedNames };
@@ -648,6 +709,29 @@ function resolveCommentsForSheet(sheetPath: string, parts: Record<string, string
         const xml = parts[target];
         if (!xml) continue;
         out.push(...parseComments(xml));
+    }
+    return out;
+}
+
+// Resolve the sheet's rels to produce an rId → target URL map for hyperlink
+// entries. Only hyperlink-typed rels surface (the sheet's rels part also
+// carries drawings/tables/comments). `target` is the URL verbatim — we do
+// NOT sanitize here; the renderer applies the URL allowlist when it wraps
+// the cell in an anchor. External hyperlinks use the TargetMode="External"
+// attribute in the rels but the URL itself lives in `Target`; we carry the
+// whole string through so consumers that want full fidelity can inspect it.
+function resolveHyperlinkTargets(
+    sheetPath: string,
+    parts: Record<string, string>,
+): Map<string, string> {
+    const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
+    const relsXml = parts[relsPath];
+    if (!relsXml) return new Map();
+    const rels = parseRelationships(relsXml);
+    const out = new Map<string, string>();
+    for (const [id, rel] of rels) {
+        if (!rel.type.endsWith('/hyperlink')) continue;
+        out.set(id, rel.target);
     }
     return out;
 }
@@ -986,6 +1070,7 @@ function parseSheet(
     pivots: SheetPivot[] = [],
     comments: SheetComment[] = [],
     threadedComments: ThreadedCommentEntry[] = [],
+    hyperlinkTargets: Map<string, string> = new Map(),
 ): Sheet {
     const doc = parseXml(xml);
     const rowEls = doc.getElementsByTagNameNS(NS.main, 'row');
@@ -1050,11 +1135,26 @@ function parseSheet(
     const extensions = collectExtensionUris(doc);
     const view = parseSheetView(doc);
     const outline = parseSheetOutline(doc);
+    const hyperlinks = parseHyperlinks(doc, hyperlinkTargets);
+    const dataValidationLists = parseDataValidationLists(doc);
+
+    // Extend maxCol/maxRow to cover hyperlink and data-validation ranges even
+    // when the underlying cells are empty — the ▾ indicator / anchor still
+    // needs a <td> to land on.
+    for (const h of hyperlinks) {
+        if (h.col > maxCol) maxCol = h.col;
+        if (h.row > maxRow) maxRow = h.row;
+    }
+    for (const v of dataValidationLists) {
+        if (v.endCol > maxCol) maxCol = v.endCol;
+        if (v.endRow > maxRow) maxRow = v.endRow;
+    }
 
     return {
         name, state, rows, maxCol, maxRow, merges, columns, rowDimensions,
         conditionalFormatting, frozenPanes, autoFilter, tables, images,
         charts, pivots, extensions, comments, threadedComments, view, outline,
+        hyperlinks, dataValidationLists,
     };
 }
 
@@ -1125,6 +1225,91 @@ function parseSheetOutline(doc: Document): SheetOutline {
         }
     }
     return { maxRowLevel, maxColLevel, summaryBelow, summaryRight };
+}
+
+// Walk <hyperlinks><hyperlink …/> elements. Each carries a `ref` (single cell
+// or range), optional `r:id` (→ rels target), optional `location` (intra-
+// workbook anchor like "Sheet2!A1"), optional `tooltip` and `display`. We
+// expand ranges to one Hyperlink per covered cell so the renderer can look up
+// by (row,col); the top-left anchor is the canonical entry but every covered
+// cell carries the same target/location/tooltip/display tuple.
+function parseHyperlinks(doc: Document, targets: Map<string, string>): Hyperlink[] {
+    const out: Hyperlink[] = [];
+    const list = doc.getElementsByTagNameNS(NS.main, 'hyperlinks').item(0);
+    if (!list) return out;
+    const hls = list.getElementsByTagNameNS(NS.main, 'hyperlink');
+    for (let i = 0; i < hls.length; i++) {
+        const el = hls[i];
+        const ref = el.getAttribute('ref');
+        if (!ref) continue;
+        const rId = el.getAttributeNS(NS.rel, 'id');
+        const target = rId ? (targets.get(rId) ?? null) : null;
+        const location = el.getAttribute('location');
+        const tooltip = el.getAttribute('tooltip');
+        const display = el.getAttribute('display');
+        // ref can be "A1", "A1:C3", or (rare) a space-separated list — reuse
+        // the existing sqref parser so the expansion lives in one place.
+        const ranges = parseSqref(ref);
+        for (const range of ranges) {
+            for (let r = range.row; r <= range.endRow; r++) {
+                for (let c = range.col; c <= range.endCol; c++) {
+                    out.push({
+                        col: c,
+                        row: r,
+                        target,
+                        location: location || null,
+                        tooltip: tooltip || null,
+                        display: display || null,
+                    });
+                }
+            }
+        }
+    }
+    return out;
+}
+
+// Walk <dataValidations><dataValidation type="list" sqref="…"> blocks. Only
+// the `type="list"` case is surfaced (other validation types — whole,
+// decimal, date, time, textLength, custom — get no visual affordance). The
+// sqref is expanded to one entry per contiguous range. `formula1` holds
+// either a literal quoted list ("Red,Green,Blue") — in which case we split
+// it out into `options` — or a range reference like `Sheet2!$A$1:$A$5`
+// which leaves `options=null` (only the ▾ indicator renders, no pinned
+// value set).
+function parseDataValidationLists(doc: Document): DataValidationList[] {
+    const out: DataValidationList[] = [];
+    const list = doc.getElementsByTagNameNS(NS.main, 'dataValidations').item(0);
+    if (!list) return out;
+    const dvs = list.getElementsByTagNameNS(NS.main, 'dataValidation');
+    for (let i = 0; i < dvs.length; i++) {
+        const el = dvs[i];
+        if (el.getAttribute('type') !== 'list') continue;
+        const sqref = el.getAttribute('sqref');
+        if (!sqref) continue;
+        const f1 = el.getElementsByTagNameNS(NS.main, 'formula1').item(0);
+        const formulaText = (f1?.textContent ?? '').trim();
+        let options: string[] | null = null;
+        const quoted = /^"(.*)"$/s.exec(formulaText);
+        if (quoted) {
+            // Excel uses the list separator comma; there's no documented
+            // escape mechanism inside the quoted form, so a plain split is
+            // correct. Empty list ("" → "" → [""]) keeps one empty string,
+            // which matches Excel's behaviour of offering a single blank
+            // option; consumers can filter if they want.
+            options = quoted[1].split(',');
+        }
+        const ranges = parseSqref(sqref);
+        for (const range of ranges) {
+            out.push({
+                col: range.col,
+                row: range.row,
+                endCol: range.endCol,
+                endRow: range.endRow,
+                options,
+            });
+        }
+    }
+    return out;
 }
 
 // Walk every <ext uri="…"> in the sheet xml (sheet-level <extLst>, and any
