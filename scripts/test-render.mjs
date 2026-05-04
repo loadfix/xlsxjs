@@ -2878,6 +2878,176 @@ async function renderFixture(path, options) {
     assert(sanitizeHexColor('00ffffff') === '#ffffff', '85q: ARGB with alpha=00');
 }
 
+// ── 86. form-controls parser: Sheet.formControls surfaces all 5 entries ──
+// The hand-built fixture ships one checkbox (checked, linkedCell=$A$1), one
+// radio (unchecked, linkedCell=$A$2), one combo (inputRange=$E$1:$E$4,
+// dropLines=4), one scrollbar (min=0/max=100/val=42), and one button with
+// label="Click me". The parser must surface all 5 entries on
+// Sheet.formControls with correct kind / label / linkedCell / checked /
+// inputRange / min / max. Nothing should leak into Sheet.shapes for these.
+{
+    const { wb } = await renderFixture('form-controls');
+    const sheet = wb.parsed.sheets[0];
+    assert(Array.isArray(sheet.formControls), '86a: Sheet.formControls should be an array');
+    assert(sheet.formControls.length === 5,
+        `86b: expected 5 form controls in fixture (got ${sheet.formControls.length})`);
+    // Plain shapes[] should stay empty — every anchor in this fixture is a
+    // form control, and we don't want them doubly-surfaced.
+    assert(sheet.shapes.length === 0,
+        `86c: form-control anchors should NOT surface as shapes (got ${sheet.shapes.length})`);
+    // Images + charts likewise empty.
+    assert(sheet.images.length === 0, `86d: no images expected (got ${sheet.images.length})`);
+    assert(sheet.charts.length === 0, `86e: no charts expected (got ${sheet.charts.length})`);
+
+    // Per-kind lookup: one entry of each.
+    const byKind = new Map();
+    for (const fc of sheet.formControls) byKind.set(fc.kind, fc);
+    for (const wanted of ['checkbox', 'radio', 'combo', 'scrollbar', 'button']) {
+        assert(byKind.has(wanted), `86f: formControls should include kind="${wanted}"`);
+    }
+
+    const cb = byKind.get('checkbox');
+    if (cb) {
+        assert(cb.checked === true, `86g: checkbox.checked should be true (got ${cb.checked})`);
+        assert(cb.linkedCell === '$A$1', `86h: checkbox.linkedCell should be "$A$1" (got ${JSON.stringify(cb.linkedCell)})`);
+        assert(cb.label === 'Subscribe', `86i: checkbox.label should be "Subscribe" (got ${JSON.stringify(cb.label)})`);
+    }
+
+    const rb = byKind.get('radio');
+    if (rb) {
+        assert(rb.checked === false, `86j: radio.checked should be false (got ${rb.checked})`);
+        assert(rb.linkedCell === '$A$2', `86k: radio.linkedCell should be "$A$2" (got ${JSON.stringify(rb.linkedCell)})`);
+    }
+
+    const combo = byKind.get('combo');
+    if (combo) {
+        assert(combo.inputRange === '$E$1:$E$4',
+            `86l: combo.inputRange should be "$E$1:$E$4" (got ${JSON.stringify(combo.inputRange)})`);
+        assert(combo.dropLines === 4, `86m: combo.dropLines should be 4 (got ${combo.dropLines})`);
+        assert(combo.linkedCell === '$A$3', `86n: combo.linkedCell should be "$A$3" (got ${JSON.stringify(combo.linkedCell)})`);
+    }
+
+    const scroll = byKind.get('scrollbar');
+    if (scroll) {
+        assert(scroll.min === 0, `86o: scrollbar.min should be 0 (got ${scroll.min})`);
+        assert(scroll.max === 100, `86p: scrollbar.max should be 100 (got ${scroll.max})`);
+        assert(scroll.val === 42, `86q: scrollbar.val should be 42 (got ${scroll.val})`);
+        assert(scroll.inc === 1, `86r: scrollbar.inc should be 1 (got ${scroll.inc})`);
+        assert(scroll.page === 10, `86s: scrollbar.page should be 10 (got ${scroll.page})`);
+    }
+
+    const btn = byKind.get('button');
+    if (btn) {
+        assert(btn.label === 'Click me',
+            `86t: button.label should flatten txBody to "Click me" (got ${JSON.stringify(btn.label)})`);
+        assert(btn.linkedCell === null,
+            `86u: button.linkedCell should be null (got ${JSON.stringify(btn.linkedCell)})`);
+    }
+
+    // Every entry carries anchor coordinates. twoCellAnchor is the only
+    // wrapper used by real form controls — endCol/endRow must be populated.
+    for (const fc of sheet.formControls) {
+        assert(Number.isFinite(fc.col) && Number.isFinite(fc.row),
+            `86v: ${fc.kind}.col/row should be finite (got col=${fc.col}, row=${fc.row})`);
+        assert(fc.endCol !== null && fc.endRow !== null,
+            `86w: ${fc.kind}.endCol/endRow should be populated from twoCellAnchor (got endCol=${fc.endCol}, endRow=${fc.endRow})`);
+    }
+}
+
+// ── 87. form-controls renderer: <aside class="xlsx-form-control"> emits ──
+// After rendering, the section must contain 5 <aside class="xlsx-form-control">
+// elements, each with a data-kind matching the parsed entry. data-linked-cell,
+// data-checked, data-input-range, data-min / data-max / data-val should
+// round-trip off the DOM. Checkbox → ☑ glyph (it's checked); radio → ○
+// (it's unchecked). The button's aside carries its label text as
+// textContent without any HTML wrappers.
+{
+    const { container } = await renderFixture('form-controls');
+    const asides = container.querySelectorAll('section.xlsx aside.xlsx-form-control');
+    assert(asides.length === 5,
+        `87a: expected 5 <aside class="xlsx-form-control"> elements (got ${asides.length})`);
+
+    // Group by kind.
+    const byKind = new Map();
+    for (const a of asides) byKind.set(a.getAttribute('data-kind'), a);
+    for (const wanted of ['checkbox', 'radio', 'combo', 'scrollbar', 'button']) {
+        assert(byKind.has(wanted), `87b: <aside data-kind="${wanted}"> should exist`);
+    }
+
+    const cb = byKind.get('checkbox');
+    if (cb) {
+        assert(cb.getAttribute('data-linked-cell') === '$A$1',
+            `87c: checkbox data-linked-cell should be "$A$1" (got ${JSON.stringify(cb.getAttribute('data-linked-cell'))})`);
+        assert(cb.getAttribute('data-checked') === 'true',
+            `87d: checkbox data-checked should be "true" (got ${JSON.stringify(cb.getAttribute('data-checked'))})`);
+        // Leading glyph: ☑ for checked. Rendered inside a dedicated span so
+        // we look at the glyph span's textContent rather than the aside's.
+        const glyph = cb.querySelector('.xlsx-form-control-glyph');
+        assert(glyph?.textContent === '☑',
+            `87e: checked checkbox glyph should be "☑" (got ${JSON.stringify(glyph?.textContent)})`);
+    }
+
+    const rb = byKind.get('radio');
+    if (rb) {
+        assert(rb.getAttribute('data-checked') === 'false',
+            `87f: radio data-checked should be "false" (got ${JSON.stringify(rb.getAttribute('data-checked'))})`);
+        const glyph = rb.querySelector('.xlsx-form-control-glyph');
+        assert(glyph?.textContent === '○',
+            `87g: unchecked radio glyph should be "○" (got ${JSON.stringify(glyph?.textContent)})`);
+    }
+
+    const combo = byKind.get('combo');
+    if (combo) {
+        assert(combo.getAttribute('data-input-range') === '$E$1:$E$4',
+            `87h: combo data-input-range should be "$E$1:$E$4" (got ${JSON.stringify(combo.getAttribute('data-input-range'))})`);
+        assert(combo.getAttribute('data-drop-lines') === '4',
+            `87i: combo data-drop-lines should be "4" (got ${JSON.stringify(combo.getAttribute('data-drop-lines'))})`);
+    }
+
+    const scroll = byKind.get('scrollbar');
+    if (scroll) {
+        assert(scroll.getAttribute('data-min') === '0',
+            `87j: scrollbar data-min should be "0" (got ${JSON.stringify(scroll.getAttribute('data-min'))})`);
+        assert(scroll.getAttribute('data-max') === '100',
+            `87k: scrollbar data-max should be "100" (got ${JSON.stringify(scroll.getAttribute('data-max'))})`);
+        assert(scroll.getAttribute('data-val') === '42',
+            `87l: scrollbar data-val should be "42" (got ${JSON.stringify(scroll.getAttribute('data-val'))})`);
+    }
+
+    const btn = byKind.get('button');
+    if (btn) {
+        // Button has no leading glyph — label is the full textContent.
+        assert(btn.textContent === 'Click me',
+            `87m: button textContent should be "Click me" (got ${JSON.stringify(btn.textContent)})`);
+        assert(btn.querySelector('.xlsx-form-control-glyph') === null,
+            `87n: button should NOT carry a leading glyph span`);
+    }
+
+    // Each aside sits inside the image-layer overlay so it renders above
+    // the table without displacing cells. The layer is always the direct
+    // child of section.xlsx inserted before the <table>.
+    const section = container.querySelector('section.xlsx');
+    const layer = section?.querySelector('.xlsx-image-layer');
+    assert(!!layer, '87o: image-layer overlay should be present when the sheet has form controls');
+    if (layer) {
+        const asidesInLayer = layer.querySelectorAll('aside.xlsx-form-control');
+        assert(asidesInLayer.length === 5,
+            `87p: all 5 form-control asides should live inside .xlsx-image-layer (got ${asidesInLayer.length})`);
+    }
+
+    // Security: a checkbox label / button label is attacker-controlled XLSX
+    // text. The aside must carry it via textContent only — no innerHTML
+    // pathway. We spot-check by asserting the aside has no child elements
+    // beyond the glyph span + the label span (and no <script>, <img>, etc.
+    // from raw string injection).
+    if (btn) {
+        for (const child of btn.children) {
+            assert(['SPAN'].includes(child.tagName),
+                `87q: button aside should only contain span children (got <${child.tagName.toLowerCase()}>)`);
+        }
+    }
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

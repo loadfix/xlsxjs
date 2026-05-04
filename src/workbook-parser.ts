@@ -343,6 +343,68 @@ export interface SheetShape {
     endRow: number | null;
 }
 
+// A form-control anchored inside a sheet. Detect-only: we surface the
+// metadata from `xl/ctrlProps/ctrlProp{N}.xml` + the hosting `<xdr:sp>` so
+// consumers can discover buttons / checkboxes / scrollbars / dropdowns
+// without having to re-parse the drawing layer. xlsxjs does NOT paint an
+// interactive widget — the renderer emits an `<aside class="xlsx-form-control">`
+// that captures kind + state for consumer-side styling / hydration.
+//
+// The `kind` values mirror the ctrlProp `@objectType` set documented in the
+// XLSX form-control schema (a macrosheet extension in the 2009/9/main
+// namespace). Unknown / malformed object types decay to `'unknown'` rather
+// than throwing so a hostile file cannot break the parser by inventing a
+// value.
+export interface SheetFormControl {
+    kind:
+        | 'button'
+        | 'checkbox'
+        | 'radio'
+        | 'combo'
+        | 'list'
+        | 'scrollbar'
+        | 'spinner'
+        | 'groupBox'
+        | 'label'
+        | 'dialog'
+        | 'unknown';
+    // Anchor coordinates (0-based) carried straight through from the
+    // surrounding `<xdr:twoCellAnchor>`. The form-control renderer uses
+    // these to position its aside inside the image overlay layer using the
+    // same arithmetic as SheetImage.
+    col: number;
+    row: number;
+    colOff: number;
+    rowOff: number;
+    endCol: number | null;
+    endRow: number | null;
+    endColOff: number | null;
+    endRowOff: number | null;
+    // Label text. For a button-style control it's the txBody flatten of the
+    // hosting `<xdr:sp>`; for everything else it's the cNvPr @name when the
+    // shape carries no visible text body. null when neither is declared.
+    label: string | null;
+    // Linked cell from `fmlaLink` (checkbox / radio / scrollbar / spinner /
+    // combo). Raw A1 ref (e.g. `$Sheet2!$B$3`) — we do not dereference.
+    linkedCell: string | null;
+    // Input source from `fmlaRange` (combo/list). Raw A1 range.
+    inputRange: string | null;
+    // Checkbox / radio state. `null` when the attribute is absent.
+    checked: boolean | null;
+    // Numeric parameters (scrollbar / spinner). All `null` unless the
+    // ctrlProp declares them.
+    min: number | null;
+    max: number | null;
+    inc: number | null;
+    page: number | null;
+    val: number | null;
+    // Combo / list dropdown height, in rows. `null` when absent.
+    dropLines: number | null;
+    // Accessibility: prefer `cNvPr/@descr`, fall back to `cNvPr/a:extLst`
+    // alt-text ext (same as SheetImage.alt / SheetShape.alt).
+    altText: string | null;
+}
+
 // A rendered image anchored inside a sheet. Coordinates are 0-based.
 // xlsxjs distinguishes three DrawingML anchor modes:
 //   - 'twoCell'   : <xdr:from> + <xdr:to>. endCol/endRow + widthEmu/heightEmu
@@ -511,6 +573,11 @@ export interface Sheet {
     images: SheetImage[];
     charts: SheetChart[];
     shapes: SheetShape[];
+    // Form controls (buttons, checkboxes, radios, scrollbars, dropdowns…).
+    // Detect-only: the renderer emits an informational `<aside>` rather
+    // than an interactive widget. Kept separate from `shapes[]` because
+    // form controls carry their own metadata (linkedCell, range, min/max).
+    formControls: SheetFormControl[];
     pivots: SheetPivot[];
     extensions: SheetExtensionUri[];
     comments: SheetComment[];
@@ -569,6 +636,11 @@ const NS = {
     cx:    'http://schemas.microsoft.com/office/drawing/2014/chartex',
     tc:    'http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments',
     xda:   'http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray',
+    // Form-control (ctrlProp) namespace. The 2006/main namespace historically
+    // also hosts `<formControlPr>` without a prefix — form-control xml is
+    // typically a plain element whose default namespace is either 2009/9/main
+    // or 2006/main. We match on localName to tolerate both.
+    x14:   'http://schemas.microsoft.com/office/spreadsheetml/2009/9/main',
 };
 
 export class WorkbookParser {
@@ -624,12 +696,12 @@ export class WorkbookParser {
             const xml = parts[xmlPath];
             if (!xml) continue;
             const tables = resolveTablesForSheet(xmlPath, parts);
-            const { images, charts, shapes } = resolveDrawingsForSheet(xmlPath, parts, media);
+            const { images, charts, shapes, formControls } = resolveDrawingsForSheet(xmlPath, parts, media);
             const pivots = resolvePivotsForSheet(xmlPath, parts);
             const comments = resolveCommentsForSheet(xmlPath, parts);
             const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
             const hyperlinkTargets = resolveHyperlinkTargets(xmlPath, parts);
-            sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, shapes, pivots, comments, threadedComments, hyperlinkTargets, i, definedNames, metadata));
+            sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, shapes, formControls, pivots, comments, threadedComments, hyperlinkTargets, i, definedNames, metadata));
         }
 
         return { sheets, styles, theme, persons, date1904, definedNames, metadata };
@@ -914,15 +986,16 @@ function resolveDrawingsForSheet(
     sheetPath: string,
     parts: Record<string, string>,
     media: Record<string, string>,
-): { images: SheetImage[]; charts: SheetChart[]; shapes: SheetShape[] } {
+): { images: SheetImage[]; charts: SheetChart[]; shapes: SheetShape[]; formControls: SheetFormControl[] } {
     const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
     const relsXml = parts[relsPath];
-    if (!relsXml) return { images: [], charts: [], shapes: [] };
+    if (!relsXml) return { images: [], charts: [], shapes: [], formControls: [] };
     const rels = parseRelationships(relsXml);
     const dir = sheetPath.replace(/\/[^/]+$/, '');
     const images: SheetImage[] = [];
     const charts: SheetChart[] = [];
     const shapes: SheetShape[] = [];
+    const formControls: SheetFormControl[] = [];
     for (const [, rel] of rels) {
         if (!rel.type.endsWith('/drawing')) continue;
         const drawingPath = rel.target.startsWith('/')
@@ -944,8 +1017,9 @@ function resolveDrawingsForSheet(
         images.push(...parsed.images);
         charts.push(...parsed.charts);
         shapes.push(...parsed.shapes);
+        formControls.push(...parsed.formControls);
     }
-    return { images, charts, shapes };
+    return { images, charts, shapes, formControls };
 }
 
 function resolvePivotsForSheet(
@@ -1082,11 +1156,12 @@ function parseDrawing(
     drawingDir: string,
     parts: Record<string, string>,
     media: Record<string, string>,
-): { images: SheetImage[]; charts: SheetChart[]; shapes: SheetShape[] } {
+): { images: SheetImage[]; charts: SheetChart[]; shapes: SheetShape[]; formControls: SheetFormControl[] } {
     const doc = parseXml(xml);
     const images: SheetImage[] = [];
     const charts: SheetChart[] = [];
     const shapes: SheetShape[] = [];
+    const formControls: SheetFormControl[] = [];
     // DrawingML anchors come in three flavours; each carries <pic> /
     // <graphicFrame> / <sp> / <cxnSp> children we care about. We tag the
     // mode here so the model + renderer can apply the right sizing path.
@@ -1224,13 +1299,276 @@ function parseDrawing(
             ...Array.from(anchor.getElementsByTagNameNS(NS.xdr, 'sp')),
             ...Array.from(anchor.getElementsByTagNameNS(NS.xdr, 'cxnSp')),
         ];
-        for (const el of spEls) {
-            const kind: 'shape' | 'connector' = el.localName === 'cxnSp' ? 'connector' : 'shape';
-            const shape = parseShape(el, kind, col, row, endCol, endRow);
-            if (shape) shapes.push(shape);
+        // Form-control detection. A form control lives inside an
+        // <mc:AlternateContent> pairing <mc:Choice> (the modern
+        // drawingML shape) with <mc:Fallback> (legacy VML). The anchor
+        // always carries an <xdr:clientData/> sibling, but so do plain
+        // shapes — that marker alone doesn't identify a form control.
+        // The positive signal we rely on is a rel of type `/ctrlProp`
+        // pointing at ctrlProps/ctrlProp{N}.xml in the drawing's rels.
+        // When that's present, we emit a SheetFormControl and suppress
+        // the generic SheetShape entry. Everything else falls through
+        // to the existing shape parsing.
+        const ctrlPropRelHit = anchorHasCtrlPropRel(anchor, rels, drawingDir, parts);
+        let formControlConsumed = false;
+        if (ctrlPropRelHit && spEls.length > 0) {
+            const fc = parseFormControl(
+                spEls[0],
+                rels,
+                drawingDir,
+                parts,
+                col, row, colOff, rowOff, endCol, endRow,
+                anchor,
+            );
+            if (fc) {
+                formControls.push(fc);
+                formControlConsumed = true;
+            }
+        }
+        if (!formControlConsumed) {
+            for (const el of spEls) {
+                const kind: 'shape' | 'connector' = el.localName === 'cxnSp' ? 'connector' : 'shape';
+                const shape = parseShape(el, kind, col, row, endCol, endRow);
+                if (shape) shapes.push(shape);
+            }
         }
     }
-    return { images, charts, shapes };
+    return { images, charts, shapes, formControls };
+}
+
+// Scan an anchor's descendants for any `r:id` attribute resolving to a
+// ctrlProp xml part. Returns true when we can bind at least one rId →
+// rels entry → `xl/ctrlProps/ctrlProp*.xml`. Plain shapes may declare
+// <xdr:clientData/> without a ctrlProp rel; this check prevents those
+// from getting mis-categorised as form controls.
+function anchorHasCtrlPropRel(
+    anchor: Element,
+    rels: Map<string, { target: string; type: string }>,
+    drawingDir: string,
+    parts: Record<string, string>,
+): boolean {
+    const descendants = anchor.getElementsByTagName('*');
+    for (let i = 0; i < descendants.length; i++) {
+        const rId = descendants[i].getAttributeNS(NS.rel, 'id');
+        if (!rId) continue;
+        const rel = rels.get(rId);
+        if (!rel) continue;
+        // Accept either an explicit rel type ending in `/ctrlProp` or a
+        // target pointing at xl/ctrlProps/* (handles producers that emit
+        // a generic type URI).
+        if (rel.type.endsWith('/ctrlProp')) {
+            const target = rel.target.startsWith('/')
+                ? rel.target.slice(1)
+                : normaliseRelPath(`${drawingDir}/${rel.target}`);
+            if (parts[target]) return true;
+        }
+        const target = rel.target.startsWith('/')
+            ? rel.target.slice(1)
+            : normaliseRelPath(`${drawingDir}/${rel.target}`);
+        if (/^xl\/ctrlProps\/.*\.xml$/i.test(target) && parts[target]) return true;
+    }
+    return false;
+}
+
+// Form-control kinds — the strict allowlist. Any ctrlProp `@objectType`
+// not in this map decays to 'unknown' (keyed maps on attacker-controlled
+// XLSX strings always validate against a strict allowlist). The map keys
+// are the canonical ObjectType values Excel writes; callers are also
+// tolerant of the lowercase variant by comparing after toLowerCase().
+const FORM_CONTROL_OBJECT_TYPES: Record<string, SheetFormControl['kind']> = {
+    'button':    'button',
+    'checkbox':  'checkbox',
+    'radio':     'radio',
+    'drop':      'combo',      // Excel's "Drop-Down" (form control) = combo
+    'combobox':  'combo',
+    'list':      'list',
+    'listbox':   'list',
+    'scroll':    'scrollbar',
+    'scrollbar': 'scrollbar',
+    'spin':      'spinner',
+    'spinner':   'spinner',
+    'groupbox':  'groupBox',
+    'label':     'label',
+    'dialog':    'dialog',
+};
+
+function normaliseFormControlKind(raw: string | null | undefined): SheetFormControl['kind'] {
+    if (!raw) return 'unknown';
+    const key = raw.toLowerCase();
+    return FORM_CONTROL_OBJECT_TYPES[key] ?? 'unknown';
+}
+
+// Resolve one form-control aside from its hosting <xdr:sp> + the matching
+// ctrlProp xml. Returns null if the surface doesn't look like a form
+// control (no rel, no recognisable ctrlProp root, etc.) so the caller
+// can fall back to the generic SheetShape path.
+function parseFormControl(
+    sp: Element,
+    rels: Map<string, { target: string; type: string }>,
+    drawingDir: string,
+    parts: Record<string, string>,
+    col: number | null,
+    row: number | null,
+    colOff: number | null,
+    rowOff: number | null,
+    endCol: number | null,
+    endRow: number | null,
+    anchor: Element,
+): SheetFormControl | null {
+    // Resolve the ctrlProp rel. Real Excel puts the rId on the clientData's
+    // @r:id attribute; older producers sometimes put it on the anchor. We
+    // accept either so hand-built fixtures don't need to hunt for the exact
+    // ECMA placement.
+    //
+    // clientData in production files often carries the rel via a
+    // `fmlaLink=` attribute but NOT an r:id — the actual ctrlProp rel lives
+    // on the outer <mc:AlternateContent>'s <mc:Choice><xdr:sp> or on the
+    // anchor itself. We walk every descendant looking for a relationship
+    // r:id attribute, then check whether the target path matches a
+    // ctrlProps/ctrlProp*.xml file.
+    let ctrlPropXml: string | null = null;
+    const descendants = anchor.getElementsByTagName('*');
+    for (let i = 0; i < descendants.length; i++) {
+        const rId = descendants[i].getAttributeNS(NS.rel, 'id');
+        if (!rId) continue;
+        const rel = rels.get(rId);
+        if (!rel) continue;
+        const target = rel.target.startsWith('/')
+            ? rel.target.slice(1)
+            : normaliseRelPath(`${drawingDir}/${rel.target}`);
+        if (!/^xl\/ctrlProps\/.*\.xml$/i.test(target)) continue;
+        ctrlPropXml = parts[target] ?? null;
+        if (ctrlPropXml) break;
+    }
+
+    // cNvPr / name / alt — same lookup as parseShape.
+    const cNvPr = sp.getElementsByTagNameNS(NS.xdr, 'cNvPr').item(0);
+    const shapeName = cNvPr?.getAttribute('name') || null;
+    const altText = cNvPr?.getAttribute('descr') || cNvPr?.getAttribute('title') || null;
+
+    // Shape text body (label for buttons).
+    let labelFromText: string | null = null;
+    const txBody = sp.getElementsByTagNameNS(NS.xdr, 'txBody').item(0);
+    if (txBody) {
+        const paragraphs: string[] = [];
+        const pEls = txBody.getElementsByTagNameNS(NS.a, 'p');
+        for (let i = 0; i < pEls.length; i++) {
+            const p = pEls[i];
+            const tEls = p.getElementsByTagNameNS(NS.a, 't');
+            let line = '';
+            for (let j = 0; j < tEls.length; j++) line += tEls[j].textContent ?? '';
+            paragraphs.push(line);
+        }
+        const joined = paragraphs.join('\n');
+        if (joined.length > 0) labelFromText = joined;
+    }
+
+    // Parse the ctrlProp xml. Accept any root element whose localName is
+    // `formControlPr` (the usual name); the attributes we care about all
+    // live on that element. Missing ctrlProp still yields a SheetFormControl
+    // so the detection path is useful — the shape name (from cNvPr) is
+    // frequently "Check Box 1" etc. which we can coarsely classify.
+    let kind: SheetFormControl['kind'] = 'unknown';
+    let linkedCell: string | null = null;
+    let inputRange: string | null = null;
+    let checked: boolean | null = null;
+    let min: number | null = null;
+    let max: number | null = null;
+    let inc: number | null = null;
+    let page: number | null = null;
+    let val: number | null = null;
+    let dropLines: number | null = null;
+
+    if (ctrlPropXml) {
+        const ctrlDoc = parseXml(ctrlPropXml);
+        // Walk root first; fall back to any descendant named formControlPr
+        // if the root is an <mc:AlternateContent> wrapper.
+        let root: Element | null = ctrlDoc.documentElement;
+        if (root && root.localName !== 'formControlPr') {
+            const found = ctrlDoc.getElementsByTagName('formControlPr').item(0);
+            if (found) root = found;
+        }
+        if (root) {
+            kind = normaliseFormControlKind(root.getAttribute('objectType'));
+            linkedCell = root.getAttribute('fmlaLink') || null;
+            inputRange = root.getAttribute('fmlaRange') || null;
+            const checkedAttr = root.getAttribute('checked');
+            if (checkedAttr === 'Checked' || checkedAttr === '1' || checkedAttr === 'true') {
+                checked = true;
+            } else if (checkedAttr === 'Unchecked' || checkedAttr === '0' || checkedAttr === 'false') {
+                checked = false;
+            } else if (kind === 'checkbox' || kind === 'radio') {
+                // Absence == unchecked for the boolean controls.
+                checked = false;
+            }
+            const numAttr = (name: string): number | null => {
+                const raw = root!.getAttribute(name);
+                if (raw === null) return null;
+                const n = Number(raw);
+                return Number.isFinite(n) ? n : null;
+            };
+            min = numAttr('min');
+            max = numAttr('max');
+            inc = numAttr('inc');
+            page = numAttr('page');
+            val = numAttr('val');
+            dropLines = numAttr('dropLines');
+        }
+    } else if (shapeName) {
+        // No ctrlProp rel — best-effort classification from the shape name.
+        // Helps when a minimal producer emits only the hosting <xdr:sp> with
+        // a conventional name (e.g. "Check Box 1").
+        const lower = shapeName.toLowerCase();
+        if (lower.startsWith('check box')) kind = 'checkbox';
+        else if (lower.startsWith('option button')) kind = 'radio';
+        else if (lower.startsWith('button')) kind = 'button';
+        else if (lower.startsWith('scroll bar')) kind = 'scrollbar';
+        else if (lower.startsWith('spinner') || lower.startsWith('spin button')) kind = 'spinner';
+        else if (lower.startsWith('drop down')) kind = 'combo';
+        else if (lower.startsWith('list box')) kind = 'list';
+        else if (lower.startsWith('group box')) kind = 'groupBox';
+        else if (lower.startsWith('label')) kind = 'label';
+    }
+
+    // Label: button/label prefer the shape's text body; other kinds fall
+    // back to the shape name (which Excel uses for accessibility name).
+    let label: string | null = null;
+    if (kind === 'button' || kind === 'label' || kind === 'groupBox') {
+        label = labelFromText ?? shapeName;
+    } else {
+        label = labelFromText ?? shapeName;
+    }
+
+    return {
+        kind,
+        col: col ?? 0,
+        row: row ?? 0,
+        colOff: colOff ?? 0,
+        rowOff: rowOff ?? 0,
+        endCol,
+        endRow,
+        endColOff: resolveEndOffset(anchor, 'colOff'),
+        endRowOff: resolveEndOffset(anchor, 'rowOff'),
+        label,
+        linkedCell,
+        inputRange,
+        checked,
+        min, max, inc, page, val,
+        dropLines,
+        altText,
+    };
+}
+
+// Fish the <xdr:to>'s colOff / rowOff out of an anchor, if present.
+// twoCellAnchor declares this; one- / absoluteAnchor do not, in which case
+// we return null so the renderer can apply default sizing.
+function resolveEndOffset(anchor: Element, attr: 'colOff' | 'rowOff'): number | null {
+    const to = findDirectChildNS(anchor, NS.xdr, 'to');
+    if (!to) return null;
+    const el = findDirectChildNS(to, NS.xdr, attr);
+    if (!el) return null;
+    const n = Number(el.textContent);
+    return Number.isFinite(n) ? n : null;
 }
 
 // Build a SheetShape from a single <xdr:sp> or <xdr:cxnSp>. The anchor
@@ -1574,6 +1912,7 @@ function parseSheet(
     images: SheetImage[] = [],
     charts: SheetChart[] = [],
     shapes: SheetShape[] = [],
+    formControls: SheetFormControl[] = [],
     pivots: SheetPivot[] = [],
     comments: SheetComment[] = [],
     threadedComments: ThreadedCommentEntry[] = [],
@@ -1667,7 +2006,7 @@ function parseSheet(
     return {
         name, state, rows, maxCol, maxRow, merges, columns, rowDimensions,
         conditionalFormatting, frozenPanes, autoFilter, tables, images,
-        charts, shapes, pivots, extensions, comments, threadedComments, view, outline,
+        charts, shapes, formControls, pivots, extensions, comments, threadedComments, view, outline,
         hyperlinks, dataValidationLists, pageBreaks, printArea, headerFooter,
         protection,
     };
