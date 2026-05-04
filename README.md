@@ -36,7 +36,8 @@ The public surface is:
 - Test-visible helpers: `formatNumber`, `parseStyles`, `resolveEffectiveXf`,
   `sanitizeHexColor`, `sanitizeFontFamily`, `sanitizeMediaMime`,
   `isSafeHyperlinkHref`, `bytesToDataUrl`, `a1ToR1c1`, `r1c1ToA1`,
-  `emuToPx`, `evaluateRule`.
+  `emuToPx`, `evaluateRule`, `parseChart`, `renderChart`, `parseSmartArt`,
+  `applyFormControlUpdate`.
 
 Options of note:
 
@@ -46,6 +47,14 @@ Options of note:
   (PDFs, inner xlsx/docx/pptx, images) as `data:` URLs with an
   `<a download>` affordance. 32 MiB cap + MIME allowlist; OLE CFB `.bin`
   streams stay un-inlined.
+- `renderCharts: boolean` — render classic `c:chartSpace` charts as inline
+  SVG (default `true`). When `false`, charts fall back to the dashed
+  placeholder — useful if the consumer wants to paint their own chart UI.
+- `interactiveFormControls: boolean` — opt in to live form widgets.
+  Checkbox / radio / scrollbar / spinner / combo / button render as real
+  HTML inputs whose change events update the `linkedCell` cell in the
+  rendered DOM. Default `false` (the detect-only aside from Wave 8 ships
+  unchanged).
 
 See `src/xlsx-preview.ts` for the full options list.
 
@@ -66,9 +75,14 @@ Form controls (`Sheet.formControls`), slicers (`Sheet.slicers`),
 timelines (`Sheet.timelines`), and OLE / package embeddings
 (`Sheet.embeddings`) all surface as detect-only models with metadata —
 kind, anchor, linkedCell, selectedItems, progId, etc. — and render as
-informational `<aside>` elements. xlsxjs does not paint the live
-interactive widgets; consumers who want real widgets can hydrate against
-the data-attributes.
+informational `<aside>` elements. Form-control widgets become live
+on opt-in (`interactiveFormControls: true`); slicer/timeline UI and
+pivot interactivity are still consumer territory.
+
+Classic chartSpace charts (column / bar / line / pie) render as inline
+SVG via `ChartModel` + `renderChart`. SmartArt hierarchy diagrams
+surface on `Sheet.smartArt` with the parsed tree and render as a nested
+`<ul>` aside (actual diagram geometry is consumer territory for now).
 
 Images render as absolutely-positioned `<figure>`s inside a zero-height
 `.xlsx-image-layer` above the `<table>`, so anchor coordinates place the
@@ -87,7 +101,7 @@ fallbacks, and double borders.
 ```bash
 npm install
 npm run build
-npm run test:render   # jsdom depth harness (92 scenarios)
+npm run test:render   # jsdom depth harness (99 scenarios)
 npm run test:golden   # golden HTML diff against result.html snapshots
 npm test              # Playwright browser smoke (real Chrome, port :3002)
 npm run dev           # static demo server at :8767

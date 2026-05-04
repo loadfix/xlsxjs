@@ -2,8 +2,8 @@
 
 What's still open. The "Resolved in fork" block at the bottom tracks
 features that have shipped on `master` and live in the harness / fixtures.
-Last reconciled 2026-05-04 after Wave 8 (form controls, slicers/timelines,
-OLE embeddings — all detect-only).
+Last reconciled 2026-05-04 after Wave 9 (chart rendering, SmartArt tree,
+interactive form controls).
 
 ## Open — medium items (one slice each)
 
@@ -11,18 +11,16 @@ _Empty — all medium slices shipped in Wave 7._
 
 ## Open — big projects (library-scale)
 
-- [ ] **Chart rendering** — classic `c:chartSpace` (bar/line/pie) +
-  chartEx `cx:chartSpace` (treemap / sunburst / waterfall / funnel /
-  pareto / box-whisker / histogram / map). Implementing properly means a
-  DrawingML subset + axis/series layout. Probably its own library.
-- [ ] **SmartArt** (`xl/diagrams/*.xml` — `data1.xml` + `layout1.xml` +
-  `quickStyle1.xml`) — hierarchy / process diagrams. Outer shape container
-  surfaces today but the graph layout is untouched.
-- [ ] **Form-control interactivity** — detect-only shipped in Wave 8
-  (`Sheet.formControls` + `<aside class="xlsx-form-control">`). Open item
-  is rendering live clickable widgets (radios/checkboxes update
-  `linkedCell` on click, scrollbar drives `val`, etc.). Needs a VML
-  decoder for legacy `xl/drawings/vmlDrawing*.vml` checkbox state.
+- [ ] **Chart rendering (extended)** — Wave 9 ships column / bar / line /
+  pie for classic `c:chartSpace`. Still open: scatter / area, stacked +
+  3D variants, dual axes, trendlines, and every chartEx `cx:chartSpace`
+  (treemap / sunburst / waterfall / funnel / pareto / box-whisker /
+  histogram / map). Would eventually want a DrawingML subset + richer
+  axis/series layout.
+- [ ] **SmartArt (extended)** — Wave 9 ships hierarchy-tree detection +
+  an indented `<ul>` aside (`Sheet.smartArt` with full parent-child
+  structure). Still open: painting the actual diagram (hierarchy boxes,
+  connector arrows, cycle / matrix / radial layouts per `layout1.xml`).
 - [ ] **Slicer / timeline interactivity** — detect-only shipped in
   Wave 8 (`Sheet.slicers` / `Sheet.timelines`). Open item is painting the
   clickable filter-chip / timeline-slider UI and wiring the selection to
@@ -34,6 +32,13 @@ _Empty — all medium slices shipped in Wave 7._
   rather than just surfaced as metadata.
 - [ ] **Pivot table interactivity** — filtering, grouping, drill-down UI.
   Materialised values already render correctly; this is interaction on top.
+- [ ] **Form-control interactivity (extended)** — Wave 9 ships opt-in
+  live widgets (`Options.interactiveFormControls`) for checkbox / radio /
+  scrollbar / spinner / combo / list / button that update the `linkedCell`
+  on change. Still open: sheet-prefixed linkedCell refs
+  (`Sheet2!$A$1`), macro-assigned button click dispatch, and the legacy
+  VML fallback for producers that write controls via `xl/drawings/vmlDrawing*.vml`
+  without a ctrlProp part.
 - [ ] **Encryption: actually decrypt** — password-protected `.xlsx` are OLE
   CFB containers. Today we detect them and throw. Decryption needs SHA-512
   + AES-CBC (+ RC4-40 for legacy) and an OLE CFB reader. Real project;
@@ -41,8 +46,33 @@ _Empty — all medium slices shipped in Wave 7._
 
 ## Resolved in fork
 
-Most recent first (Wave 8 landed 2026-05-04). Earlier groupings blurred
+Most recent first (Wave 9 landed 2026-05-04). Earlier groupings blurred
 together in the interest of a readable tail.
+
+### Wave 9 (first-class rendering + interactivity, 2026-05-04)
+- ✅ **Classic chart rendering** — `parseChart` (`src/chart-parser.ts`) +
+  `renderChart` (`src/chart-renderer.ts`). Column (clustered), horizontal
+  bar, line (with point markers), pie (incl. doughnut). ChartModel
+  surfaces on `SheetChart.model` with typed categories / series /
+  values / colour / title / legend position. Fixture: `tests/render-test/charts/`.
+  Gated CSS keeps existing snapshots byte-stable. Falls back to the
+  dashed placeholder for scatter / area / chartEx / unknown chart types
+  (and whenever `Options.renderCharts: false`).
+- ✅ **SmartArt tree detection** — `parseSmartArt`
+  (`src/smartart-parser.ts`) builds a hierarchy from `xl/diagrams/data1.xml`
+  + `layout1.xml`. `Sheet.smartArt: SheetSmartArt[]` surfaces the parsed
+  tree plus the layout uniqueId. Renderer emits
+  `<aside class="xlsx-smartart">` with a nested `<ul>` where each `<li>`
+  carries `data-level` matching its depth. 32-hop cycle guard for
+  malformed diagrams. Actual diagram-shape geometry is still deferred.
+- ✅ **Interactive form controls** — `Options.interactiveFormControls`
+  (default off) swaps the detect-only `<aside>` body for real inputs:
+  `<input type="checkbox">` / `type="radio"` / `type="range"` /
+  `type="number"` / `<select>` / `<button>`. Change + input events route
+  through the exported `applyFormControlUpdate(container, linkedCell, value)`
+  helper which writes the new value into the linked cell's `<td>`.
+  Default-off guarantees Wave 8 snapshots remain byte-stable. Sheet-
+  prefixed `linkedCell` refs log a console.warn + skip (future wave).
 
 ### Wave 8 (detect-only slices, 2026-05-04)
 - ✅ **Form-control detection** — `Sheet.formControls: SheetFormControl[]`
