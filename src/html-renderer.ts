@@ -2,7 +2,7 @@
 // sheet, each containing an <h2> sheet name and a <table> of the cells.
 // Numeric cells get a numeric-aligned class; other kinds render as text.
 
-import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, SheetShape, SheetSlicer, SheetTimeline, SheetImage, SheetEmbedding, SheetFormControl, RowDimension, ThreadedCommentEntry, Hyperlink, PhoneticRun } from './workbook-parser';
+import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, SheetShape, SheetSlicer, SheetTimeline, SheetImage, SheetEmbedding, SheetFormControl, SheetSmartArt, SmartArtNode, RowDimension, ThreadedCommentEntry, Hyperlink, PhoneticRun } from './workbook-parser';
 import { isSafeHyperlinkHref } from './workbook-parser';
 import { indexToColumnLetters, emuToPx } from './utils';
 import { h } from './html';
@@ -53,7 +53,8 @@ export class HtmlRenderer {
         // more embeddings. A workbook with zero embeddings renders exactly
         // the same CSS it did before the feature landed.
         const hasEmbeddings = workbook.sheets.some((s) => s.embeddings && s.embeddings.length > 0);
-        nodes.push(renderStyle(options.className, { withEmbeddings: hasEmbeddings }));
+        const hasSmartArt = workbook.sheets.some((s) => s.smartArt && s.smartArt.length > 0);
+        nodes.push(renderStyle(options.className, { withEmbeddings: hasEmbeddings, withSmartArt: hasSmartArt }));
         for (const sheet of workbook.sheets) {
             // Skip hidden and veryHidden sheets — the demo's sheet-switcher
             // omits them too so section/index pairings stay in sync.
@@ -64,7 +65,7 @@ export class HtmlRenderer {
     }
 }
 
-function renderStyle(className: string, opts: { withEmbeddings: boolean } = { withEmbeddings: false }): HTMLStyleElement {
+function renderStyle(className: string, opts: { withEmbeddings: boolean; withSmartArt?: boolean } = { withEmbeddings: false, withSmartArt: false }): HTMLStyleElement {
     const style = document.createElement('style');
     style.setAttribute('data-xlsxjs', '');
     // Kept intentionally small — consumers style further via their own CSS.
@@ -85,6 +86,28 @@ function renderStyle(className: string, opts: { withEmbeddings: boolean } = { wi
 .${className} .xlsx-image-layer > .xlsx-embedding {
     position: absolute; pointer-events: auto;
     max-width: 320px;
+}` : '';
+    // Same gating pattern as embeddings: only append SmartArt rules when the
+    // workbook actually carries a diagram. Workbooks without SmartArt get
+    // exactly the pre-existing CSS so golden snapshots stay byte-stable.
+    const smartArtCss = opts.withSmartArt ? `
+.${className} .xlsx-smartart {
+    border: 1px dashed #b0b0b0; border-radius: 2px;
+    padding: 0.5em; margin: 0.5em 0;
+    color: #333; font-size: 0.9em;
+    background: #fafbfc;
+}
+.${className} .xlsx-smartart ul {
+    list-style: none; padding-left: 1em; margin: 0;
+}
+.${className} .xlsx-smartart > ul { padding-left: 0; }
+.${className} .xlsx-smartart li { margin: 0.1em 0; }
+.${className} .xlsx-smartart .xlsx-smartart-node {
+    display: inline-block; padding: 1px 4px;
+}
+.${className} .xlsx-image-layer > .xlsx-smartart {
+    position: absolute; pointer-events: auto;
+    max-width: 480px;
 }` : '';
     style.textContent = `
 .${className} { font-family: system-ui, sans-serif; }
@@ -170,7 +193,7 @@ function renderStyle(className: string, opts: { withEmbeddings: boolean } = { wi
 .${className} .xlsx-header, .${className} .xlsx-footer {
     display: grid; grid-template-columns: 1fr 1fr 1fr;
     font-size: 0.85em; color: #666; margin: 0.5em 0;
-}
+}${smartArtCss}
     `.trim();
     return style;
 }
@@ -677,7 +700,8 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
     // to the section-level render step after the table.
     const anchoredEmbeddings = sheet.embeddings.filter((e) => e.col !== null && e.row !== null);
     const unanchoredEmbeddings = sheet.embeddings.filter((e) => e.col === null || e.row === null);
-    if (sheet.images.length > 0 || sheet.formControls.length > 0 || anchoredEmbeddings.length > 0) {
+    const smartArtEntries = sheet.smartArt ?? [];
+    if (sheet.images.length > 0 || sheet.formControls.length > 0 || anchoredEmbeddings.length > 0 || smartArtEntries.length > 0) {
         const imageLayer = document.createElement('div');
         imageLayer.className = 'xlsx-image-layer';
         // position:relative + height:0 so the layer establishes a positioning
@@ -701,6 +725,14 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
             // the cell index pair — so we skip colOff/rowOff here.
             const left = GUTTER_WIDTH_PX + sumColsPx(emb.col as number, widthByCol, hiddenCols);
             const top = sumRowsPx(emb.row as number, rowDim);
+            aside.style.left = `${left}px`;
+            aside.style.top = `${top}px`;
+            imageLayer.appendChild(aside);
+        }
+        for (const art of smartArtEntries) {
+            const aside = renderSmartArt(art);
+            const left = GUTTER_WIDTH_PX + sumColsPx(art.col, widthByCol, hiddenCols);
+            const top = sumRowsPx(art.row, rowDim);
             aside.style.left = `${left}px`;
             aside.style.top = `${top}px`;
             imageLayer.appendChild(aside);
@@ -925,6 +957,58 @@ function renderShape(shape: SheetShape): HTMLElement {
         aside.appendChild(pre);
     }
     return aside;
+}
+
+// Build an `<aside class="xlsx-smartart">` carrying the diagram's hierarchy
+// tree. We deliberately do NOT attempt to reproduce Excel's fancy diagram
+// layout (hierarchy tree lines, cycle rings, pyramid stacks) — instead we
+// emit a nested <ul> that captures the parsed parent-of graph. Consumers who
+// want the real layout can hydrate against the `data-layout` attribute and
+// the per-<li> `data-level` attribute to build their own geometry.
+//
+// All attacker-controlled strings (node text, layout name, model name) reach
+// the DOM via textContent / setAttribute only. The <aside> receives CSS
+// position:absolute when it lands inside the image overlay layer; its
+// default in-flow style (no image layer) leaves it flowing above the table,
+// matching how the slicer / timeline asides behave.
+function renderSmartArt(art: SheetSmartArt): HTMLElement {
+    const aside = document.createElement('aside');
+    aside.className = 'xlsx-smartart';
+    aside.style.position = 'absolute';
+    aside.style.pointerEvents = 'auto';
+    if (art.model?.layout) aside.setAttribute('data-layout', art.model.layout);
+    if (art.name) aside.setAttribute('data-name', art.name);
+    aside.setAttribute('data-anchor-col', String(art.col));
+    aside.setAttribute('data-anchor-row', String(art.row));
+    if (art.endCol !== null) aside.setAttribute('data-anchor-end-col', String(art.endCol));
+    if (art.endRow !== null) aside.setAttribute('data-anchor-end-row', String(art.endRow));
+
+    const roots = art.model?.rootNodes ?? [];
+    aside.appendChild(renderSmartArtList(roots, 0));
+    return aside;
+}
+
+// Recursively build a <ul> for a list of SmartArt nodes at the given depth.
+// Each <li> carries a data-level attribute matching its depth (0-based) and
+// a <span class="xlsx-smartart-node"> containing the node text via
+// textContent. Empty-text nodes still render with a <span> so the DOM shape
+// stays predictable (consumers can filter by absence of text in their
+// hydration code).
+function renderSmartArtList(nodes: SmartArtNode[], depth: number): HTMLUListElement {
+    const ul = document.createElement('ul');
+    for (const node of nodes) {
+        const li = document.createElement('li');
+        li.setAttribute('data-level', String(depth));
+        const span = document.createElement('span');
+        span.className = 'xlsx-smartart-node';
+        span.textContent = node.text;
+        li.appendChild(span);
+        if (node.children.length > 0) {
+            li.appendChild(renderSmartArtList(node.children, depth + 1));
+        }
+        ul.appendChild(li);
+    }
+    return ul;
 }
 
 // Build an `<aside class="xlsx-form-control">` for one form-control entry.

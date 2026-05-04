@@ -11,6 +11,9 @@ import { parseStyles, parseColorElement, type Styles, type FontStyle, type Under
 import { parseTheme, type Theme, type ColorRef } from './theme';
 import { parseConditionalFormatting, parseSqref, type ConditionalFormatting } from './conditional-format';
 import { bytesToDataUrl, sanitizeMediaMime } from './workbook';
+import { parseSmartArt, type SmartArtModel } from './smartart-parser';
+export type { SmartArtModel, SmartArtNode } from './smartart-parser';
+export { parseSmartArt } from './smartart-parser';
 
 // URL schemes we'll emit as an `<a href="…">` in the rendered sheet. Anything
 // outside this set (most importantly `javascript:` / `data:` / `vbscript:` /
@@ -399,6 +402,28 @@ export interface SheetShape {
     endRow: number | null;
 }
 
+// A SmartArt diagram anchored inside a sheet. The outer `<xdr:graphicFrame>`
+// shape surfaces on `Sheet.shapes` independently; this entry is the parsed
+// data model (`xl/diagrams/data1.xml`) + the layout uniqueId from
+// `xl/diagrams/layout1.xml`. Detection-only: xlsxjs renders an indented
+// tree aside — no layout graph interpretation. See `src/smartart-parser.ts`
+// for the model shape and `renderSmartArt` in html-renderer for the DOM.
+export interface SheetSmartArt {
+    // cNvPr @name on the hosting <xdr:graphicFrame>, or null when absent.
+    // Never used in CSS / selectors — only reaches the DOM via setAttribute.
+    name: string | null;
+    // 0-based anchor coordinates straight off the <xdr:twoCellAnchor>'s
+    // <xdr:from> / <xdr:to>. oneCellAnchor-wrapped SmartArt is rare; when
+    // encountered, endCol/endRow fall back to null.
+    col: number;
+    row: number;
+    endCol: number | null;
+    endRow: number | null;
+    // Parsed data model. null when the diagram's data1.xml is missing or
+    // unparseable (the outer graphicFrame still surfaces on shapes[]).
+    model: SmartArtModel | null;
+}
+
 // A form-control anchored inside a sheet. Detect-only: we surface the
 // metadata from `xl/ctrlProps/ctrlProp{N}.xml` + the hosting `<xdr:sp>` so
 // consumers can discover buttons / checkboxes / scrollbars / dropdowns
@@ -656,6 +681,13 @@ export interface Sheet {
     images: SheetImage[];
     charts: SheetChart[];
     shapes: SheetShape[];
+    // SmartArt diagrams anchored on the sheet. Detection-only: the model is
+    // a hierarchy tree parsed from xl/diagrams/data1.xml; the outer
+    // <xdr:graphicFrame> shape still surfaces on shapes[] under the same
+    // anchor. Callers that want to render a fancy layout can branch on
+    // model.layout (the layoutDef @uniqueId, e.g.
+    // ".../layout/hierarchy1") while the DOM-side tree stays stable.
+    smartArt: SheetSmartArt[];
     // Form controls (buttons, checkboxes, radios, scrollbars, dropdowns…).
     // Detect-only: the renderer emits an informational `<aside>` rather
     // than an interactive widget. Kept separate from `shapes[]` because
@@ -728,7 +760,16 @@ const NS = {
     x14:   'http://schemas.microsoft.com/office/spreadsheetml/2009/9/main',
     // Excel 2013 x15 — timelines. (x14 slicers live in x14; timelines in x15.)
     x15:   'http://schemas.microsoft.com/office/spreadsheetml/2010/11/main',
+    // DrawingML diagram (SmartArt). The <dgm:relIds> child of a graphicFrame's
+    // <a:graphicData> binds r:dm / r:lo / r:qs / r:cs rIds to data1.xml /
+    // layout1.xml / quickStyle1.xml / colors1.xml respectively.
+    dgm:   'http://schemas.openxmlformats.org/drawingml/2006/diagram',
 };
+
+// URI that marks a graphicFrame's <a:graphicData> as carrying a SmartArt
+// diagram (rather than a chart or ink annotation). Identity constant — not
+// used in a CSS selector or innerHTML.
+const SMARTART_GRAPHIC_URI = 'http://schemas.openxmlformats.org/drawingml/2006/diagram';
 
 export class WorkbookParser {
     constructor(private _options: Options) {}
@@ -793,7 +834,7 @@ export class WorkbookParser {
             const xml = parts[xmlPath];
             if (!xml) continue;
             const tables = resolveTablesForSheet(xmlPath, parts);
-            const { images, charts, shapes, formControls } = resolveDrawingsForSheet(xmlPath, parts, media);
+            const { images, charts, shapes, formControls, smartArt } = resolveDrawingsForSheet(xmlPath, parts, media);
             const pivots = resolvePivotsForSheet(xmlPath, parts);
             const { slicers, timelines } = resolveSlicersAndTimelinesForSheet(xmlPath, parts);
             const comments = resolveCommentsForSheet(xmlPath, parts);
@@ -803,7 +844,7 @@ export class WorkbookParser {
                 xmlPath, xml, parts, embeddingBytes, contentTypes,
                 this._options.inlineEmbeddings === true,
             );
-            sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, shapes, formControls, embeddings, pivots, slicers, timelines, comments, threadedComments, hyperlinkTargets, i, definedNames, metadata));
+            sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, shapes, formControls, embeddings, pivots, slicers, timelines, comments, threadedComments, hyperlinkTargets, i, definedNames, metadata, smartArt));
         }
 
         return { sheets, styles, theme, persons, date1904, definedNames, metadata };
@@ -1336,16 +1377,17 @@ function resolveDrawingsForSheet(
     sheetPath: string,
     parts: Record<string, string>,
     media: Record<string, string>,
-): { images: SheetImage[]; charts: SheetChart[]; shapes: SheetShape[]; formControls: SheetFormControl[] } {
+): { images: SheetImage[]; charts: SheetChart[]; shapes: SheetShape[]; formControls: SheetFormControl[]; smartArt: SheetSmartArt[] } {
     const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
     const relsXml = parts[relsPath];
-    if (!relsXml) return { images: [], charts: [], shapes: [], formControls: [] };
+    if (!relsXml) return { images: [], charts: [], shapes: [], formControls: [], smartArt: [] };
     const rels = parseRelationships(relsXml);
     const dir = sheetPath.replace(/\/[^/]+$/, '');
     const images: SheetImage[] = [];
     const charts: SheetChart[] = [];
     const shapes: SheetShape[] = [];
     const formControls: SheetFormControl[] = [];
+    const smartArt: SheetSmartArt[] = [];
     for (const [, rel] of rels) {
         if (!rel.type.endsWith('/drawing')) continue;
         const drawingPath = rel.target.startsWith('/')
@@ -1368,8 +1410,9 @@ function resolveDrawingsForSheet(
         charts.push(...parsed.charts);
         shapes.push(...parsed.shapes);
         formControls.push(...parsed.formControls);
+        smartArt.push(...parsed.smartArt);
     }
-    return { images, charts, shapes, formControls };
+    return { images, charts, shapes, formControls, smartArt };
 }
 
 function resolvePivotsForSheet(
@@ -1819,12 +1862,13 @@ function parseDrawing(
     drawingDir: string,
     parts: Record<string, string>,
     media: Record<string, string>,
-): { images: SheetImage[]; charts: SheetChart[]; shapes: SheetShape[]; formControls: SheetFormControl[] } {
+): { images: SheetImage[]; charts: SheetChart[]; shapes: SheetShape[]; formControls: SheetFormControl[]; smartArt: SheetSmartArt[] } {
     const doc = parseXml(xml);
     const images: SheetImage[] = [];
     const charts: SheetChart[] = [];
     const shapes: SheetShape[] = [];
     const formControls: SheetFormControl[] = [];
+    const smartArt: SheetSmartArt[] = [];
     // DrawingML anchors come in three flavours; each carries <pic> /
     // <graphicFrame> / <sp> / <cxnSp> children we care about. We tag the
     // mode here so the model + renderer can apply the right sizing path.
@@ -1948,6 +1992,62 @@ function parseDrawing(
             });
         }
 
+        // SmartArt detection. A SmartArt diagram surfaces as a
+        // <xdr:graphicFrame> whose <a:graphicData uri="…/diagram"> wraps a
+        // <dgm:relIds r:dm="…" r:lo="…" r:qs="…" r:cs="…"/>. The four rIds
+        // resolve against the drawing's rels into xl/diagrams/data1.xml
+        // (data model), layout1.xml, quickStyle1.xml, and colors1.xml.
+        // We care about data1.xml (hierarchy / text) + layout1.xml
+        // (layoutDef @uniqueId); the other two describe styling we don't
+        // render.
+        //
+        // The outer graphicFrame already contributes to `shapes[]` via
+        // <xdr:graphicFrame> shape detection elsewhere; SmartArt surfaces
+        // the parsed data model on a dedicated sheet-level array so a
+        // consumer can walk the tree without having to re-parse the
+        // drawing xml.
+        const graphicFrame = anchor.getElementsByTagNameNS(NS.xdr, 'graphicFrame').item(0);
+        if (graphicFrame) {
+            const graphicData = graphicFrame.getElementsByTagNameNS(NS.a, 'graphicData').item(0);
+            const uri = graphicData?.getAttribute('uri') ?? '';
+            if (uri === SMARTART_GRAPHIC_URI) {
+                const relIdsEl = graphicData!.getElementsByTagNameNS(NS.dgm, 'relIds').item(0);
+                if (relIdsEl) {
+                    const dmId = relIdsEl.getAttributeNS(NS.rel, 'dm');
+                    const loId = relIdsEl.getAttributeNS(NS.rel, 'lo');
+                    const dmRel = dmId ? rels.get(dmId) : undefined;
+                    const loRel = loId ? rels.get(loId) : undefined;
+                    let dataXml: string | null = null;
+                    let layoutXml: string | null = null;
+                    if (dmRel) {
+                        const dataPath = dmRel.target.startsWith('/')
+                            ? dmRel.target.slice(1)
+                            : normaliseRelPath(`${drawingDir}/${dmRel.target}`);
+                        dataXml = parts[dataPath] ?? null;
+                    }
+                    if (loRel) {
+                        const layoutPath = loRel.target.startsWith('/')
+                            ? loRel.target.slice(1)
+                            : normaliseRelPath(`${drawingDir}/${loRel.target}`);
+                        layoutXml = parts[layoutPath] ?? null;
+                    }
+                    // cNvPr sits under graphicFrame/nvGraphicFramePr/cNvPr.
+                    // Match via the subtree so wrapping layers don't break us.
+                    const cNvPr = graphicFrame.getElementsByTagNameNS(NS.xdr, 'cNvPr').item(0);
+                    const name = cNvPr?.getAttribute('name') || null;
+                    const model = dataXml ? parseSmartArt(dataXml, layoutXml) : null;
+                    smartArt.push({
+                        name,
+                        col: col ?? 0,
+                        row: row ?? 0,
+                        endCol,
+                        endRow,
+                        model,
+                    });
+                }
+            }
+        }
+
         // Shapes (xdr:sp) + connectors (xdr:cxnSp). Form controls wrap their
         // shape in <mc:AlternateContent>; getElementsByTagNameNS still finds
         // the inner <xdr:sp> so the form control surfaces with the same
@@ -1996,7 +2096,7 @@ function parseDrawing(
             }
         }
     }
-    return { images, charts, shapes, formControls };
+    return { images, charts, shapes, formControls, smartArt };
 }
 
 // Scan an anchor's descendants for any `r:id` attribute resolving to a
@@ -2586,6 +2686,7 @@ function parseSheet(
     sheetIndex: number = 0,
     definedNames: DefinedName[] = [],
     metadata: WorkbookMetadata | null = null,
+    smartArt: SheetSmartArt[] = [],
 ): Sheet {
     const doc = parseXml(xml);
     const rowEls = doc.getElementsByTagNameNS(NS.main, 'row');
@@ -2672,7 +2773,7 @@ function parseSheet(
     return {
         name, state, rows, maxCol, maxRow, merges, columns, rowDimensions,
         conditionalFormatting, frozenPanes, autoFilter, tables, images,
-        charts, shapes, formControls, embeddings, pivots, slicers, timelines, extensions, comments, threadedComments, view, outline,
+        charts, shapes, smartArt, formControls, embeddings, pivots, slicers, timelines, extensions, comments, threadedComments, view, outline,
         hyperlinks, dataValidationLists, pageBreaks, printArea, headerFooter,
         protection,
     };

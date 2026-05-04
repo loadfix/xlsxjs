@@ -177,6 +177,20 @@ export class Workbook {
             }
         }
 
+        // xl/diagrams/*.xml — SmartArt parts. A diagram is bound together
+        // by four files: data1.xml (point list + parent-of connections),
+        // layout1.xml (the visual layout algorithm), quickStyle1.xml, and
+        // colors1.xml. We keep all four as strings so the parser can read
+        // the data model + pull the layoutDef @uniqueId from layout1.xml.
+        // xlsxjs does NOT interpret layout / styles / colours — the renderer
+        // emits a detect-only indented tree keyed off the data model.
+        for (const p of Object.keys(zip.files)) {
+            if (/^xl\/diagrams\/.*\.xml$/i.test(p)) {
+                const xml = await readIfPresent(p);
+                if (xml) wb.parts[p] = xml;
+            }
+        }
+
         // Pivot tables, slicers, timelines, and their caches. xlsxjs does not
         // re-compute pivot values (the sheet xml already carries them), but we
         // surface the anchored range + name on the model so consumers can

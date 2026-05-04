@@ -4,8 +4,8 @@ import { WorkbookParser } from './workbook-parser';
 import { HtmlRenderer } from './html-renderer';
 import { h } from './html';
 
-export type { Workbook as ParsedWorkbook, Sheet, SheetView, Cell, RichTextRun, SharedString, PhoneticRun, FrozenPanes, AutoFilter, TableDef, SheetChart, SheetPivot, SheetSlicer, SheetTimeline, SheetExtensionUri, SheetImage, SheetEmbedding, SheetComment, ThreadedCommentEntry, SheetOutline, DefinedName, ColumnWidth, RowDimension, Hyperlink, DataValidationList, PageBreaks, PrintAreaRange, HeaderFooter, HeaderFooterZones } from './workbook-parser';
-export { parseThreadedComments, isSafeHyperlinkHref } from './workbook-parser';
+export type { Workbook as ParsedWorkbook, Sheet, SheetView, Cell, RichTextRun, SharedString, PhoneticRun, FrozenPanes, AutoFilter, TableDef, SheetChart, SheetPivot, SheetSlicer, SheetTimeline, SheetExtensionUri, SheetImage, SheetEmbedding, SheetComment, ThreadedCommentEntry, SheetOutline, DefinedName, ColumnWidth, RowDimension, Hyperlink, DataValidationList, PageBreaks, PrintAreaRange, HeaderFooter, HeaderFooterZones, SheetSmartArt, SmartArtModel, SmartArtNode } from './workbook-parser';
+export { parseThreadedComments, isSafeHyperlinkHref, parseSmartArt } from './workbook-parser';
 export type { Styles, CellXf, FontStyle, FillStyle, BorderStyle, Dxf, UnderlineStyle } from './styles';
 export type { Theme, ColorRef } from './theme';
 export type { ConditionalFormatting, CfRule, CfRuleType, CfOperator, CellRange, Cfvo, ColorScale, DataBar, IconSet } from './conditional-format';
