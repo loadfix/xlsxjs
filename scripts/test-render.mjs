@@ -1126,6 +1126,91 @@ async function renderFixture(path, options) {
         `40d: Alpha should have no data-tab-color (got "${alphaSection.getAttribute('data-tab-color')}")`);
 }
 
+// ── 44. Row outline levels: parsed model + data attributes on <tr> ────────
+// The fixture has five rows at outline levels 0, 1, 2, 1, 0. Row 3 (index 2)
+// sits at the deepest level; rows 2 + 4 bracket it at level 1.
+{
+    const { wb, container } = await renderFixture('outlines-and-names');
+    const sheet = wb.parsed.sheets[0];
+
+    // Parser: rowDimensions carries every row that has an outlineLevel, even
+    // without height / hidden flags. Expect 3 entries (rows 1..3, indices 1..3).
+    const byRow = sheet.rowDimensions.reduce((acc, d) => { acc[d.row] = d; return acc; }, {});
+    assert(byRow[1]?.outlineLevel === 1, `44a: row 1 outlineLevel 1 (got ${byRow[1]?.outlineLevel})`);
+    assert(byRow[2]?.outlineLevel === 2, `44b: row 2 outlineLevel 2 (got ${byRow[2]?.outlineLevel})`);
+    assert(byRow[3]?.outlineLevel === 1, `44c: row 3 outlineLevel 1 (got ${byRow[3]?.outlineLevel})`);
+    // Rows 0 + 4 carry outline level 0 and no other meaningful flags, so
+    // rowDimensions doesn't bother listing them.
+    assert(byRow[0] === undefined, `44d: row 0 should not be in rowDimensions (got ${JSON.stringify(byRow[0])})`);
+    assert(byRow[4] === undefined, `44e: row 4 should not be in rowDimensions (got ${JSON.stringify(byRow[4])})`);
+
+    // Sheet outline struct.
+    assert(sheet.outline.maxRowLevel === 2, `44f: maxRowLevel 2 (got ${sheet.outline.maxRowLevel})`);
+    assert(sheet.outline.maxColLevel === 1, `44g: maxColLevel 1 (got ${sheet.outline.maxColLevel})`);
+    assert(sheet.outline.summaryBelow === true, `44h: summaryBelow default true (got ${sheet.outline.summaryBelow})`);
+    assert(sheet.outline.summaryRight === false, `44i: summaryRight flipped false (got ${sheet.outline.summaryRight})`);
+
+    // DOM: <tr data-outline-level="2"> + .xlsx-outline-2 on the deepest row.
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    assert(rows[2].getAttribute('data-outline-level') === '2',
+        `44j: deepest row should have data-outline-level="2" (got "${rows[2].getAttribute('data-outline-level')}")`);
+    assert(rows[2].classList.contains('xlsx-outline-2'),
+        `44k: deepest row should carry .xlsx-outline-2 (classes: "${rows[2].className}")`);
+    assert(rows[1].getAttribute('data-outline-level') === '1',
+        `44l: row 1 should have data-outline-level="1" (got "${rows[1].getAttribute('data-outline-level')}")`);
+    assert(rows[0].getAttribute('data-outline-level') === null,
+        `44m: row 0 should have no outline-level attr (got "${rows[0].getAttribute('data-outline-level')}")`);
+}
+
+// ── 45. Column outline levels: colgroup + header th data attributes ───────
+{
+    const { wb, container } = await renderFixture('outlines-and-names');
+    const sheet = wb.parsed.sheets[0];
+
+    // Parser: one column entry (col B = index 1) with outlineLevel=1.
+    assert(sheet.columns.length === 1, `45a: one column entry (got ${sheet.columns.length})`);
+    assert(sheet.columns[0].min === 1 && sheet.columns[0].max === 1,
+        `45b: column B covers idx 1..1 (got min=${sheet.columns[0].min} max=${sheet.columns[0].max})`);
+    assert(sheet.columns[0].outlineLevel === 1,
+        `45c: column B outlineLevel 1 (got ${sheet.columns[0].outlineLevel})`);
+
+    // DOM: the <col> for col B (gutter + A = idx 2 in colgroup) carries
+    // data-outline-level + .xlsx-outline-1; same for the thead <th> at idx 2.
+    const cols = container.querySelectorAll('section.xlsx colgroup col');
+    assert(cols[2].getAttribute('data-outline-level') === '1',
+        `45d: colgroup col B should have data-outline-level (got "${cols[2].getAttribute('data-outline-level')}")`);
+    assert(cols[2].classList.contains('xlsx-outline-1'),
+        `45e: colgroup col B should carry .xlsx-outline-1 (classes: "${cols[2].className}")`);
+
+    const headers = container.querySelectorAll('section.xlsx thead th');
+    // headers[0] = corner, [1] = A, [2] = B, [3] = C.
+    assert(headers[2].getAttribute('data-outline-level') === '1',
+        `45f: thead th B should have data-outline-level (got "${headers[2].getAttribute('data-outline-level')}")`);
+    assert(headers[1].getAttribute('data-outline-level') === null,
+        `45g: thead th A should have no outline-level attr`);
+}
+
+// ── 46. Workbook defined names: parse + model surface ─────────────────────
+{
+    const { wb } = await renderFixture('outlines-and-names');
+    const names = wb.parsed.definedNames;
+    assert(Array.isArray(names), '46a: definedNames should be an array');
+    assert(names.length === 2, `46b: expected 2 definedNames (got ${names.length})`);
+
+    const byName = names.reduce((acc, n) => { acc[n.name] = n; return acc; }, {});
+    const total = byName['TotalRange'];
+    assert(!!total, '46c: workbook-scoped "TotalRange" should be present');
+    assert(total.localSheetId === null, `46d: TotalRange localSheetId should be null (got ${total.localSheetId})`);
+    assert(total.formula === 'Sheet1!$A$1:$C$5', `46e: TotalRange formula (got "${total.formula}")`);
+    assert(total.hidden === false, `46f: TotalRange not hidden (got ${total.hidden})`);
+
+    const printArea = byName['_xlnm.Print_Area'];
+    assert(!!printArea, '46g: print-area defined name should be present');
+    assert(printArea.localSheetId === 0, `46h: print-area localSheetId should be 0 (got ${printArea.localSheetId})`);
+    assert(printArea.formula === 'Sheet1!$A$1:$C$3', `46i: print-area formula (got "${printArea.formula}")`);
+    assert(printArea.hidden === true, `46j: print-area hidden=true (got ${printArea.hidden})`);
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

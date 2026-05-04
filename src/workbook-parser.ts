@@ -67,14 +67,48 @@ export interface ColumnWidth {
     // converts to pixels when non-null.
     width: number | null;
     hidden: boolean;
+    // <col outlineLevel="N"/> — 0 when absent. Groups adjacent columns in
+    // the Excel UI; xlsxjs doesn't render a collapse affordance but exposes
+    // the level on the model + as a data attribute in the DOM.
+    outlineLevel: number;
 }
 
 export interface RowDimension {
-    // 0-based row index. Present only when the row carries a custom height
-    // and/or hidden flag — sparse by design.
+    // 0-based row index. Present only when the row carries a custom height,
+    // a hidden flag, or an outlineLevel — sparse by design.
     row: number;
     // Height in points. null when only the hidden flag was set.
     height: number | null;
+    hidden: boolean;
+    // <row outlineLevel="N"/> — 0 when absent. Same semantics as
+    // ColumnWidth.outlineLevel, applied to rows.
+    outlineLevel: number;
+}
+
+// Sheet-wide outline configuration (sheetFormatPr + sheetPr/outlinePr). The
+// max levels mirror the deepest row/col outline observed in the sheet. The
+// summary flags govern which side of a group the summary row/column sits on
+// (default: below for rows, right for columns).
+export interface SheetOutline {
+    maxRowLevel: number;    // from sheetFormatPr/@outlineLevelRow (default 0)
+    maxColLevel: number;    // from sheetFormatPr/@outlineLevelCol (default 0)
+    summaryBelow: boolean;  // sheetPr/outlinePr/@summaryBelow (default true)
+    summaryRight: boolean;  // sheetPr/outlinePr/@summaryRight (default true)
+}
+
+// A workbook-scoped defined name. localSheetId is null for workbook-scoped
+// names (the default) or a 0-based sheet index when the name is local to
+// one sheet. Excel stores print areas, print titles, and autoFilter state
+// as `_xlnm.*` defined names — we expose them here without filtering so
+// callers can pick out the bits they care about.
+export interface DefinedName {
+    name: string;
+    localSheetId: number | null;
+    // The raw reference / formula (e.g. "Sheet1!$A$1:$B$2"). xlsxjs does not
+    // evaluate or resolve this — consumers can parse it themselves.
+    formula: string;
+    // @hidden="1" marks print-area / print-titles / autoFilter internals
+    // that Excel hides from the user-facing name manager UI.
     hidden: boolean;
 }
 
@@ -231,6 +265,7 @@ export interface Sheet {
     // the documented defaults (showGridLines=true, showRowColHeaders=true,
     // rightToLeft=false, zoomScale=null, tabColor=null).
     view: SheetView;
+    outline: SheetOutline;
 }
 
 export interface Workbook {
@@ -246,6 +281,10 @@ export interface Workbook {
     // pre-2011 convention, no leap bug). Threaded into formatNumber so date
     // cells render correctly on files authored under either convention.
     date1904: boolean;
+    // Workbook-scoped defined names. Includes `_xlnm.*` internals (print
+    // areas, print titles, autoFilter state) — no filtering here so
+    // consumers see everything Excel persists.
+    definedNames: DefinedName[];
 }
 
 const NS = {
@@ -293,7 +332,7 @@ export class WorkbookParser {
         const persons = resolvePersons(rels, parts);
 
         const sheetMeta = parseSheetList(workbookXml);
-        const { date1904 } = parseWorkbookMeta(workbookXml);
+        const { date1904, definedNames } = parseWorkbookMeta(workbookXml);
         const sheets: Sheet[] = [];
         for (let i = 0; i < sheetMeta.length; i++) {
             const { name, rId, state } = sheetMeta[i];
@@ -316,20 +355,36 @@ export class WorkbookParser {
             sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments));
         }
 
-        return { sheets, styles, theme, persons, date1904 };
+        return { sheets, styles, theme, persons, date1904, definedNames };
     }
 }
 
 // Parse the small set of workbook-wide flags we care about from xl/workbook.xml.
-// Today that's just `<workbookPr date1904="1"/>`; more flags can join this
-// reader as they come online (e.g. backupFile, showPivotChartFilter).
-function parseWorkbookMeta(workbookXml: string): { date1904: boolean } {
+// Today that covers `<workbookPr date1904="1"/>` plus the `<definedNames>`
+// registry; more flags can join this reader as they come online.
+function parseWorkbookMeta(workbookXml: string): { date1904: boolean; definedNames: DefinedName[] } {
     const doc = parseXml(workbookXml);
     const pr = doc.getElementsByTagNameNS(NS.main, 'workbookPr').item(0);
-    if (!pr) return { date1904: false };
-    const attr = pr.getAttribute('date1904');
-    const date1904 = attr === '1' || attr === 'true';
-    return { date1904 };
+    let date1904 = false;
+    if (pr) {
+        const attr = pr.getAttribute('date1904');
+        date1904 = attr === '1' || attr === 'true';
+    }
+    const definedNames: DefinedName[] = [];
+    const dnEls = doc.getElementsByTagNameNS(NS.main, 'definedName');
+    for (let i = 0; i < dnEls.length; i++) {
+        const el = dnEls[i];
+        const name = el.getAttribute('name');
+        if (!name) continue;
+        const localAttr = el.getAttribute('localSheetId');
+        const localSheetId = localAttr != null && Number.isFinite(Number(localAttr))
+            ? Number(localAttr)
+            : null;
+        const hidden = el.getAttribute('hidden') === '1';
+        const formula = el.textContent ?? '';
+        definedNames.push({ name, localSheetId, formula, hidden });
+    }
+    return { date1904, definedNames };
 }
 
 // xl/persons/person.xml holds the GUID → displayName registry shared by
@@ -956,8 +1011,12 @@ function parseSheet(
             const h = Number(htAttr);
             if (Number.isFinite(h) && h >= 0) height = h;
         }
-        if (height !== null || hidden) {
-            rowDimensions.push({ row: rowIndex, height, hidden });
+        const outlineAttr = rowEl.getAttribute('outlineLevel');
+        const outlineLevel = outlineAttr != null && Number.isFinite(Number(outlineAttr))
+            ? Math.max(0, Number(outlineAttr))
+            : 0;
+        if (height !== null || hidden || outlineLevel > 0) {
+            rowDimensions.push({ row: rowIndex, height, hidden, outlineLevel });
             if (rowIndex > maxRow) maxRow = rowIndex;
         }
 
@@ -990,11 +1049,12 @@ function parseSheet(
     const autoFilter = parseAutoFilter(doc);
     const extensions = collectExtensionUris(doc);
     const view = parseSheetView(doc);
+    const outline = parseSheetOutline(doc);
 
     return {
         name, state, rows, maxCol, maxRow, merges, columns, rowDimensions,
         conditionalFormatting, frozenPanes, autoFilter, tables, images,
-        charts, pivots, extensions, comments, threadedComments, view,
+        charts, pivots, extensions, comments, threadedComments, view, outline,
     };
 }
 
@@ -1033,6 +1093,38 @@ function parseSheetView(doc: Document): SheetView {
         if (tc) defaults.tabColor = parseColorElement(tc);
     }
     return defaults;
+}
+
+// Pull sheet-wide outline config. `<sheetFormatPr outlineLevelRow outlineLevelCol/>`
+// carries the max observed levels; `<sheetPr><outlinePr summaryBelow summaryRight/></sheetPr>`
+// carries the summary placement flags. Both attributes default to "1" when
+// absent, so the sheet's default renderer behaviour matches Excel.
+function parseSheetOutline(doc: Document): SheetOutline {
+    let maxRowLevel = 0;
+    let maxColLevel = 0;
+    const fmtPr = doc.getElementsByTagNameNS(NS.main, 'sheetFormatPr').item(0);
+    if (fmtPr) {
+        const r = Number(fmtPr.getAttribute('outlineLevelRow'));
+        if (Number.isFinite(r) && r > 0) maxRowLevel = r;
+        const c = Number(fmtPr.getAttribute('outlineLevelCol'));
+        if (Number.isFinite(c) && c > 0) maxColLevel = c;
+    }
+    // summaryBelow / summaryRight default to true (Excel's convention). The
+    // attribute uses the XSD boolean lexical form — accept "0"/"false" as
+    // false, everything else including absent + "1"/"true" is true.
+    let summaryBelow = true;
+    let summaryRight = true;
+    const sheetPr = doc.getElementsByTagNameNS(NS.main, 'sheetPr').item(0);
+    if (sheetPr) {
+        const outlinePr = sheetPr.getElementsByTagNameNS(NS.main, 'outlinePr').item(0);
+        if (outlinePr) {
+            const sb = outlinePr.getAttribute('summaryBelow');
+            if (sb === '0' || sb === 'false') summaryBelow = false;
+            const sr = outlinePr.getAttribute('summaryRight');
+            if (sr === '0' || sr === 'false') summaryRight = false;
+        }
+    }
+    return { maxRowLevel, maxColLevel, summaryBelow, summaryRight };
 }
 
 // Walk every <ext uri="…"> in the sheet xml (sheet-level <extLst>, and any
@@ -1120,15 +1212,19 @@ function parseCols(doc: Document): ColumnWidth[] {
         const widthAttr = el.getAttribute('width');
         const customWidth = el.getAttribute('customWidth') === '1';
         const hidden = el.getAttribute('hidden') === '1';
+        const outlineAttr = el.getAttribute('outlineLevel');
+        const outlineLevel = outlineAttr != null && Number.isFinite(Number(outlineAttr))
+            ? Math.max(0, Number(outlineAttr))
+            : 0;
         // Excel writes a <col> for every column range even without a custom
-        // width (carrying style info or the hidden flag). Keep the entry
-        // whenever either width or hidden is meaningful.
+        // width (carrying style info, hidden flag, or outline level). Keep
+        // the entry whenever any of those signals is meaningful.
         const hasWidth = widthAttr !== null && (customWidth || !Number.isNaN(Number(widthAttr)));
-        if (!hasWidth && !hidden) continue;
+        if (!hasWidth && !hidden && outlineLevel === 0) continue;
         if (!Number.isFinite(min) || !Number.isFinite(max)) continue;
         if (min < 1 || max < min) continue;
         const width = hasWidth && Number.isFinite(Number(widthAttr)) ? Number(widthAttr) : null;
-        out.push({ min: min - 1, max: max - 1, width, hidden });
+        out.push({ min: min - 1, max: max - 1, width, hidden, outlineLevel });
     }
     return out;
 }

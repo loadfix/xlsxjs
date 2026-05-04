@@ -67,6 +67,16 @@ function renderStyle(className: string): HTMLStyleElement {
 .${className}.xlsx-no-headers thead tr > th:first-child,
 .${className}.xlsx-no-headers tbody tr > th:first-child { display: none; }
 .${className}.xlsx-no-headers thead tr:first-child { display: none; }
+.${className} .xlsx-outline-1 > th:first-child { padding-left: 0.5rem; }
+.${className} .xlsx-outline-2 > th:first-child { padding-left: 1rem; }
+.${className} .xlsx-outline-3 > th:first-child { padding-left: 1.5rem; }
+.${className} .xlsx-outline-4 > th:first-child { padding-left: 2rem; }
+.${className} .xlsx-outline-5 > th:first-child { padding-left: 2.5rem; }
+.${className} .xlsx-outline-6 > th:first-child { padding-left: 3rem; }
+.${className} .xlsx-outline-7 > th:first-child { padding-left: 3.5rem; }
+.${className} col.xlsx-outline-1 { border-left: 2px solid #ddd; }
+.${className} col.xlsx-outline-2 { border-left: 3px solid #ccc; }
+.${className} col.xlsx-outline-3 { border-left: 4px solid #bbb; }
     `.trim();
     return style;
 }
@@ -309,10 +319,12 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
     colgroup.appendChild(document.createElement('col'));
     const widthByCol = new Map<number, number>();
     const hiddenCols = new Set<number>();
+    const outlineByCol = new Map<number, number>();
     for (const cw of sheet.columns) {
         for (let i = cw.min; i <= cw.max; i++) {
             if (cw.width !== null) widthByCol.set(i, cw.width);
             if (cw.hidden) hiddenCols.add(i);
+            if (cw.outlineLevel > 0) outlineByCol.set(i, cw.outlineLevel);
         }
     }
     for (let c = 0; c < colCount; c++) {
@@ -320,6 +332,11 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
         const w = widthByCol.get(c);
         if (w !== undefined) col.style.width = `${charWidthToPx(w)}px`;
         if (hiddenCols.has(c)) col.style.display = 'none';
+        const lvl = outlineByCol.get(c);
+        if (lvl) {
+            col.setAttribute('data-outline-level', String(lvl));
+            col.classList.add(`xlsx-outline-${Math.min(lvl, 7)}`);
+        }
         colgroup.appendChild(col);
     }
     table.appendChild(colgroup);
@@ -330,6 +347,11 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
     for (let c = 0; c < colCount; c++) {
         const th = h('th', null, [indexToColumnLetters(c)]);
         if (hiddenCols.has(c)) th.style.display = 'none';
+        const lvl = outlineByCol.get(c);
+        if (lvl) {
+            th.setAttribute('data-outline-level', String(lvl));
+            th.classList.add(`xlsx-outline-${Math.min(lvl, 7)}`);
+        }
         headRow.appendChild(th);
     }
     thead.appendChild(headRow);
@@ -385,6 +407,10 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
         if (dim?.hidden) tr.style.display = 'none';
         // Excel's row height is in points. One point = 4/3 px at 96 DPI.
         if (dim?.height != null) tr.style.height = `${(dim.height * 4 / 3).toFixed(2)}px`;
+        if (dim && dim.outlineLevel > 0) {
+            tr.setAttribute('data-outline-level', String(dim.outlineLevel));
+            tr.classList.add(`xlsx-outline-${Math.min(dim.outlineLevel, 7)}`);
+        }
         tr.appendChild(h('th', null, [String(r + 1)]));
         const cells = sheet.rows[r];
         const byCol: Record<number, typeof cells[0]> = {};

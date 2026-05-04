@@ -1153,7 +1153,7 @@
                 : new Map();
             const persons = resolvePersons(rels, parts);
             const sheetMeta = parseSheetList(workbookXml);
-            const { date1904 } = parseWorkbookMeta(workbookXml);
+            const { date1904, definedNames } = parseWorkbookMeta(workbookXml);
             const sheets = [];
             for (let i = 0; i < sheetMeta.length; i++) {
                 const { name, rId, state } = sheetMeta[i];
@@ -1175,17 +1175,33 @@
                 const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
                 sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments));
             }
-            return { sheets, styles, theme, persons, date1904 };
+            return { sheets, styles, theme, persons, date1904, definedNames };
         }
     }
     function parseWorkbookMeta(workbookXml) {
         const doc = parseXml(workbookXml);
         const pr = doc.getElementsByTagNameNS(NS.main, 'workbookPr').item(0);
-        if (!pr)
-            return { date1904: false };
-        const attr = pr.getAttribute('date1904');
-        const date1904 = attr === '1' || attr === 'true';
-        return { date1904 };
+        let date1904 = false;
+        if (pr) {
+            const attr = pr.getAttribute('date1904');
+            date1904 = attr === '1' || attr === 'true';
+        }
+        const definedNames = [];
+        const dnEls = doc.getElementsByTagNameNS(NS.main, 'definedName');
+        for (let i = 0; i < dnEls.length; i++) {
+            const el = dnEls[i];
+            const name = el.getAttribute('name');
+            if (!name)
+                continue;
+            const localAttr = el.getAttribute('localSheetId');
+            const localSheetId = localAttr != null && Number.isFinite(Number(localAttr))
+                ? Number(localAttr)
+                : null;
+            const hidden = el.getAttribute('hidden') === '1';
+            const formula = el.textContent ?? '';
+            definedNames.push({ name, localSheetId, formula, hidden });
+        }
+        return { date1904, definedNames };
     }
     function resolvePersons(workbookRels, parts) {
         let xmlPath = null;
@@ -1744,8 +1760,12 @@
                 if (Number.isFinite(h) && h >= 0)
                     height = h;
             }
-            if (height !== null || hidden) {
-                rowDimensions.push({ row: rowIndex, height, hidden });
+            const outlineAttr = rowEl.getAttribute('outlineLevel');
+            const outlineLevel = outlineAttr != null && Number.isFinite(Number(outlineAttr))
+                ? Math.max(0, Number(outlineAttr))
+                : 0;
+            if (height !== null || hidden || outlineLevel > 0) {
+                rowDimensions.push({ row: rowIndex, height, hidden, outlineLevel });
                 if (rowIndex > maxRow)
                     maxRow = rowIndex;
             }
@@ -1780,10 +1800,11 @@
         const autoFilter = parseAutoFilter(doc);
         const extensions = collectExtensionUris(doc);
         const view = parseSheetView(doc);
+        const outline = parseSheetOutline(doc);
         return {
             name, state, rows, maxCol, maxRow, merges, columns, rowDimensions,
             conditionalFormatting, frozenPanes, autoFilter, tables, images,
-            charts, pivots, extensions, comments, threadedComments, view,
+            charts, pivots, extensions, comments, threadedComments, view, outline,
         };
     }
     function parseSheetView(doc) {
@@ -1817,6 +1838,34 @@
                 defaults.tabColor = parseColorElement(tc);
         }
         return defaults;
+    }
+    function parseSheetOutline(doc) {
+        let maxRowLevel = 0;
+        let maxColLevel = 0;
+        const fmtPr = doc.getElementsByTagNameNS(NS.main, 'sheetFormatPr').item(0);
+        if (fmtPr) {
+            const r = Number(fmtPr.getAttribute('outlineLevelRow'));
+            if (Number.isFinite(r) && r > 0)
+                maxRowLevel = r;
+            const c = Number(fmtPr.getAttribute('outlineLevelCol'));
+            if (Number.isFinite(c) && c > 0)
+                maxColLevel = c;
+        }
+        let summaryBelow = true;
+        let summaryRight = true;
+        const sheetPr = doc.getElementsByTagNameNS(NS.main, 'sheetPr').item(0);
+        if (sheetPr) {
+            const outlinePr = sheetPr.getElementsByTagNameNS(NS.main, 'outlinePr').item(0);
+            if (outlinePr) {
+                const sb = outlinePr.getAttribute('summaryBelow');
+                if (sb === '0' || sb === 'false')
+                    summaryBelow = false;
+                const sr = outlinePr.getAttribute('summaryRight');
+                if (sr === '0' || sr === 'false')
+                    summaryRight = false;
+            }
+        }
+        return { maxRowLevel, maxColLevel, summaryBelow, summaryRight };
     }
     function collectExtensionUris(doc) {
         const counts = new Map();
@@ -1904,15 +1953,19 @@
             const widthAttr = el.getAttribute('width');
             const customWidth = el.getAttribute('customWidth') === '1';
             const hidden = el.getAttribute('hidden') === '1';
+            const outlineAttr = el.getAttribute('outlineLevel');
+            const outlineLevel = outlineAttr != null && Number.isFinite(Number(outlineAttr))
+                ? Math.max(0, Number(outlineAttr))
+                : 0;
             const hasWidth = widthAttr !== null && (customWidth || !Number.isNaN(Number(widthAttr)));
-            if (!hasWidth && !hidden)
+            if (!hasWidth && !hidden && outlineLevel === 0)
                 continue;
             if (!Number.isFinite(min) || !Number.isFinite(max))
                 continue;
             if (min < 1 || max < min)
                 continue;
             const width = hasWidth && Number.isFinite(Number(widthAttr)) ? Number(widthAttr) : null;
-            out.push({ min: min - 1, max: max - 1, width, hidden });
+            out.push({ min: min - 1, max: max - 1, width, hidden, outlineLevel });
         }
         return out;
     }
@@ -2453,6 +2506,16 @@
 .${className}.xlsx-no-headers thead tr > th:first-child,
 .${className}.xlsx-no-headers tbody tr > th:first-child { display: none; }
 .${className}.xlsx-no-headers thead tr:first-child { display: none; }
+.${className} .xlsx-outline-1 > th:first-child { padding-left: 0.5rem; }
+.${className} .xlsx-outline-2 > th:first-child { padding-left: 1rem; }
+.${className} .xlsx-outline-3 > th:first-child { padding-left: 1.5rem; }
+.${className} .xlsx-outline-4 > th:first-child { padding-left: 2rem; }
+.${className} .xlsx-outline-5 > th:first-child { padding-left: 2.5rem; }
+.${className} .xlsx-outline-6 > th:first-child { padding-left: 3rem; }
+.${className} .xlsx-outline-7 > th:first-child { padding-left: 3.5rem; }
+.${className} col.xlsx-outline-1 { border-left: 2px solid #ddd; }
+.${className} col.xlsx-outline-2 { border-left: 3px solid #ccc; }
+.${className} col.xlsx-outline-3 { border-left: 4px solid #bbb; }
     `.trim();
         return style;
     }
@@ -2650,12 +2713,15 @@
         colgroup.appendChild(document.createElement('col'));
         const widthByCol = new Map();
         const hiddenCols = new Set();
+        const outlineByCol = new Map();
         for (const cw of sheet.columns) {
             for (let i = cw.min; i <= cw.max; i++) {
                 if (cw.width !== null)
                     widthByCol.set(i, cw.width);
                 if (cw.hidden)
                     hiddenCols.add(i);
+                if (cw.outlineLevel > 0)
+                    outlineByCol.set(i, cw.outlineLevel);
             }
         }
         for (let c = 0; c < colCount; c++) {
@@ -2665,6 +2731,11 @@
                 col.style.width = `${charWidthToPx(w)}px`;
             if (hiddenCols.has(c))
                 col.style.display = 'none';
+            const lvl = outlineByCol.get(c);
+            if (lvl) {
+                col.setAttribute('data-outline-level', String(lvl));
+                col.classList.add(`xlsx-outline-${Math.min(lvl, 7)}`);
+            }
             colgroup.appendChild(col);
         }
         table.appendChild(colgroup);
@@ -2675,6 +2746,11 @@
             const th = h('th', null, [indexToColumnLetters(c)]);
             if (hiddenCols.has(c))
                 th.style.display = 'none';
+            const lvl = outlineByCol.get(c);
+            if (lvl) {
+                th.setAttribute('data-outline-level', String(lvl));
+                th.classList.add(`xlsx-outline-${Math.min(lvl, 7)}`);
+            }
             headRow.appendChild(th);
         }
         thead.appendChild(headRow);
@@ -2719,6 +2795,10 @@
                 tr.style.display = 'none';
             if (dim?.height != null)
                 tr.style.height = `${(dim.height * 4 / 3).toFixed(2)}px`;
+            if (dim && dim.outlineLevel > 0) {
+                tr.setAttribute('data-outline-level', String(dim.outlineLevel));
+                tr.classList.add(`xlsx-outline-${Math.min(dim.outlineLevel, 7)}`);
+            }
             tr.appendChild(h('th', null, [String(r + 1)]));
             const cells = sheet.rows[r];
             const byCol = {};
