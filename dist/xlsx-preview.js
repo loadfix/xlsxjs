@@ -356,7 +356,17 @@
             size: sizeAttr ? Number(sizeAttr) : null,
             color: parseColorElement(colorEl),
             name: firstAttr('name', 'val') ?? firstAttr('rFont', 'val'),
+            scheme: parseScheme(el),
         };
+    }
+    function parseScheme(parent) {
+        const s = parent.getElementsByTagNameNS(NS_MAIN$1, 'scheme').item(0);
+        if (!s)
+            return null;
+        const val = s.getAttribute('val');
+        if (val === 'major' || val === 'minor')
+            return val;
+        return null;
     }
     function parseUnderline(parent) {
         const u = parent.getElementsByTagNameNS(NS_MAIN$1, 'u').item(0);
@@ -606,9 +616,10 @@
         colors[2] = '#e7e6e6';
         colors[3] = '#44546a';
         const doc = parseXml$1(xml);
+        const { majorFont, minorFont } = parseFontScheme(doc);
         const scheme = doc.getElementsByTagNameNS(NS_DRAW, 'clrScheme').item(0);
         if (!scheme)
-            return { colors };
+            return { colors, majorFont, minorFont };
         const get = (localName) => {
             const el = scheme.getElementsByTagNameNS(NS_DRAW, localName).item(0);
             if (!el)
@@ -625,7 +636,25 @@
             if (c)
                 colors[idx] = c;
         }
-        return { colors };
+        return { colors, majorFont, minorFont };
+    }
+    function parseFontScheme(doc) {
+        const fs = doc.getElementsByTagNameNS(NS_DRAW, 'fontScheme').item(0);
+        if (!fs)
+            return { majorFont: null, minorFont: null };
+        const latinFrom = (parentLocalName) => {
+            const parent = fs.getElementsByTagNameNS(NS_DRAW, parentLocalName).item(0);
+            if (!parent)
+                return null;
+            const latin = parent.getElementsByTagNameNS(NS_DRAW, 'latin').item(0);
+            if (!latin)
+                return null;
+            const typeface = latin.getAttribute('typeface');
+            if (!typeface)
+                return null;
+            return typeface;
+        };
+        return { majorFont: latinFrom('majorFont'), minorFont: latinFrom('minorFont') };
     }
     function resolveClrChild(wrapper) {
         const srgb = wrapper.getElementsByTagNameNS(NS_DRAW, 'srgbClr').item(0);
@@ -1732,7 +1761,7 @@
                 ? authors[authorIdx]
                 : null;
             const textEl = c.getElementsByTagNameNS(NS.main, 'text').item(0);
-            const body = textEl ? parseSi(textEl) : { text: '', runs: null };
+            const body = textEl ? parseSi(textEl) : { text: '', runs: null};
             out.push({
                 col: parsed.col,
                 row: parsed.row,
@@ -1929,6 +1958,7 @@
     function parseSi(si) {
         const runs = [];
         let sawRun = false;
+        const phonetics = [];
         for (let i = 0; i < si.childNodes.length; i++) {
             const node = si.childNodes[i];
             if (node.nodeType !== 1)
@@ -1943,10 +1973,43 @@
             if (el.localName === 'r') {
                 sawRun = true;
                 runs.push(parseRun(el));
+                continue;
+            }
+            if (el.localName === 'rPh') {
+                const parsed = parseRPh(el);
+                if (parsed)
+                    phonetics.push(parsed);
             }
         }
         const text = runs.map((r) => r.text).join('');
-        return { text, runs: sawRun ? runs : null };
+        for (const p of phonetics) {
+            const start = Math.max(0, Math.min(text.length, p.startIdx));
+            const end = Math.max(start, Math.min(text.length, p.endIdx));
+            p.startIdx = start;
+            p.endIdx = end;
+            p.base = text.slice(start, end);
+        }
+        return { text, runs: sawRun ? runs : null, phonetics: phonetics.length > 0 ? phonetics : null };
+    }
+    function parseRPh(el) {
+        const sbAttr = el.getAttribute('sb');
+        const ebAttr = el.getAttribute('eb');
+        if (sbAttr === null || ebAttr === null)
+            return null;
+        const sb = Number(sbAttr);
+        const eb = Number(ebAttr);
+        if (!Number.isFinite(sb) || !Number.isFinite(eb))
+            return null;
+        if (sb < 0 || eb < sb)
+            return null;
+        const tEl = el.getElementsByTagNameNS(NS.main, 't').item(0);
+        const phonetic = tEl?.textContent ?? '';
+        return {
+            base: '',
+            phonetic,
+            startIdx: Math.floor(sb),
+            endIdx: Math.floor(eb),
+        };
     }
     function emptyRun(text) {
         return {
@@ -2526,25 +2589,25 @@
                 const idx = Number(raw);
                 const entry = Number.isFinite(idx) && idx >= 0 && idx < sharedStrings.length
                     ? sharedStrings[idx]
-                    : { text: '', runs: null };
-                return { ...base, value: entry.text, runs: entry.runs, kind: 'string' };
+                    : { text: '', runs: null, phonetics: null };
+                return { ...base, value: entry.text, runs: entry.runs, phonetics: entry.phonetics, kind: 'string' };
             }
             case 'inlineStr': {
                 const is = c.getElementsByTagNameNS(NS.main, 'is').item(0);
-                const entry = is ? parseSi(is) : { text: '', runs: null };
-                return { ...base, value: entry.text, runs: entry.runs, kind: 'inlineStr' };
+                const entry = is ? parseSi(is) : { text: '', runs: null, phonetics: null };
+                return { ...base, value: entry.text, runs: entry.runs, phonetics: entry.phonetics, kind: 'inlineStr' };
             }
             case 'b':
-                return { ...base, value: raw === '1' ? 'TRUE' : 'FALSE', runs: null, kind: 'boolean' };
+                return { ...base, value: raw === '1' ? 'TRUE' : 'FALSE', runs: null, phonetics: null, kind: 'boolean' };
             case 'e':
-                return { ...base, value: raw, runs: null, kind: 'error' };
+                return { ...base, value: raw, runs: null, phonetics: null, kind: 'error' };
             case 'str':
-                return { ...base, value: raw, runs: null, kind: 'string' };
+                return { ...base, value: raw, runs: null, phonetics: null, kind: 'string' };
             case 'n':
             default:
                 if (raw === '')
-                    return { ...base, value: '', runs: null, kind: 'empty' };
-                return { ...base, value: raw, runs: null, kind: 'number' };
+                    return { ...base, value: '', runs: null, phonetics: null, kind: 'empty' };
+                return { ...base, value: raw, runs: null, phonetics: null, kind: 'number' };
         }
     }
 
@@ -3888,6 +3951,9 @@
             for (const run of cell.runs)
                 appendRunSpan(td, run, theme);
         }
+        else if (cell.phonetics && (cell.kind === 'string' || cell.kind === 'inlineStr')) {
+            appendPhoneticText(td, cell.value, cell.phonetics);
+        }
         else {
             td.textContent = text;
         }
@@ -3940,6 +4006,34 @@
             span.style.fontFamily = family;
         td.appendChild(span);
     }
+    function appendPhoneticText(parent, text, phonetics) {
+        const sorted = phonetics
+            .map((p) => ({
+            startIdx: Math.max(0, Math.min(text.length, p.startIdx)),
+            endIdx: Math.max(0, Math.min(text.length, p.endIdx)),
+            phonetic: p.phonetic,
+        }))
+            .filter((p) => p.endIdx > p.startIdx)
+            .sort((a, b) => a.startIdx - b.startIdx);
+        let cursor = 0;
+        for (const p of sorted) {
+            if (p.startIdx < cursor)
+                continue;
+            if (p.startIdx > cursor) {
+                parent.appendChild(document.createTextNode(text.slice(cursor, p.startIdx)));
+            }
+            const ruby = document.createElement('ruby');
+            ruby.appendChild(document.createTextNode(text.slice(p.startIdx, p.endIdx)));
+            const rt = document.createElement('rt');
+            rt.textContent = p.phonetic;
+            ruby.appendChild(rt);
+            parent.appendChild(ruby);
+            cursor = p.endIdx;
+        }
+        if (cursor < text.length) {
+            parent.appendChild(document.createTextNode(text.slice(cursor)));
+        }
+    }
     function applyTextDecoration(el, underline, strike) {
         const parts = [];
         if (underline)
@@ -3982,9 +4076,15 @@
         const color = resolveColor(font.color, theme);
         if (color)
             td.style.color = color;
-        const family = sanitizeFontFamily(font.name);
+        const family = sanitizeFontFamily(font.name) ?? resolveSchemeFontFamily(font.scheme, theme);
         if (family)
             td.style.fontFamily = family;
+    }
+    function resolveSchemeFontFamily(scheme, theme) {
+        if (!scheme || !theme)
+            return null;
+        const name = scheme === 'major' ? theme.majorFont : theme.minorFont;
+        return sanitizeFontFamily(name);
     }
     function applyFill(td, fill, theme) {
         const color = resolveColor(fill?.fgColor ?? null, theme);

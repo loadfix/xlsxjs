@@ -20,6 +20,14 @@ export type Theme = {
     // 12 entries, indexed per SpreadsheetML theme= convention.
     // 0 lt1, 1 dk1, 2 lt2, 3 dk2, 4..9 accent1..6, 10 hlink, 11 folHlink
     colors: (string | null)[];
+    // Latin typeface from `a:fontScheme/a:majorFont/a:latin/@typeface`.
+    // Referenced when a cell's font carries `<scheme val="major"/>` and no
+    // explicit `<name/>`. Null when the theme declares no majorFont.
+    majorFont: string | null;
+    // Latin typeface from `a:fontScheme/a:minorFont/a:latin/@typeface`.
+    // Referenced when a cell's font carries `<scheme val="minor"/>` and no
+    // explicit `<name/>`. Null when the theme declares no minorFont.
+    minorFont: string | null;
 };
 
 export type ColorRef =
@@ -74,8 +82,10 @@ export function parseTheme(xml: string): Theme {
     colors[2] = '#e7e6e6'; colors[3] = '#44546a';
 
     const doc = parseXml(xml);
+    const { majorFont, minorFont } = parseFontScheme(doc);
+
     const scheme = doc.getElementsByTagNameNS(NS_DRAW, 'clrScheme').item(0);
-    if (!scheme) return { colors };
+    if (!scheme) return { colors, majorFont, minorFont };
 
     // Walk children by local name instead of positional index so we're
     // robust to schemes that omit optional members.
@@ -95,7 +105,26 @@ export function parseTheme(xml: string): Theme {
         const c = get(name);
         if (c) colors[idx] = c;
     }
-    return { colors };
+    return { colors, majorFont, minorFont };
+}
+
+// Extract the latin typeface from `a:fontScheme/a:majorFont/a:latin` and the
+// same for minorFont. These drive `<font scheme="major|minor"/>` resolution
+// in styles.xml. Empty typeface attributes (common in themes that leave
+// majorFont latin blank) are treated as null so callers can fall back.
+function parseFontScheme(doc: Document): { majorFont: string | null; minorFont: string | null } {
+    const fs = doc.getElementsByTagNameNS(NS_DRAW, 'fontScheme').item(0);
+    if (!fs) return { majorFont: null, minorFont: null };
+    const latinFrom = (parentLocalName: 'majorFont' | 'minorFont'): string | null => {
+        const parent = fs.getElementsByTagNameNS(NS_DRAW, parentLocalName).item(0);
+        if (!parent) return null;
+        const latin = parent.getElementsByTagNameNS(NS_DRAW, 'latin').item(0);
+        if (!latin) return null;
+        const typeface = latin.getAttribute('typeface');
+        if (!typeface) return null;
+        return typeface;
+    };
+    return { majorFont: latinFrom('majorFont'), minorFont: latinFrom('minorFont') };
 }
 
 function resolveClrChild(wrapper: Element): string | null {
