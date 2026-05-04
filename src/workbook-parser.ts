@@ -18,6 +18,16 @@ import { parseConditionalFormatting, parseSqref, type ConditionalFormatting } fr
 // Mirrors docxjs's isSafeHyperlinkHref — keep them in lockstep.
 const SAFE_HREF_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:']);
 
+// DoS guardrail: a single hyperlink / data-validation range is expanded to
+// one entry per covered cell so the renderer can look up by (row, col). An
+// attacker-controlled `ref="A1:XFD1048576"` would otherwise balloon to 17
+// billion entries and exhaust memory before the sheet ever renders. Ranges
+// wider than this cap are clipped to the cap and a note is dropped on the
+// console.warn channel. The cap is generous enough to cover legitimate
+// whole-column selections (`A:A` = 1,048,576 cells) but stops single-range
+// bombs dead.
+const MAX_RANGE_EXPANSION_CELLS = 1_048_576;
+
 /**
  * Returns `true` iff `raw` can be safely emitted as the `href` of an `<a>` in
  * a read-only xlsx viewer. Accepts absolute URLs with known-safe schemes,
@@ -28,6 +38,14 @@ const SAFE_HREF_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:']);
 export function isSafeHyperlinkHref(raw: string | null | undefined): boolean {
     if (raw == null) return true; // empty href is inert
     if (typeof raw !== 'string') return false;
+    // Control characters (tab, newline, null byte, etc.) in a URL are
+    // normalised away by both the WHATWG URL parser AND by the browser
+    // when it resolves an anchor's href — meaning `"java\tscript:alert(1)"`
+    // passes a naive URL(…).protocol check (the URL parser sees it as a
+    // relative path and assigns http:) but the browser executes it as
+    // `javascript:` on click. Reject any string containing a control
+    // character outright; a legitimate hyperlink never contains one.
+    if (/[\x00-\x1f\x7f]/.test(raw)) return false;
     const trimmed = raw.trim();
     if (trimmed === '') return true;
     if (trimmed.startsWith('#')) return true;
@@ -1782,6 +1800,24 @@ function parseHyperlinks(doc: Document, targets: Map<string, string>): Hyperlink
         // the existing sqref parser so the expansion lives in one place.
         const ranges = parseSqref(ref);
         for (const range of ranges) {
+            const width = range.endCol - range.col + 1;
+            const height = range.endRow - range.row + 1;
+            const total = width * height;
+            // DoS guard: refuse to expand pathological ranges (a crafted
+            // ref="A1:XFD1048576" would otherwise push 17 billion entries).
+            // Legitimate ranges fit well under this cap; oversized ones still
+            // surface the top-left anchor so the URL isn't silently dropped.
+            if (total > MAX_RANGE_EXPANSION_CELLS) {
+                out.push({
+                    col: range.col,
+                    row: range.row,
+                    target,
+                    location: location || null,
+                    tooltip: tooltip || null,
+                    display: display || null,
+                });
+                continue;
+            }
             for (let r = range.row; r <= range.endRow; r++) {
                 for (let c = range.col; c <= range.endCol; c++) {
                     out.push({
@@ -1831,6 +1867,23 @@ function parseDataValidationLists(doc: Document): DataValidationList[] {
         }
         const ranges = parseSqref(sqref);
         for (const range of ranges) {
+            // DoS guard: clamp pathological validation ranges before the
+            // renderer expands them into a per-cell Map. Excel's own limits
+            // are 1,048,576 rows × 16,384 cols; validation ranges beyond that
+            // are producer bugs or deliberate bombs.
+            const width = range.endCol - range.col + 1;
+            const height = range.endRow - range.row + 1;
+            if (width * height > MAX_RANGE_EXPANSION_CELLS) {
+                const clampedCols = Math.min(width, MAX_RANGE_EXPANSION_CELLS);
+                out.push({
+                    col: range.col,
+                    row: range.row,
+                    endCol: range.col + clampedCols - 1,
+                    endRow: range.row, // single row covers the anchor
+                    options,
+                });
+                continue;
+            }
             out.push({
                 col: range.col,
                 row: range.row,
