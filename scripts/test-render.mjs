@@ -2878,6 +2878,140 @@ async function renderFixture(path, options) {
     assert(sanitizeHexColor('00ffffff') === '#ffffff', '85q: ARGB with alpha=00');
 }
 
+// ── 91. ole-embeddings parser: SheetEmbedding surfaces for OLE + package ──
+// Fixture carries two rels under xl/worksheets/_rels/sheet1.xml.rels:
+//   · rId2 → "/oleObject" → xl/embeddings/oleObject1.bin  (progId=Word.Document.12,
+//     512 bytes, anchored at B2:D4)
+//   · rId3 → "/package"   → xl/embeddings/embedded.txt    (progId=Package,
+//     31 bytes, anchored at B6:D8)
+// The <oleObjects> block supplies the anchor + progId for each; contentType
+// comes from [Content_Types].xml default extensions. Detect-only:
+// dataUrl=null by default.
+{
+    const { wb } = await renderFixture('ole-embeddings');
+    const sheet = wb.parsed.sheets[0];
+    assert(Array.isArray(sheet.embeddings), '91a: Sheet.embeddings should be an array');
+    assert(sheet.embeddings.length === 2,
+        `91b: expected 2 embeddings (got ${sheet.embeddings.length})`);
+
+    const ole = sheet.embeddings.find((e) => e.kind === 'ole');
+    assert(ole, '91c: expected one embedding with kind="ole"');
+    if (ole) {
+        assert(ole.progId === 'Word.Document.12',
+            `91d: OLE progId should be "Word.Document.12" (got ${JSON.stringify(ole.progId)})`);
+        assert(ole.fileName === 'oleObject1.bin',
+            `91e: OLE fileName should be "oleObject1.bin" (got ${JSON.stringify(ole.fileName)})`);
+        assert(ole.size === 512,
+            `91f: OLE size should match the fixture's 512-byte payload (got ${ole.size})`);
+        assert(ole.contentType === 'application/vnd.openxmlformats-officedocument.oleObject',
+            `91g: OLE contentType should match the .bin default (got ${JSON.stringify(ole.contentType)})`);
+        assert(ole.col === 1 && ole.row === 1 && ole.endCol === 3 && ole.endRow === 3,
+            `91h: OLE anchor should resolve to (1,1)-(3,3) (got col=${ole.col}, row=${ole.row}, endCol=${ole.endCol}, endRow=${ole.endRow}))`);
+        assert(ole.dataUrl === null,
+            '91i: OLE dataUrl must be null by default (detect-only)');
+    }
+
+    const pkg = sheet.embeddings.find((e) => e.kind === 'package');
+    assert(pkg, '91j: expected one embedding with kind="package"');
+    if (pkg) {
+        assert(pkg.fileName === 'embedded.txt',
+            `91k: package fileName should be "embedded.txt" (got ${JSON.stringify(pkg.fileName)})`);
+        assert(pkg.size === 31,
+            `91l: package size should match the 31-byte text payload (got ${pkg.size})`);
+        assert(pkg.contentType === 'text/plain',
+            `91m: package contentType should be "text/plain" (got ${JSON.stringify(pkg.contentType)})`);
+        assert(pkg.dataUrl === null,
+            '91n: package dataUrl must be null by default (detect-only)');
+    }
+
+    // Renderer emits one <aside class="xlsx-embedding"> per entry regardless
+    // of inline state — detect-only means the placeholder is still there.
+    const { container } = await renderFixture('ole-embeddings');
+    const asides = container.querySelectorAll('section.xlsx aside.xlsx-embedding');
+    assert(asides.length === 2,
+        `91o: expected 2 <aside class="xlsx-embedding"> (got ${asides.length})`);
+    // Placeholders without dataUrl → no <a download> child.
+    for (const a of asides) {
+        assert(!a.querySelector('a[download]'),
+            `91p: default (non-inline) aside must not contain an <a download> (data-kind=${a.getAttribute('data-kind')})`);
+    }
+}
+
+// ── 92. ole-embeddings inlining: Options.inlineEmbeddings projects dataUrl ─
+// With the opt-in flag, the package embedding (text/plain, 31 bytes, MIME
+// in the allowlist) gets a dataUrl; the raw OLE .bin stays null because its
+// contentType (application/vnd.openxmlformats-officedocument.oleObject)
+// falls outside the sanitizeMediaMime allowlist. The rendered <aside> gains
+// an `<a download="embedded.txt" href="data:…">` child.
+//
+// The 32 MiB cap is asserted directly (via a Uint8Array of cap+1 bytes going
+// through the test environment's TextEncoder — here we just construct a
+// buffer and assert the library's bytesToDataUrl helper rejects it).
+{
+    const { wb, container } = await renderFixture('ole-embeddings', { inlineEmbeddings: true });
+    const sheet = wb.parsed.sheets[0];
+    const pkg = sheet.embeddings.find((e) => e.kind === 'package');
+    assert(pkg, '92a: package embedding still present with inlineEmbeddings=true');
+    if (pkg) {
+        assert(typeof pkg.dataUrl === 'string' && pkg.dataUrl.startsWith('data:text/plain;base64,'),
+            `92b: package dataUrl should be a text/plain data: URL (got ${pkg.dataUrl?.slice(0, 40)})`);
+        // Round-trip the payload: decode the base64 and confirm the embedded
+        // bytes match "hello from an embedded package\n".
+        const b64 = pkg.dataUrl.slice(pkg.dataUrl.indexOf(',') + 1);
+        const decoded = Buffer.from(b64, 'base64').toString('utf8');
+        assert(decoded === 'hello from an embedded package\n',
+            `92c: decoded package payload should match the fixture text (got ${JSON.stringify(decoded)})`);
+    }
+
+    // OLE .bin: MIME outside the allowlist → dataUrl stays null even with
+    // inlineEmbeddings on. This is the defensive path — raw CFB bytes aren't
+    // handed to users as a data: download.
+    const ole = sheet.embeddings.find((e) => e.kind === 'ole');
+    assert(ole && ole.dataUrl === null,
+        `92d: OLE dataUrl must stay null under inlineEmbeddings (MIME rejected) (got ${ole?.dataUrl ? 'set' : ole?.dataUrl})`);
+
+    // DOM wiring: the package aside should now carry an anchor.
+    const asides = container.querySelectorAll('section.xlsx aside.xlsx-embedding');
+    const pkgAside = Array.from(asides).find((a) => a.getAttribute('data-kind') === 'package');
+    assert(pkgAside, '92e: package aside present in DOM');
+    if (pkgAside) {
+        const anchor = pkgAside.querySelector('a[download]');
+        assert(!!anchor, '92f: package aside should contain an <a download> when inline');
+        if (anchor) {
+            assert(anchor.getAttribute('download') === 'embedded.txt',
+                `92g: anchor download should be the fileName (got ${JSON.stringify(anchor.getAttribute('download'))})`);
+            assert((anchor.getAttribute('href') ?? '').startsWith('data:text/plain;base64,'),
+                `92h: anchor href should be the sanitized data: URL (got ${(anchor.getAttribute('href') ?? '').slice(0, 40)}…)`);
+        }
+    }
+
+    // 32 MiB cap: an oversized synthetic buffer must NOT produce a data URL.
+    // We exercise the exported projection helper via the UMD (keeps this
+    // test independent of the fixture's actual payload sizes).
+    //
+    // The library re-exports bytesToDataUrl + sanitizeMediaMime from
+    // workbook.ts as part of the Wave 8 slice; if they ever become private
+    // again this assertion must move to the parser-side behaviour test.
+    const { bytesToDataUrl, sanitizeMediaMime } = globalThis.xlsx;
+    if (typeof bytesToDataUrl === 'function') {
+        // 33 MiB buffer: one byte past the 32 MiB cap.
+        const oversized = new Uint8Array(32 * 1024 * 1024 + 1);
+        assert(bytesToDataUrl(oversized, 'text/plain') === null,
+            '92i: bytesToDataUrl should reject a payload over 32 MiB');
+        // Tiny happy-path sanity check so the helper itself still works.
+        const tiny = new Uint8Array([104, 105]);
+        const url = bytesToDataUrl(tiny, 'text/plain');
+        assert(typeof url === 'string' && url === 'data:text/plain;base64,aGk=',
+            `92j: bytesToDataUrl should project a tiny buffer to its data: URL (got ${url})`);
+    }
+    if (typeof sanitizeMediaMime === 'function') {
+        assert(sanitizeMediaMime('application/pdf') === 'application/pdf',
+            '92k: sanitizeMediaMime allowlists application/pdf');
+        assert(sanitizeMediaMime('application/x-evil') === 'application/octet-stream',
+            '92l: sanitizeMediaMime decays unknown MIMEs to application/octet-stream');
+    }
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

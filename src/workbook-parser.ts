@@ -10,6 +10,7 @@ import type { Options } from './xlsx-preview';
 import { parseStyles, parseColorElement, type Styles, type FontStyle, type UnderlineStyle } from './styles';
 import { parseTheme, type Theme, type ColorRef } from './theme';
 import { parseConditionalFormatting, parseSqref, type ConditionalFormatting } from './conditional-format';
+import { bytesToDataUrl, sanitizeMediaMime } from './workbook';
 
 // URL schemes we'll emit as an `<a href="…">` in the rendered sheet. Anything
 // outside this set (most importantly `javascript:` / `data:` / `vbscript:` /
@@ -376,6 +377,33 @@ export interface SheetImage {
     decorative: boolean;
 }
 
+// A detected OLE / embedded-file attachment anchored inside a sheet. Detect-
+// only: the payload is never inlined by default — the renderer emits a
+// placeholder `<aside class="xlsx-embedding">`. Two flavours are surfaced:
+//   - `kind='ole'`   — a raw OLE CFB container (the `.bin` payload under
+//                      xl/embeddings/), referenced via an "/oleObject" rel.
+//                      `progId` is the Excel hint ("Word.Document.12",
+//                      "Equation.DSMT4", …) when present.
+//   - `kind='package'` — a real file (xlsx, docx, pptx, pdf, …) packaged
+//                      inside the xlsx via a "/package" rel. `progId` is
+//                      null — the contentType carries the MIME.
+// `dataUrl` is null unless the caller opted in via `Options.inlineEmbeddings`;
+// when enabled, payloads up to MAX_MEDIA_BYTES pass through sanitizeMediaMime
+// and decay to null on rejection.
+export interface SheetEmbedding {
+    kind: 'ole' | 'package';
+    contentType: string;
+    fileName: string | null;
+    progId: string | null;
+    col: number | null;
+    row: number | null;
+    endCol: number | null;
+    endRow: number | null;
+    size: number;
+    dataUrl: string | null;
+    altText: string | null;
+}
+
 // A defined table (<table> inside xl/tables/tableN.xml, referenced from
 // the sheet's rels). Separate from autofilter — tables carry names,
 // header/totals info, and per-column filters. xlsxjs exposes them on the
@@ -511,6 +539,7 @@ export interface Sheet {
     images: SheetImage[];
     charts: SheetChart[];
     shapes: SheetShape[];
+    embeddings: SheetEmbedding[];
     pivots: SheetPivot[];
     extensions: SheetExtensionUri[];
     comments: SheetComment[];
@@ -574,7 +603,11 @@ const NS = {
 export class WorkbookParser {
     constructor(private _options: Options) {}
 
-    parse(parts: Record<string, string>, media: Record<string, string> = {}): Workbook {
+    parse(
+        parts: Record<string, string>,
+        media: Record<string, string> = {},
+        embeddingBytes: Record<string, Uint8Array> = {},
+    ): Workbook {
         const workbookXml = parts['xl/workbook.xml'];
         if (!workbookXml) throw new Error('xlsx-preview: workbook.xml missing');
 
@@ -609,6 +642,12 @@ export class WorkbookParser {
         const metadata = parts['xl/metadata.xml']
             ? parseWorkbookMetadata(parts['xl/metadata.xml'])
             : null;
+        // Content-type resolver — reads [Content_Types].xml once per workbook
+        // so embedding-resolver lookups stay O(1). Falls back to a no-op map
+        // when the part is absent (extension-only resolution still works).
+        const contentTypes = parts['[Content_Types].xml']
+            ? parseContentTypes(parts['[Content_Types].xml'])
+            : { defaults: new Map<string, string>(), overrides: new Map<string, string>() };
         const sheets: Sheet[] = [];
         for (let i = 0; i < sheetMeta.length; i++) {
             const { name, rId, state } = sheetMeta[i];
@@ -629,11 +668,263 @@ export class WorkbookParser {
             const comments = resolveCommentsForSheet(xmlPath, parts);
             const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
             const hyperlinkTargets = resolveHyperlinkTargets(xmlPath, parts);
-            sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, shapes, pivots, comments, threadedComments, hyperlinkTargets, i, definedNames, metadata));
+            const embeddings = resolveEmbeddingsForSheet(
+                xmlPath, xml, parts, embeddingBytes, contentTypes,
+                this._options.inlineEmbeddings === true,
+            );
+            sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, shapes, embeddings, pivots, comments, threadedComments, hyperlinkTargets, i, definedNames, metadata));
         }
 
         return { sheets, styles, theme, persons, date1904, definedNames, metadata };
     }
+}
+
+// Parsed projection of [Content_Types].xml. `defaults` maps lower-cased file
+// extension → contentType (from `<Default Extension="…" ContentType="…"/>`).
+// `overrides` maps package-absolute part name (with leading "/") → contentType
+// (from `<Override PartName="/x/y.xlsx" ContentType="…"/>`). Resolution order:
+// overrides first, then the file extension's default, then a literal fallback.
+interface ContentTypeMap {
+    defaults: Map<string, string>;  // extension (lower-cased) → MIME
+    overrides: Map<string, string>; // part name (leading "/") → MIME
+}
+
+function parseContentTypes(xml: string): ContentTypeMap {
+    const doc = parseXml(xml);
+    const defaults = new Map<string, string>();
+    const overrides = new Map<string, string>();
+    const ns = 'http://schemas.openxmlformats.org/package/2006/content-types';
+    const defEls = doc.getElementsByTagNameNS(ns, 'Default');
+    for (let i = 0; i < defEls.length; i++) {
+        const el = defEls[i];
+        const ext = el.getAttribute('Extension');
+        const ct = el.getAttribute('ContentType');
+        if (ext && ct) defaults.set(ext.toLowerCase(), ct);
+    }
+    const ovEls = doc.getElementsByTagNameNS(ns, 'Override');
+    for (let i = 0; i < ovEls.length; i++) {
+        const el = ovEls[i];
+        const part = el.getAttribute('PartName');
+        const ct = el.getAttribute('ContentType');
+        if (part && ct) overrides.set(part, ct);
+    }
+    return { defaults, overrides };
+}
+
+// Resolve the contentType for a package-embedded part. Check the overrides
+// map (needs a leading "/" package-absolute path), then the file extension's
+// Default entry, then an extension-derived best-guess, then
+// application/octet-stream as last-resort. Returns the raw contentType —
+// callers apply sanitizeMediaMime before using the value as the `data:` URL's
+// MIME.
+function resolveContentType(path: string, map: ContentTypeMap): string {
+    const pkgPath = path.startsWith('/') ? path : `/${path}`;
+    const ov = map.overrides.get(pkgPath);
+    if (ov) return ov;
+    const dot = path.lastIndexOf('.');
+    if (dot >= 0) {
+        const ext = path.slice(dot + 1).toLowerCase();
+        const def = map.defaults.get(ext);
+        if (def) return def;
+        // Best-effort extension-derived MIME. Keeps OLE ".bin" distinct so
+        // callers can tell the two kinds apart. Anything else falls through
+        // to application/octet-stream so sanitizeMediaMime keeps its teeth.
+        switch (ext) {
+            case 'bin':  return 'application/vnd.openxmlformats-officedocument.oleObject';
+            case 'pdf':  return 'application/pdf';
+            case 'xlsx': return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+            case 'docx': return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+            case 'pptx': return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+            case 'xls':  return 'application/vnd.ms-excel';
+            case 'doc':  return 'application/msword';
+            case 'ppt':  return 'application/vnd.ms-powerpoint';
+            case 'txt':  return 'text/plain';
+        }
+    }
+    return 'application/octet-stream';
+}
+
+// Resolve every OLE / package embedding referenced from a single sheet. Walks
+// the sheet's rels for "/oleObject" (raw CFB bin) and "/package" (packaged
+// real file) types, matches each to its anchor + progId via the sheet's
+// `<oleObjects>` block, and falls through to an anchor-less "after-table"
+// entry when no `<oleObject>` element points at the rel.
+//
+// ProgId is a hint Excel writes onto <oleObject progId="…"/>; we do NOT key
+// any logic on it (XLSX strings are attacker-controlled) — the renderer
+// surfaces it verbatim as a data-attribute through setAttribute only.
+//
+// `inline=true` flips dataUrl population on: payloads up to
+// MAX_EMBEDDING_BYTES (via bytesToDataUrl) project through sanitizeMediaMime
+// and land on the model; rejections stay null and the renderer emits the
+// placeholder without a download link.
+function resolveEmbeddingsForSheet(
+    sheetPath: string,
+    sheetXml: string,
+    parts: Record<string, string>,
+    embeddingBytes: Record<string, Uint8Array>,
+    contentTypes: ContentTypeMap,
+    inline: boolean,
+): SheetEmbedding[] {
+    const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
+    const relsXml = parts[relsPath];
+    if (!relsXml) return [];
+    const rels = parseRelationships(relsXml);
+    const sheetDir = sheetPath.replace(/\/[^/]+$/, '');
+
+    // Walk rels for embedding types. Keep the rel id so we can map back to
+    // <oleObject r:id="…"/> entries in the sheet xml.
+    interface EmbeddingRel {
+        rId: string;
+        kind: 'ole' | 'package';
+        target: string;   // resolved package-relative path (no leading slash)
+        fileName: string | null;
+    }
+    const embRels: EmbeddingRel[] = [];
+    for (const [rId, rel] of rels) {
+        // The rel type URL ends in "/oleObject" for OLE CFB bin payloads and
+        // "/package" for a packaged real file. Everything else (drawings,
+        // hyperlinks, tables, …) is already handled by other resolvers.
+        const isOle = rel.type.endsWith('/oleObject');
+        const isPackage = rel.type.endsWith('/package');
+        if (!isOle && !isPackage) continue;
+        const target = rel.target.startsWith('/')
+            ? rel.target.slice(1)
+            : normaliseRelPath(`${sheetDir}/${rel.target}`);
+        const fileName = target.slice(target.lastIndexOf('/') + 1) || null;
+        embRels.push({
+            rId,
+            kind: isOle ? 'ole' : 'package',
+            target,
+            fileName,
+        });
+    }
+    if (embRels.length === 0) return [];
+
+    // Map from rId → <oleObject> anchor metadata. An <oleObject progId="…"
+    // shapeId="…" r:id="…"> child usually carries a sibling <objectPr>
+    // wrapping an <anchor> with <from>/<to> cell markers; the ECMA shape is
+    // variable — we pull col/row/endCol/endRow best-effort from whichever
+    // `<from>` / `<to>` with child `<col>` / `<row>` text nodes is present.
+    const anchorByRid = parseOleObjectAnchors(sheetXml);
+
+    const out: SheetEmbedding[] = [];
+    for (const rel of embRels) {
+        const bytes = embeddingBytes[rel.target];
+        if (!bytes) {
+            // Rel points at a part that isn't in the embeddings directory (or
+            // was dropped for some reason). Skip — there's nothing to surface.
+            continue;
+        }
+        const contentType = resolveContentType(rel.target, contentTypes);
+        const anchor = anchorByRid.get(rel.rId) ?? null;
+        let dataUrl: string | null = null;
+        if (inline) {
+            // MIME must pass the allowlist; bytesToDataUrl returns null for
+            // oversized payloads. Either rejection keeps dataUrl=null, which
+            // tells the renderer to emit the placeholder without a download.
+            const safeMime = sanitizeMediaMime(contentType);
+            if (safeMime !== 'application/octet-stream' || contentType === 'application/octet-stream') {
+                // Only project when the original MIME is itself in the
+                // allowlist (so a hostile/unknown MIME doesn't silently decay
+                // to a working octet-stream download). Raw OLE CFB ".bin"
+                // payloads sit on 'application/vnd.openxmlformats-officedocument.oleObject'
+                // which is outside the allowlist and therefore stays null —
+                // intentional: we don't want to hand users a .bin OLE container.
+                dataUrl = bytesToDataUrl(bytes, contentType);
+            }
+        }
+        out.push({
+            kind: rel.kind,
+            contentType,
+            fileName: rel.fileName,
+            progId: anchor?.progId ?? null,
+            col: anchor?.col ?? null,
+            row: anchor?.row ?? null,
+            endCol: anchor?.endCol ?? null,
+            endRow: anchor?.endRow ?? null,
+            size: bytes.byteLength,
+            dataUrl,
+            altText: anchor?.altText ?? null,
+        });
+    }
+    return out;
+}
+
+// Parse any <oleObject progId="…" r:id="…"/> entries from a sheet xml and
+// return a map keyed by relationship id. Anchor coordinates come from the
+// sibling <objectPr>/<anchor>/<from|to> descendants when present. Shape-id
+// fallbacks (for legacy form controls) are ignored — xlsxjs doesn't surface
+// them anywhere else.
+function parseOleObjectAnchors(xml: string): Map<string, {
+    progId: string | null;
+    col: number | null; row: number | null;
+    endCol: number | null; endRow: number | null;
+    altText: string | null;
+}> {
+    const out = new Map<string, {
+        progId: string | null;
+        col: number | null; row: number | null;
+        endCol: number | null; endRow: number | null;
+        altText: string | null;
+    }>();
+    const doc = parseXml(xml);
+    // Modern Excel wraps oleObjects in an <mc:AlternateContent> so the
+    // element may sit at multiple depths. getElementsByTagNameNS walks the
+    // full subtree so both the main and fallback copies surface; we keep the
+    // first one per rId (the <Choice> before <Fallback> is the preferred
+    // copy per MCE rules).
+    const els = doc.getElementsByTagNameNS(NS.main, 'oleObject');
+    for (let i = 0; i < els.length; i++) {
+        const el = els[i];
+        const rId = el.getAttributeNS(NS.rel, 'id');
+        if (!rId || out.has(rId)) continue;
+        const progId = el.getAttribute('progId') || null;
+        // <objectPr> carries an <anchor> with <from>/<to> xdr-like markers.
+        // Older Excel writes <oleObject><twoCellAnchor>…</twoCellAnchor></oleObject>
+        // directly; support both shapes by scanning descendants.
+        let col: number | null = null;
+        let row: number | null = null;
+        let endCol: number | null = null;
+        let endRow: number | null = null;
+        // Look in the xdr namespace (the DrawingML anchor namespace) first —
+        // Excel's modern output uses xdr for these markers.
+        const findFrom = el.getElementsByTagNameNS(NS.xdr, 'from').item(0)
+            ?? el.getElementsByTagNameNS(NS.main, 'from').item(0);
+        const findTo = el.getElementsByTagNameNS(NS.xdr, 'to').item(0)
+            ?? el.getElementsByTagNameNS(NS.main, 'to').item(0);
+        if (findFrom) {
+            col = anchorCellValue(findFrom, 'col');
+            row = anchorCellValue(findFrom, 'row');
+            // fallback to main-namespace children when xdr lookup missed
+            if (col === null) {
+                const c = findFrom.getElementsByTagNameNS(NS.main, 'col').item(0);
+                col = c ? Number(c.textContent) : null;
+                if (col !== null && !Number.isFinite(col)) col = null;
+            }
+            if (row === null) {
+                const r = findFrom.getElementsByTagNameNS(NS.main, 'row').item(0);
+                row = r ? Number(r.textContent) : null;
+                if (row !== null && !Number.isFinite(row)) row = null;
+            }
+        }
+        if (findTo) {
+            endCol = anchorCellValue(findTo, 'col');
+            endRow = anchorCellValue(findTo, 'row');
+            if (endCol === null) {
+                const c = findTo.getElementsByTagNameNS(NS.main, 'col').item(0);
+                endCol = c ? Number(c.textContent) : null;
+                if (endCol !== null && !Number.isFinite(endCol)) endCol = null;
+            }
+            if (endRow === null) {
+                const r = findTo.getElementsByTagNameNS(NS.main, 'row').item(0);
+                endRow = r ? Number(r.textContent) : null;
+                if (endRow !== null && !Number.isFinite(endRow)) endRow = null;
+            }
+        }
+        out.set(rId, { progId, col, row, endCol, endRow, altText: null });
+    }
+    return out;
 }
 
 // Parse xl/metadata.xml into a resolved WorkbookMetadata. We care about two
@@ -1574,6 +1865,7 @@ function parseSheet(
     images: SheetImage[] = [],
     charts: SheetChart[] = [],
     shapes: SheetShape[] = [],
+    embeddings: SheetEmbedding[] = [],
     pivots: SheetPivot[] = [],
     comments: SheetComment[] = [],
     threadedComments: ThreadedCommentEntry[] = [],
@@ -1667,7 +1959,7 @@ function parseSheet(
     return {
         name, state, rows, maxCol, maxRow, merges, columns, rowDimensions,
         conditionalFormatting, frozenPanes, autoFilter, tables, images,
-        charts, shapes, pivots, extensions, comments, threadedComments, view, outline,
+        charts, shapes, embeddings, pivots, extensions, comments, threadedComments, view, outline,
         hyperlinks, dataValidationLists, pageBreaks, printArea, headerFooter,
         protection,
     };

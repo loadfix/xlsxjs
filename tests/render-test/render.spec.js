@@ -37,6 +37,7 @@ const fixtures = [
     'multisheet',
     'named-styles',
     'numfmt-r2',
+    'ole-embeddings',
     'outlines-and-names',
     'page-layout',
     'phonetics',

@@ -1,10 +1,10 @@
 import { Workbook } from './workbook';
-export { XlsxEncryptedError } from './workbook';
+export { XlsxEncryptedError, sanitizeMediaMime, bytesToDataUrl, MAX_EMBEDDING_BYTES } from './workbook';
 import { WorkbookParser } from './workbook-parser';
 import { HtmlRenderer } from './html-renderer';
 import { h } from './html';
 
-export type { Workbook as ParsedWorkbook, Sheet, SheetView, Cell, RichTextRun, SharedString, PhoneticRun, FrozenPanes, AutoFilter, TableDef, SheetChart, SheetPivot, SheetExtensionUri, SheetImage, SheetComment, ThreadedCommentEntry, SheetOutline, DefinedName, ColumnWidth, RowDimension, Hyperlink, DataValidationList, PageBreaks, PrintAreaRange, HeaderFooter, HeaderFooterZones } from './workbook-parser';
+export type { Workbook as ParsedWorkbook, Sheet, SheetView, Cell, RichTextRun, SharedString, PhoneticRun, FrozenPanes, AutoFilter, TableDef, SheetChart, SheetPivot, SheetExtensionUri, SheetImage, SheetEmbedding, SheetComment, ThreadedCommentEntry, SheetOutline, DefinedName, ColumnWidth, RowDimension, Hyperlink, DataValidationList, PageBreaks, PrintAreaRange, HeaderFooter, HeaderFooterZones } from './workbook-parser';
 export { parseThreadedComments, isSafeHyperlinkHref } from './workbook-parser';
 export type { Styles, CellXf, FontStyle, FillStyle, BorderStyle, Dxf, UnderlineStyle } from './styles';
 export type { Theme, ColorRef } from './theme';
@@ -27,6 +27,13 @@ export interface Options {
     // is true. 'a1' is Excel's default; 'r1c1' is an author-relative form
     // popular in accounting contexts.
     formulaNotation: 'a1' | 'r1c1';
+    // Opt-in inlining of embedded OLE / package payloads as `data:` URLs on
+    // the rendered `<aside class="xlsx-embedding">`. Detection + metadata
+    // surfacing happen unconditionally; only the payload projection is gated
+    // on this flag, since a naive `dataUrl` lands the full embedding in both
+    // model and DOM memory. Oversized payloads (>32 MiB) or MIMEs outside
+    // the sanitizer's allowlist keep `dataUrl` null even when this is true.
+    inlineEmbeddings: boolean;
     h: typeof h;
 }
 
@@ -36,6 +43,7 @@ export const defaultOptions: Options = {
     debug: false,
     showFormulas: false,
     formulaNotation: 'a1',
+    inlineEmbeddings: false,
     h,
 };
 
