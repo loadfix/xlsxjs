@@ -973,6 +973,94 @@ async function renderFixture(path, options) {
         `33g: A4 attacker font name should be rejected → no fontFamily (got "${a4.style.fontFamily}")`);
 }
 
+// ── 34. Elapsed-time markers: [h], [mm], [ss] accumulate past their modulo ─
+// `[h]:mm` for serial 1.5 means 36 hours (= 24 from the whole day + 12 from
+// the fractional half) and the remaining minutes are 0. Same shape for `[mm]`
+// (total-minute accumulator) and `[ss]` (total-second accumulator).
+{
+    const fn = globalThis.xlsx.formatNumber;
+    assert(fn('1.5', '[h]:mm').text === '36:00',
+        `34a: [h]:mm of 1.5 should be "36:00" (got "${fn('1.5', '[h]:mm').text}")`);
+    assert(fn('36.5', '[mm]:ss').text === '52560:00',
+        `34b: [mm]:ss of 36.5 should be "52560:00" (got "${fn('36.5', '[mm]:ss').text}")`);
+    // A sub-day fraction still works: 0.25 → 6 hours.
+    assert(fn('0.25', '[h]').text === '6',
+        `34c: [h] of 0.25 should be "6" (got "${fn('0.25', '[h]').text}")`);
+    // [hh] pads to two digits.
+    assert(fn('0.25', '[hh]').text === '06',
+        `34d: [hh] of 0.25 should be "06" (got "${fn('0.25', '[hh]').text}")`);
+    // And [ss] alone gives the total seconds (2 minutes 30 seconds).
+    assert(fn(String(150 / 86400), '[ss]').text === '150',
+        `34e: [ss] of 150s should be "150" (got "${fn(String(150 / 86400), '[ss]').text}")`);
+}
+
+// ── 35. Accounting padding (_( _) _-) emits a space per _<char> ───────────
+// `_("$"* #,##0_)` is the canonical Excel Accounting positive section: a
+// leading `_(` (space for the matching `(` in the negative section), the
+// `$` literal, a `*` fill with space, then the digits, then `_)` to align
+// the trailing paren. We can't render the `*` fill (see file-header note),
+// but the `_(` / `_)` padding should emit as single spaces.
+{
+    const fn = globalThis.xlsx.formatNumber;
+    const res = fn('1234', '_("$"* #,##0_)');
+    // Exact shape: [space][$][space from *-stripped / literal][1,234][space].
+    // We don't pin the exact whitespace count since the "*<char>" collapse
+    // is a documented compromise; instead we check the digits and currency.
+    assert(res.text.includes('$1,234'), `35a: accounting form should include "$1,234" (got "${res.text}")`);
+    assert(res.text.startsWith(' '), `35b: accounting form should start with leading _ space (got "${res.text}")`);
+    assert(res.text.endsWith(' '), `35c: accounting form should end with trailing _ space (got "${res.text}")`);
+    // Negative section with _(…-_): the `_-` pair should also render as one space.
+    const neg = fn('-50', '#,##0_);(#,##0)');
+    // -50 hits the second section (…) → "(50) "? Actually pattern 2 is
+    // "(#,##0)" with no `_`. We only want to check this doesn't regress
+    // the existing behaviour — "(50)" (and no extraneous underscore).
+    assert(!neg.text.includes('_'), `35d: negative section should not surface the underscore (got "${neg.text}")`);
+    assert(neg.text.includes('(50)'), `35e: negative section should render "(50)" (got "${neg.text}")`);
+}
+
+// ── 36. Locale currency: [$€-2] prefixes euro symbol, [$-409] drops locale ─
+// `[$<symbol>-<localeHex>]` carries a currency symbol plus a locale id. We
+// want the symbol to survive the strip and emit in place; a locale-only tag
+// (empty symbol) should render nothing.
+{
+    const fn = globalThis.xlsx.formatNumber;
+    assert(fn('1234', '[$€-2]#,##0').text === '€1,234',
+        `36a: [$€-2]#,##0 of 1234 should be "€1,234" (got "${fn('1234', '[$€-2]#,##0').text}")`);
+    assert(fn('1234', '[$¥-411]#,##0').text === '¥1,234',
+        `36b: [$¥-411]#,##0 of 1234 should be "¥1,234" (got "${fn('1234', '[$¥-411]#,##0').text}")`);
+    // No symbol (locale-only): the bracket is consumed silently.
+    assert(fn('1234', '[$-409]#,##0').text === '1,234',
+        `36c: [$-409]#,##0 of 1234 should be "1,234" (got "${fn('1234', '[$-409]#,##0').text}")`);
+    // Multi-char symbol: "USD" as a prefix.
+    assert(fn('1234', '[$USD-409]#,##0').text === 'USD1,234',
+        `36d: [$USD-409]#,##0 of 1234 should be "USD1,234" (got "${fn('1234', '[$USD-409]#,##0').text}")`);
+    // Existing behaviour still works: bare [Red] / [>0] are still dropped.
+    assert(fn('5', '[Red]#,##0').text === '5', '36e: [Red] is still dropped');
+}
+
+// ── 37. 1904 date system threads through the formatter + renderer ─────────
+// `formatNumber` takes an options bag; the `date1904` flag flips the epoch
+// so serial 0 is 1904-01-01 (no leap bug). The workbook parser reads the
+// flag from `<workbookPr date1904="1"/>` and the renderer threads it through.
+{
+    const fn = globalThis.xlsx.formatNumber;
+    // Serial 0 under the 1904 system = 1904-01-01 exactly.
+    assert(fn('0', 'yyyy-mm-dd', { date1904: true }).text === '1904-01-01',
+        `37a: serial 0 with date1904 → "1904-01-01" (got "${fn('0', 'yyyy-mm-dd', { date1904: true }).text}")`);
+    // Same serial under the 1900 system → 1899-12-30 (epoch sentinel).
+    assert(fn('0', 'yyyy-mm-dd').text === '1899-12-30',
+        `37b: serial 0 without date1904 → "1899-12-30" (got "${fn('0', 'yyyy-mm-dd').text}")`);
+    // A real date: serial 31 in the 1904 system → 1904-02-01 (no fudge).
+    assert(fn('31', 'yyyy-mm-dd', { date1904: true }).text === '1904-02-01',
+        `37c: serial 31 with date1904 → "1904-02-01" (got "${fn('31', 'yyyy-mm-dd', { date1904: true }).text}")`);
+    // Default flag on existing workbooks is false (regression guard).
+    // The python-xlsx fixture was authored under the 1900 system and its
+    // date cells still render as before (scenario 7i).
+    const { wb } = await renderFixture('python-xlsx');
+    assert(wb.parsed.date1904 === false,
+        `37d: fixture should expose date1904=false by default (got ${wb.parsed.date1904})`);
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

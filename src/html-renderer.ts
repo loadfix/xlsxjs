@@ -31,7 +31,7 @@ export class HtmlRenderer {
         const nodes: Node[] = [];
         nodes.push(renderStyle(options.className));
         for (const sheet of workbook.sheets) {
-            nodes.push(renderSheet(sheet, workbook.styles, workbook.theme, options));
+            nodes.push(renderSheet(sheet, workbook.styles, workbook.theme, workbook.date1904, options));
         }
         return nodes;
     }
@@ -280,7 +280,7 @@ function resolveConditionalFormats(sheet: Sheet, styles: Styles | null): Map<str
     return out;
 }
 
-function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, options: Options): HTMLElement {
+function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, date1904: boolean, options: Options): HTMLElement {
     const section = h('section', { class: options.className, 'data-sheet-name': sheet.name }) as HTMLElement;
     section.appendChild(h('div', { class: 'xlsx-sheet-name' }, [sheet.name]));
 
@@ -385,7 +385,7 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, o
             if (suppressedCells.has(`${r},${c}`)) continue;
             const cell = byCol[c];
             const td = document.createElement('td');
-            if (cell) renderCellContent(td, cell, styles, theme, options);
+            if (cell) renderCellContent(td, cell, styles, theme, date1904, options);
             const dxf = dxfByCell.get(`${r},${c}`);
             if (dxf) applyDxf(td, dxf, theme);
             const gfx = graphicalByCell.get(`${r},${c}`);
@@ -537,7 +537,7 @@ function tagFrozen(td: HTMLTableCellElement, row: number, col: number, panes: Fr
     else if (inX) td.classList.add('xlsx-frozen-col');
 }
 
-function renderCellContent(td: HTMLTableCellElement, cell: Cell, styles: Styles | null, theme: Theme | null, options: Options): void {
+function renderCellContent(td: HTMLTableCellElement, cell: Cell, styles: Styles | null, theme: Theme | null, date1904: boolean, options: Options): void {
     const xf = resolveXf(styles, cell.styleIndex);
     let text = cell.value;
     let numeric = cell.kind === 'number';
@@ -547,7 +547,7 @@ function renderCellContent(td: HTMLTableCellElement, cell: Cell, styles: Styles 
     if ((cell.kind === 'number' || cell.kind === 'empty') && xf) {
         const code = lookupNumberFormat(styles, xf.numFmtId);
         if (code && code !== 'General' && cell.value !== '') {
-            const res = formatNumber(cell.value, code);
+            const res = formatNumber(cell.value, code, { date1904 });
             text = res.text;
             numeric = res.numeric;
         }

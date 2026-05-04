@@ -213,6 +213,12 @@ export interface Workbook {
     // Workbook-wide author registry (personId GUID → displayName). Empty
     // Map when the package carries no xl/persons/person.xml.
     persons: Map<string, string>;
+    // True when xl/workbook.xml declares <workbookPr date1904="1"/>. Flips
+    // date-serial interpretation from the 1900 system (PC convention, with
+    // the historical 1900-02-29 leap bug) to the 1904 system (Mac Office
+    // pre-2011 convention, no leap bug). Threaded into formatNumber so date
+    // cells render correctly on files authored under either convention.
+    date1904: boolean;
 }
 
 const NS = {
@@ -260,6 +266,7 @@ export class WorkbookParser {
         const persons = resolvePersons(rels, parts);
 
         const sheetMeta = parseSheetList(workbookXml);
+        const { date1904 } = parseWorkbookMeta(workbookXml);
         const sheets: Sheet[] = [];
         for (let i = 0; i < sheetMeta.length; i++) {
             const { name, rId } = sheetMeta[i];
@@ -282,8 +289,20 @@ export class WorkbookParser {
             sheets.push(parseSheet(name, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments));
         }
 
-        return { sheets, styles, theme, persons };
+        return { sheets, styles, theme, persons, date1904 };
     }
+}
+
+// Parse the small set of workbook-wide flags we care about from xl/workbook.xml.
+// Today that's just `<workbookPr date1904="1"/>`; more flags can join this
+// reader as they come online (e.g. backupFile, showPivotChartFilter).
+function parseWorkbookMeta(workbookXml: string): { date1904: boolean } {
+    const doc = parseXml(workbookXml);
+    const pr = doc.getElementsByTagNameNS(NS.main, 'workbookPr').item(0);
+    if (!pr) return { date1904: false };
+    const attr = pr.getAttribute('date1904');
+    const date1904 = attr === '1' || attr === 'true';
+    return { date1904 };
 }
 
 // xl/persons/person.xml holds the GUID → displayName registry shared by

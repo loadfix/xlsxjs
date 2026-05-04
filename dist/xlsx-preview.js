@@ -1153,6 +1153,7 @@
                 : new Map();
             const persons = resolvePersons(rels, parts);
             const sheetMeta = parseSheetList(workbookXml);
+            const { date1904 } = parseWorkbookMeta(workbookXml);
             const sheets = [];
             for (let i = 0; i < sheetMeta.length; i++) {
                 const { name, rId } = sheetMeta[i];
@@ -1174,8 +1175,17 @@
                 const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
                 sheets.push(parseSheet(name, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments));
             }
-            return { sheets, styles, theme, persons };
+            return { sheets, styles, theme, persons, date1904 };
         }
+    }
+    function parseWorkbookMeta(workbookXml) {
+        const doc = parseXml(workbookXml);
+        const pr = doc.getElementsByTagNameNS(NS.main, 'workbookPr').item(0);
+        if (!pr)
+            return { date1904: false };
+        const attr = pr.getAttribute('date1904');
+        const date1904 = attr === '1' || attr === 'true';
+        return { date1904 };
     }
     function resolvePersons(workbookRels, parts) {
         let xmlPath = null;
@@ -1939,7 +1949,7 @@
         negative: 1,
         zero: 2,
     };
-    function formatNumber(value, formatCode) {
+    function formatNumber(value, formatCode, options) {
         if (formatCode === '' || formatCode.toLowerCase() === 'general') {
             return formatGeneral(value);
         }
@@ -1959,12 +1969,24 @@
         else
             sectionIndex = sections[NUMERIC_SECTION_INDEX.zero] ? NUMERIC_SECTION_INDEX.zero : NUMERIC_SECTION_INDEX.positive;
         const section = sections[sectionIndex] ?? formatCode;
-        const cleaned = stripSquareBracketModifiers(section);
+        const { code: sectionWithSymbol } = extractLocaleCurrency(section);
+        const cleaned = stripSquareBracketModifiers(sectionWithSymbol);
         let magnitude = Math.abs(num);
         if (num < 0 && sectionIndex === NUMERIC_SECTION_INDEX.positive) {
-            return { text: '-' + applyFormat(cleaned, magnitude), numeric: true };
+            return { text: '-' + applyFormat(cleaned, magnitude, options), numeric: true };
         }
-        return { text: applyFormat(cleaned, magnitude), numeric: true };
+        return { text: applyFormat(cleaned, magnitude, options), numeric: true };
+    }
+    function extractLocaleCurrency(code) {
+        return {
+            code: code.replace(/\[\$([^\]]*)\]/g, (_, inner) => {
+                const dashIdx = inner.indexOf('-');
+                const symbol = dashIdx >= 0 ? inner.slice(0, dashIdx) : inner;
+                if (!symbol)
+                    return '';
+                return `"${symbol.replace(/"/g, '')}"`;
+            }),
+        };
     }
     function splitSections(code) {
         const out = [];
@@ -1993,15 +2015,22 @@
         return out;
     }
     function stripSquareBracketModifiers(code) {
-        return code.replace(/\[[^\]]*\]/g, '');
+        return code.replace(/\[([^\]]*)\]/g, (match, inner) => {
+            if (/^(hh?|mm?|ss?)$/i.test(inner))
+                return match;
+            return '';
+        });
     }
-    function applyFormat(code, value) {
+    function applyFormat(code, value, options) {
         if (code.trim().toLowerCase() === 'general') {
             return formatGeneralNumber(value);
         }
+        if (/\[(hh?|mm?|ss?)\]/.test(code)) {
+            return formatDateTime(code, value, options);
+        }
         if (/[yMdhsmAP]/.test(stripQuotedLiterals(code))) {
             if (/[yMdAPhs]/.test(stripQuotedLiterals(code))) {
-                return formatDateTime(code, value);
+                return formatDateTime(code, value, options);
             }
         }
         return formatNumeric(code, value);
@@ -2079,6 +2108,16 @@
                 i += 2;
                 continue;
             }
+            if (c === '_') {
+                if (i + 1 < code.length)
+                    out += ' ';
+                i += 2;
+                continue;
+            }
+            if (c === '*') {
+                i += 2;
+                continue;
+            }
             if (c === '0' || c === '#' || c === '?' || c === '.' || c === ',') {
                 if (!inserted) {
                     out += numberText;
@@ -2109,16 +2148,19 @@
     function formatGeneralNumber(n) {
         return n.toString();
     }
-    const EPOCH_MS = Date.UTC(1899, 11, 30);
+    const EPOCH_MS_1900 = Date.UTC(1899, 11, 30);
+    const EPOCH_MS_1904 = Date.UTC(1904, 0, 1);
     const MS_PER_DAY = 86400000;
-    function serialToDate(serial) {
+    function serialToDate(serial, date1904) {
         const whole = Math.floor(serial);
         const frac = serial - whole;
-        const ms = EPOCH_MS + whole * MS_PER_DAY + Math.round(frac * MS_PER_DAY);
+        const epoch = date1904 ? EPOCH_MS_1904 : EPOCH_MS_1900;
+        const ms = epoch + whole * MS_PER_DAY + Math.round(frac * MS_PER_DAY);
         return new Date(ms);
     }
-    function formatDateTime(code, value) {
-        const date = serialToDate(value);
+    function formatDateTime(code, value, options) {
+        const date1904 = options?.date1904 === true;
+        const date = serialToDate(value, date1904);
         const Y = date.getUTCFullYear();
         const M = date.getUTCMonth() + 1;
         const D = date.getUTCDate();
@@ -2128,6 +2170,9 @@
         const ampm = /AM\/PM|am\/pm/.test(stripQuotedLiterals(code));
         const h12 = ((h24 + 11) % 12) + 1;
         const hour = ampm ? h12 : h24;
+        const totalHours = Math.floor(value * 24);
+        const totalMinutes = Math.floor(value * 1440);
+        const totalSeconds = Math.floor(value * 86400);
         let out = '';
         let i = 0;
         let lastSawHour = false;
@@ -2153,18 +2198,18 @@
                     i++;
                     continue;
                 }
-                const inner = code.slice(i + 1, end);
+                const inner = code.slice(i + 1, end).toLowerCase();
                 i = end + 1;
-                if (inner.toLowerCase() === 'h') {
-                    out += String(h24);
+                if (inner === 'h' || inner === 'hh') {
+                    out += inner.length >= 2 ? pad2(totalHours) : String(totalHours);
                     lastSawHour = true;
                 }
-                else if (inner.toLowerCase() === 'mm') {
-                    out += pad2(m);
+                else if (inner === 'm' || inner === 'mm') {
+                    out += inner.length >= 2 ? pad2(totalMinutes) : String(totalMinutes);
                     lastSawHour = false;
                 }
-                else if (inner.toLowerCase() === 'ss') {
-                    out += pad2(s);
+                else if (inner === 's' || inner === 'ss') {
+                    out += inner.length >= 2 ? pad2(totalSeconds) : String(totalSeconds);
                     lastSawHour = false;
                 }
                 continue;
@@ -2339,7 +2384,7 @@
             const nodes = [];
             nodes.push(renderStyle(options.className));
             for (const sheet of workbook.sheets) {
-                nodes.push(renderSheet(sheet, workbook.styles, workbook.theme, options));
+                nodes.push(renderSheet(sheet, workbook.styles, workbook.theme, workbook.date1904, options));
             }
             return nodes;
         }
@@ -2549,7 +2594,7 @@
         }
         return out;
     }
-    function renderSheet(sheet, styles, theme, options) {
+    function renderSheet(sheet, styles, theme, date1904, options) {
         const section = h('section', { class: options.className, 'data-sheet-name': sheet.name });
         section.appendChild(h('div', { class: 'xlsx-sheet-name' }, [sheet.name]));
         const table = h('table');
@@ -2643,7 +2688,7 @@
                 const cell = byCol[c];
                 const td = document.createElement('td');
                 if (cell)
-                    renderCellContent(td, cell, styles, theme, options);
+                    renderCellContent(td, cell, styles, theme, date1904, options);
                 const dxf = dxfByCell.get(`${r},${c}`);
                 if (dxf)
                     applyDxf(td, dxf, theme);
@@ -2778,14 +2823,14 @@
         else if (inX)
             td.classList.add('xlsx-frozen-col');
     }
-    function renderCellContent(td, cell, styles, theme, options) {
+    function renderCellContent(td, cell, styles, theme, date1904, options) {
         const xf = resolveXf(styles, cell.styleIndex);
         let text = cell.value;
         let numeric = cell.kind === 'number';
         if ((cell.kind === 'number' || cell.kind === 'empty') && xf) {
             const code = lookupNumberFormat(styles, xf.numFmtId);
             if (code && code !== 'General' && cell.value !== '') {
-                const res = formatNumber(cell.value, code);
+                const res = formatNumber(cell.value, code, { date1904 });
                 text = res.text;
                 numeric = res.numeric;
             }
