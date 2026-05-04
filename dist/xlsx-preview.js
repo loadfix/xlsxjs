@@ -2035,6 +2035,8 @@
             headerRowCount: Number(t.getAttribute('headerRowCount') ?? '1') || 0,
             totalsRowCount: Number(t.getAttribute('totalsRowCount') ?? '0') || 0,
             columns,
+            altText: t.getAttribute('altText') || null,
+            altTextSummary: t.getAttribute('altTextSummary') || null,
         };
     }
     function parseXml(xml) {
@@ -2247,6 +2249,7 @@
         const pageBreaks = parsePageBreaks(doc);
         const printArea = resolvePrintArea(sheetIndex, definedNames);
         const headerFooter = parseHeaderFooter(doc, name);
+        const protection = parseSheetProtection(doc);
         for (const h of hyperlinks) {
             if (h.col > maxCol)
                 maxCol = h.col;
@@ -2264,6 +2267,34 @@
             conditionalFormatting, frozenPanes, autoFilter, tables, images,
             charts, shapes, pivots, extensions, comments, threadedComments, view, outline,
             hyperlinks, dataValidationLists, pageBreaks, printArea, headerFooter,
+            protection,
+        };
+    }
+    function parseSheetProtection(doc) {
+        const el = doc.getElementsByTagNameNS(NS.main, 'sheetProtection').item(0);
+        if (!el)
+            return null;
+        const locked = (attr) => el.getAttribute(attr) !== '0';
+        const enabled = el.getAttribute('sheet') === '1';
+        const passwordHashed = el.getAttribute('password') !== null ||
+            el.getAttribute('hashValue') !== null;
+        return {
+            enabled,
+            passwordHashed,
+            selectLockedCells: locked('selectLockedCells'),
+            selectUnlockedCells: locked('selectUnlockedCells'),
+            formatCells: locked('formatCells'),
+            formatColumns: locked('formatColumns'),
+            formatRows: locked('formatRows'),
+            insertColumns: locked('insertColumns'),
+            insertRows: locked('insertRows'),
+            deleteColumns: locked('deleteColumns'),
+            deleteRows: locked('deleteRows'),
+            sort: locked('sort'),
+            autoFilter: locked('autoFilter'),
+            pivotTables: locked('pivotTables'),
+            objects: locked('objects'),
+            scenarios: locked('scenarios'),
         };
     }
     function parseSheetView(doc) {
@@ -3712,6 +3743,9 @@
     function renderSheet(sheet, styles, theme, date1904, options) {
         const section = h('section', { class: options.className, 'data-sheet-name': sheet.name });
         applySheetView(section, sheet.view, theme);
+        if (sheet.protection?.enabled) {
+            section.setAttribute('data-sheet-protected', 'true');
+        }
         if (sheet.pageBreaks.rows.length > 0) {
             section.setAttribute('data-page-break-rows', sheet.pageBreaks.rows.join(','));
         }
@@ -3888,6 +3922,12 @@
             caption.className = 'xlsx-table-caption';
             caption.setAttribute('data-table-name', t.name);
             caption.setAttribute('data-table-display-name', t.displayName);
+            if (t.altText) {
+                caption.setAttribute('aria-label', t.altText);
+            }
+            else if (t.altTextSummary) {
+                caption.setAttribute('title', t.altTextSummary);
+            }
             caption.textContent = `Table "${t.displayName || t.name}" · ${t.columns.length} column(s) · rows ${t.row + 1}-${t.endRow + 1}`;
             section.appendChild(caption);
         }

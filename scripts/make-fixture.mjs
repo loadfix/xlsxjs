@@ -1272,3 +1272,68 @@ await writeFixture('merged', {
     writeFileSync(out, buf);
     console.log(`wrote ${out} (${buf.length} bytes)`);
 }
+
+// ── sheet-protection-and-alt ──────────────────────────────────────────────
+// Exercises the SheetProtection state + TableDef altText surface.
+//   - <sheetProtection sheet="1" selectLockedCells="1" formatCells="0"/>:
+//     enabled; selectLockedCells explicitly locked; formatCells explicitly
+//     unlocked; every absent toggle (sort, …) defaults to locked per ECMA.
+//   - The sheet carries one defined table with @altText="Q4 stock" and
+//     @altTextSummary="Weekly stock by SKU". The renderer should surface the
+//     altText on the caption's aria-label.
+{
+    const outDir = resolve(repo, 'tests/render-test/sheet-protection-and-alt');
+    mkdirSync(outDir, { recursive: true });
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+  <Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/>
+</Types>`);
+    zip.file('_rels/.rels', rootRels);
+    zip.file('xl/_rels/workbook.xml.rels', workbookRels);
+    zip.file('xl/workbook.xml', workbookXml('Inventory'));
+    zip.file('xl/sharedStrings.xml', sharedStringsXml([
+        'SKU', 'Name', 'Region', 'Stock',
+        'A-100', 'Widget', 'North',
+        'A-101', 'Gadget', 'South',
+    ]));
+    // Sheet rels: one table, referenced relative to the sheet.
+    zip.file('xl/worksheets/_rels/sheet1.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/>
+</Relationships>`);
+    // <sheetProtection> must follow <sheetData> per the worksheet schema
+    // sequence; <tableParts> trails the lot.
+    zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+           xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheetData>
+    <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c><c r="D1" t="s"><v>3</v></c></row>
+    <row r="2"><c r="A2" t="s"><v>4</v></c><c r="B2" t="s"><v>5</v></c><c r="C2" t="s"><v>6</v></c><c r="D2"><v>42</v></c></row>
+    <row r="3"><c r="A3" t="s"><v>7</v></c><c r="B3" t="s"><v>8</v></c><c r="C3" t="s"><v>9</v></c><c r="D3"><v>118</v></c></row>
+  </sheetData>
+  <sheetProtection sheet="1" selectLockedCells="1" formatCells="0"/>
+  <tableParts count="1"><tablePart r:id="rId1"/></tableParts>
+</worksheet>`);
+    zip.file('xl/tables/table1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+       id="1" name="Inventory" displayName="Inventory" ref="A1:D3"
+       altText="Q4 stock" altTextSummary="Weekly stock by SKU">
+  <autoFilter ref="A1:D3"/>
+  <tableColumns count="4">
+    <tableColumn id="1" name="SKU"/>
+    <tableColumn id="2" name="Name"/>
+    <tableColumn id="3" name="Region"/>
+    <tableColumn id="4" name="Stock"/>
+  </tableColumns>
+</table>`);
+    const buf = await zip.generateAsync({ type: 'nodebuffer' });
+    const out = resolve(outDir, 'workbook.xlsx');
+    writeFileSync(out, buf);
+    console.log(`wrote ${out} (${buf.length} bytes)`);
+}

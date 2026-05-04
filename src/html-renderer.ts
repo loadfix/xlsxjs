@@ -360,6 +360,12 @@ function resolveConditionalFormats(sheet: Sheet, styles: Styles | null, date1904
 function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, date1904: boolean, options: Options): HTMLElement {
     const section = h('section', { class: options.className, 'data-sheet-name': sheet.name }) as HTMLElement;
     applySheetView(section, sheet.view, theme);
+    // Sheet-protection state surfaces as a data attribute so consumers can
+    // style protected sheets (e.g. a subtle banner) via CSS. xlsxjs does not
+    // enforce any protection — it only reflects the workbook's declared state.
+    if (sheet.protection?.enabled) {
+        section.setAttribute('data-sheet-protected', 'true');
+    }
     // Manual page breaks surface as data attributes on the section; xlsxjs
     // doesn't render a visual break (no pagination) but consumers who want to
     // paint a divider can read these off.
@@ -555,6 +561,15 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
         caption.className = 'xlsx-table-caption';
         caption.setAttribute('data-table-name', t.name);
         caption.setAttribute('data-table-display-name', t.displayName);
+        // Accessibility: prefer the short altText on `aria-label` (assistive
+        // tech reads this in place of the visible caption's tree); when only
+        // the longer `altTextSummary` is present, fall back to `title` so it
+        // surfaces as a tooltip + accessible description.
+        if (t.altText) {
+            caption.setAttribute('aria-label', t.altText);
+        } else if (t.altTextSummary) {
+            caption.setAttribute('title', t.altTextSummary);
+        }
         caption.textContent = `Table "${t.displayName || t.name}" · ${t.columns.length} column(s) · rows ${t.row + 1}-${t.endRow + 1}`;
         section.appendChild(caption);
     }

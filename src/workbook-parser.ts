@@ -337,6 +337,39 @@ export interface TableDef {
     headerRowCount: number;
     totalsRowCount: number;
     columns: { name: string }[];
+    // Table accessibility metadata from the <table> root attributes.
+    // `altText` is a short title suitable for `aria-label`; `altTextSummary`
+    // is a longer description meant for `title` fallback. Both are null when
+    // the producer did not set them.
+    altText: string | null;
+    altTextSummary: string | null;
+}
+
+// Sheet-protection state surfaced from <sheetProtection …/>. A locked
+// operation is represented as attribute value `"1"`; explicitly unlocked is
+// `"0"`. Per ECMA-376 §18.3.1.85, absent attributes default to `"1"` so we
+// parse each flag as `attr !== "0"`. xlsxjs does not enforce the protection
+// — it only surfaces the state so consumers can read it / style with it.
+export interface SheetProtection {
+    enabled: boolean;             // true when <sheetProtection sheet="1"/>
+    passwordHashed: boolean;      // true when @password is present
+    // Granular toggles are rarely inspected by readers; we surface the common
+    // ones individually. Each is `true` when the corresponding operation is
+    // locked (including via absence, per ECMA default).
+    selectLockedCells: boolean;
+    selectUnlockedCells: boolean;
+    formatCells: boolean;
+    formatColumns: boolean;
+    formatRows: boolean;
+    insertColumns: boolean;
+    insertRows: boolean;
+    deleteColumns: boolean;
+    deleteRows: boolean;
+    sort: boolean;
+    autoFilter: boolean;
+    pivotTables: boolean;
+    objects: boolean;
+    scenarios: boolean;
 }
 
 // A classic comment attached to a single anchor cell. Parsed from
@@ -448,6 +481,9 @@ export interface Sheet {
     // <headerFooter> metadata. Null when the sheet has no headerFooter entry
     // (or neither oddHeader nor oddFooter carries any substituted content).
     headerFooter: HeaderFooter | null;
+    // <sheetProtection> state. Null when the sheet has no sheetProtection
+    // element; an object (with `enabled=true`) when the sheet is protected.
+    protection: SheetProtection | null;
 }
 
 export interface Workbook {
@@ -1223,6 +1259,8 @@ function parseTable(xml: string): TableDef | null {
         headerRowCount: Number(t.getAttribute('headerRowCount') ?? '1') || 0,
         totalsRowCount: Number(t.getAttribute('totalsRowCount') ?? '0') || 0,
         columns,
+        altText: t.getAttribute('altText') || null,
+        altTextSummary: t.getAttribute('altTextSummary') || null,
     };
 }
 
@@ -1470,6 +1508,7 @@ function parseSheet(
     const pageBreaks = parsePageBreaks(doc);
     const printArea = resolvePrintArea(sheetIndex, definedNames);
     const headerFooter = parseHeaderFooter(doc, name);
+    const protection = parseSheetProtection(doc);
 
     // Extend maxCol/maxRow to cover hyperlink and data-validation ranges even
     // when the underlying cells are empty — the ▾ indicator / anchor still
@@ -1488,6 +1527,41 @@ function parseSheet(
         conditionalFormatting, frozenPanes, autoFilter, tables, images,
         charts, shapes, pivots, extensions, comments, threadedComments, view, outline,
         hyperlinks, dataValidationLists, pageBreaks, printArea, headerFooter,
+        protection,
+    };
+}
+
+// Parse <sheetProtection …/>. Returns null when the sheet has no such
+// element. Each granular flag is `true` when the corresponding operation is
+// locked — an absent attribute defaults to locked per ECMA-376 §18.3.1.85,
+// so we parse as `attr !== "0"`. `enabled` mirrors the `@sheet` attribute;
+// `passwordHashed` is true when any hash (`@password`, `@algorithmName +
+// @hashValue`, or the extList SHA-512 variant) is present.
+function parseSheetProtection(doc: Document): SheetProtection | null {
+    const el = doc.getElementsByTagNameNS(NS.main, 'sheetProtection').item(0);
+    if (!el) return null;
+    const locked = (attr: string): boolean => el.getAttribute(attr) !== '0';
+    const enabled = el.getAttribute('sheet') === '1';
+    const passwordHashed =
+        el.getAttribute('password') !== null ||
+        el.getAttribute('hashValue') !== null;
+    return {
+        enabled,
+        passwordHashed,
+        selectLockedCells: locked('selectLockedCells'),
+        selectUnlockedCells: locked('selectUnlockedCells'),
+        formatCells: locked('formatCells'),
+        formatColumns: locked('formatColumns'),
+        formatRows: locked('formatRows'),
+        insertColumns: locked('insertColumns'),
+        insertRows: locked('insertRows'),
+        deleteColumns: locked('deleteColumns'),
+        deleteRows: locked('deleteRows'),
+        sort: locked('sort'),
+        autoFilter: locked('autoFilter'),
+        pivotTables: locked('pivotTables'),
+        objects: locked('objects'),
+        scenarios: locked('scenarios'),
     };
 }
 
