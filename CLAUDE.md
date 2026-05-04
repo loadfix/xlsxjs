@@ -1,8 +1,9 @@
 # xlsxjs — project notes for Claude
 
 Browser-side XLSX→HTML renderer. TypeScript, built with rollup, tested with
-Karma+jasmine and a jsdom harness. Sibling to `../docxjs`; the layout and
-workflows mirror it so the two projects are interchangeable to work in.
+Playwright (browser smoke on real Chrome) and a jsdom harness (depth — 76
+scenarios). Sibling to `../docxjs`; the layout and workflows mirror it so
+the two projects are interchangeable to work in.
 
 ## Scope (current slice)
 

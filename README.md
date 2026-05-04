@@ -1,6 +1,6 @@
 # xlsx-preview
 
-Browser-side XLSX → HTML renderer, written from scratch in TypeScript and following the architecture of the sibling [docxjs](https://github.com/loadfix/docxjs) library (TypeScript + rollup + karma, JSZip for package I/O). Not affiliated with SheetJS or other libraries that share the xlsx name.
+Browser-side XLSX → HTML renderer, written from scratch in TypeScript and following the architecture of the sibling [docxjs](https://github.com/loadfix/docxjs) library (TypeScript + rollup, jsdom for the depth harness, Playwright for the browser smoke, JSZip for package I/O). Not affiliated with SheetJS or other libraries that share the xlsx name.
 
 Opens an `.xlsx`, walks every sheet, and emits an HTML table per sheet with column-letter headers, row-number gutters, cell formatting from `xl/styles.xml` (fonts, fills, borders, alignment — including `wrapText`, `shrinkToFit`, `indent`, `textRotation` (incl. stacked), `readingOrder`, and the widened horizontal/vertical enums — number formats), merged cells, frozen or split panes, autoFilter markers, parsed tables, conditional formatting (including colour scales, data bars, and icon sets), embedded images, classic + threaded comments, per-sheet display state (visibility, RTL direction, grid-line / header toggles, zoom, and tab colour), page-layout metadata (manual row/column page breaks, `_xlnm.Print_Area` resolution, and three-zone `<headerFooter>` text), and `xl/metadata.xml` — dynamic-array spill anchors surface on `Cell.isSpillAnchor` and get a dashed `.xlsx-spill-anchor` outline.
 
@@ -64,9 +64,9 @@ expression-rule interpretation.
 ```bash
 npm install
 npm run build
-npm run test:render   # jsdom harness against the `basic` fixture
-npm run dev           # static server at :8766
-npm run e2e           # Karma suite against real Chrome
+npm run test:render   # jsdom depth harness (76 scenarios)
+npm test              # Playwright browser smoke (real Chrome, port :3002)
+npm run dev           # static demo server at :8767
 ```
 
 PRs welcome. Keep `README.md` and `TODO.md` in sync with code changes in

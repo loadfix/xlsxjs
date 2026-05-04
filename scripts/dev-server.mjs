@@ -1,5 +1,6 @@
-// Tiny static file server for the demo. Serves the repo root on port 8766
+// Tiny static file server for the demo. Serves the repo root on port 8767
 // (configurable via PORT env var). Used by `npm run dev` / `npm run serve`.
+// Sibling convention: docxjs uses :8765, pptxjs uses :8766, xlsxjs uses :8767.
 
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
@@ -7,7 +8,7 @@ import { resolve, extname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(fileURLToPath(import.meta.url), '../..');
-const port = Number(process.env.PORT) || 8766;
+const port = Number(process.env.PORT) || 8767;
 
 const MIME = {
     '.html': 'text/html; charset=utf-8',
