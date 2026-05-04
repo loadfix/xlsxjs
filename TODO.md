@@ -290,3 +290,32 @@ together in the interest of a readable tail.
 ### Tooling
 - ✅ **Playwright browser harness** — 35 tests, real Chrome on :3002,
   one render spec per fixture plus a library-surface smoke.
+
+---
+
+## Conformance gaps (auto-filed from corpus 2026-05-04 overnight run)
+
+The 950-case OOXML conformance corpus run
+(`loadfix/ooxml-validate` → `conformance/results/xlsxjs/`) surfaced
+1 rendering gap against the xlsxjs fork at `a188d9e`. Linked to the
+result JSON on GitHub with an actionable fix hypothesis.
+
+- **Cells holding a formula render as empty when there is no cached
+  `<v>`.**
+  [xlsx/sum-formula](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/xlsxjs/xlsx/sum-formula.json)
+  fails `sum-formula-rendered` — the harness accepts any of the
+  numeric result (`6` or `6.0`), the formula text (`=SUM(A1:A3)`), or
+  the bare form (`SUM(A1:A3)`), but finds only empty strings across
+  all 10 `<td>` nodes. Even though the Wave 1 "Cached formula values"
+  entry above marked cached `<v>` as shipped, this fixture ships a
+  `<c><f>SUM(A1:A3)</f></c>` with the cached result omitted — Excel
+  computes the value at open time but xlsxjs renders nothing.
+  Fix: when `Cell.value` is unset but `Cell.formula` is present, fall
+  back to rendering the formula text (`=SUM(A1:A3)`) into the `<td>`
+  behind a new opt-in `Options.showFormulaText` flag (default off to
+  keep the Wave 8 byte-stable snapshot contract). Alternatively wire up
+  a minimal evaluator for SUM/AVERAGE/COUNT/etc. — but that overlaps
+  with the Wave 9 follow-up "Pivot table interactivity" and belongs
+  behind its own flag. For this conformance gap specifically, emitting
+  the formula string as the cell text whenever the cached value is
+  missing is the minimum viable fix.
