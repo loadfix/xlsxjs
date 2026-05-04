@@ -209,9 +209,19 @@ for (const file of files) {
             }
         }
         for (const fill of parsed.styles.fills) {
-            if (fill.fgColor && fill.fgColor.kind === 'theme') {
+            // Only pattern fills carry a themable colour ref we can spot-check;
+            // gradient fills carry per-stop refs (see below) and 'none' has none.
+            if (fill.kind === 'pattern' && fill.fgColor && fill.fgColor.kind === 'theme') {
                 const base = parsed.theme?.colors[fill.fgColor.index];
                 if (!base) unresolved++;
+            }
+            if (fill.kind === 'gradient') {
+                for (const stop of fill.stops) {
+                    if (stop.color && stop.color.kind === 'theme') {
+                        const base = parsed.theme?.colors[stop.color.index];
+                        if (!base) unresolved++;
+                    }
+                }
             }
         }
         if (unresolved) {

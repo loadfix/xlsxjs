@@ -7,17 +7,6 @@ added multi-step cellStyle chain + custom iconSet lists.
 
 ## Open — small items (one file each)
 
-- [ ] **Diagonal borders** (`border/diagonal` + `@diagonalUp` / `@diagonalDown`) —
-  the parser reads only the four orthogonal sides; no `BorderSide` entry for
-  diagonals. Renderer needs a corresponding CSS path (can't use `border-*`;
-  probably a `background: linear-gradient` overlay).
-- [ ] **Gradient fills** (`<gradientFill>` in `xl/styles.xml`) — parser sees
-  only `<patternFill>`; gradient fills drop. Model needs a new `FillStyle`
-  variant (linear + path gradients, stop list); renderer maps linear to CSS
-  `linear-gradient`.
-- [ ] **Non-solid pattern fills** (`patternType` = `darkGray` / `lightGray` /
-  `darkHorizontal` / `lightVertical` / `darkGrid` / `darkTrellis` / …) — only
-  `solid` + `gray125` recognised today; every other pattern drops the fill.
 - [ ] **Sheet protection state** (`<sheetProtection>`) — surface the locked /
   password-protected flag on `Sheet.protection` for consumers who want a
   read-only indicator. No rendering side effect (cells are already read-only).
@@ -120,6 +109,18 @@ added multi-step cellStyle chain + custom iconSet lists.
   class="xlsx-shape">` with `data-kind` / `data-preset`.
 - ✅ **Drawing anchors** — proper `oneCellAnchor` / `absoluteAnchor` +
   decorative flag (alt="" + aria-hidden), `emuToPx` helper.
+- ✅ **Diagonal borders** — `BorderStyle.diagonal` + `diagonalUp` /
+  `diagonalDown`; renderer paints stacked `linear-gradient` overlays
+  (`to bottom right` / `to top right`) on the cell's `background-image`.
+- ✅ **Gradient fills** — `FillStyle` is now a discriminated union
+  (`pattern` / `gradient` / `none`); `<gradientFill>` parses into
+  `{ kind: 'gradient', type, degree, stops: [{position, color}] }` and
+  renders as a CSS `linear-gradient(<degree>deg, …)`. Path gradients
+  parse but render as a flat fallback to the first stop's colour.
+- ✅ **Non-solid pattern fills** — `darkGray` / `mediumGray` / `lightGray` /
+  `dark*` / `light*` directional stripes + `*Grid` / `*Trellis` render
+  as `repeating-linear-gradient` approximations on top of `bgColor`.
+  `gray125` is still intentionally ignored (Excel's default).
 - ✅ **Theme font scheme + phonetics** — `Theme.majorFont` /
   `Theme.minorFont`, `FontStyle.scheme`, `<rPh>` → HTML `<ruby><rt>`.
 - ✅ **Indexed colours** — ECMA-376 64-entry palette via

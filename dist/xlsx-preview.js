@@ -409,23 +409,55 @@
             out.push(parseFill(fills[i]));
         return out;
     }
+    const PATTERN_TYPES = new Set([
+        'none', 'solid', 'gray125',
+        'darkGray', 'mediumGray', 'lightGray',
+        'darkHorizontal', 'darkVertical', 'darkDown', 'darkUp',
+        'darkGrid', 'darkTrellis',
+        'lightHorizontal', 'lightVertical', 'lightDown', 'lightUp',
+        'lightGrid', 'lightTrellis',
+    ]);
     function parseFill(el, opts) {
+        const gf = el.getElementsByTagNameNS(NS_MAIN$1, 'gradientFill').item(0);
+        if (gf)
+            return parseGradientFill(gf);
         const pf = el.getElementsByTagNameNS(NS_MAIN$1, 'patternFill').item(0);
         if (!pf)
-            return { fgColor: null };
-        const patternType = pf.getAttribute('patternType');
-        const strictSolid = patternType === 'solid';
-        if (!strictSolid && !opts?.allowBgFallback)
-            return { fgColor: null };
-        const fg = pf.getElementsByTagNameNS(NS_MAIN$1, 'fgColor').item(0);
-        const fgRef = parseColorElement(fg);
-        if (fgRef)
-            return { fgColor: fgRef };
-        if (opts?.allowBgFallback) {
-            const bg = pf.getElementsByTagNameNS(NS_MAIN$1, 'bgColor').item(0);
-            return { fgColor: parseColorElement(bg) };
+            return { kind: 'none' };
+        const rawType = pf.getAttribute('patternType');
+        let patternType = rawType && PATTERN_TYPES.has(rawType)
+            ? rawType
+            : 'none';
+        const fgEl = pf.getElementsByTagNameNS(NS_MAIN$1, 'fgColor').item(0);
+        const bgEl = pf.getElementsByTagNameNS(NS_MAIN$1, 'bgColor').item(0);
+        let fgColor = parseColorElement(fgEl);
+        const bgColor = parseColorElement(bgEl);
+        if (!fgColor && opts?.allowBgFallback && bgColor) {
+            fgColor = bgColor;
+            if (patternType === 'none')
+                patternType = 'solid';
         }
-        return { fgColor: null };
+        return { kind: 'pattern', patternType, fgColor, bgColor };
+    }
+    function parseGradientFill(el) {
+        const typeAttr = el.getAttribute('type');
+        const type = typeAttr === 'path' ? 'path' : 'linear';
+        const degAttr = el.getAttribute('degree');
+        const degN = degAttr != null ? Number(degAttr) : 0;
+        const degree = Number.isFinite(degN) ? ((degN % 360) + 360) % 360 : 0;
+        const stops = [];
+        const stopEls = el.getElementsByTagNameNS(NS_MAIN$1, 'stop');
+        for (let i = 0; i < stopEls.length; i++) {
+            const s = stopEls[i];
+            const posAttr = s.getAttribute('position');
+            const posN = posAttr != null ? Number(posAttr) : NaN;
+            if (!Number.isFinite(posN))
+                continue;
+            const colorEl = s.getElementsByTagNameNS(NS_MAIN$1, 'color').item(0);
+            const color = parseColorElement(colorEl);
+            stops.push({ position: Math.max(0, Math.min(1, posN)), color });
+        }
+        return { kind: 'gradient', type, degree, stops };
     }
     function parseBorders(doc) {
         const bordersRoot = doc.getElementsByTagNameNS(NS_MAIN$1, 'borders').item(0);
@@ -446,7 +478,15 @@
             const color = node.getElementsByTagNameNS(NS_MAIN$1, 'color').item(0);
             return { style, color: parseColorElement(color) };
         };
-        return { left: side('left'), right: side('right'), top: side('top'), bottom: side('bottom') };
+        return {
+            left: side('left'),
+            right: side('right'),
+            top: side('top'),
+            bottom: side('bottom'),
+            diagonal: side('diagonal'),
+            diagonalUp: el.getAttribute('diagonalUp') === '1',
+            diagonalDown: el.getAttribute('diagonalDown') === '1',
+        };
     }
     function parseCellXfs(doc, tag) {
         const root = doc.getElementsByTagNameNS(NS_MAIN$1, tag).item(0);
@@ -4415,10 +4455,75 @@
         return sanitizeFontFamily(name);
     }
     function applyFill(td, fill, theme) {
-        const color = resolveColor(fill?.fgColor ?? null, theme);
-        if (!color)
+        if (!fill)
             return;
-        td.style.backgroundColor = color;
+        if (fill.kind === 'none')
+            return;
+        if (fill.kind === 'gradient') {
+            const gradCss = gradientFillToCss(fill, theme);
+            if (gradCss)
+                td.style.backgroundImage = gradCss;
+            return;
+        }
+        if (fill.patternType === 'none' || fill.patternType === 'gray125')
+            return;
+        const fg = resolveColor(fill.fgColor, theme);
+        if (fill.patternType === 'solid') {
+            if (fg)
+                td.style.backgroundColor = fg;
+            return;
+        }
+        if (!fg)
+            return;
+        const bg = resolveColor(fill.bgColor, theme) ?? '#ffffff';
+        td.style.backgroundColor = bg;
+        const pattern = patternFillToCss(fill.patternType, fg);
+        if (pattern)
+            td.style.backgroundImage = pattern;
+    }
+    function gradientFillToCss(fill, theme) {
+        const resolved = [];
+        for (const stop of fill.stops) {
+            const hex = resolveColor(stop.color, theme);
+            if (!hex)
+                continue;
+            resolved.push({ position: stop.position, hex });
+        }
+        if (resolved.length === 0)
+            return null;
+        if (fill.type === 'path' || resolved.length === 1) {
+            return `linear-gradient(${resolved[0].hex}, ${resolved[0].hex})`;
+        }
+        const stops = resolved
+            .map((s) => `${s.hex} ${(s.position * 100).toFixed(2)}%`)
+            .join(', ');
+        return `linear-gradient(${fill.degree}deg, ${stops})`;
+    }
+    function patternFillToCss(patternType, fg) {
+        const stripe = (angle, onPx, offPx) => `repeating-linear-gradient(${angle}, ${fg} 0 ${onPx}px, transparent ${onPx}px ${onPx + offPx}px)`;
+        switch (patternType) {
+            case 'darkGray': return stripe('45deg', 2, 2);
+            case 'mediumGray': return stripe('45deg', 1, 2);
+            case 'lightGray': return stripe('45deg', 1, 4);
+            case 'darkHorizontal': return stripe('0deg', 2, 2);
+            case 'lightHorizontal': return stripe('0deg', 1, 4);
+            case 'darkVertical': return stripe('90deg', 2, 2);
+            case 'lightVertical': return stripe('90deg', 1, 4);
+            case 'darkDown': return stripe('135deg', 2, 2);
+            case 'lightDown': return stripe('135deg', 1, 4);
+            case 'darkUp': return stripe('45deg', 2, 2);
+            case 'lightUp': return stripe('45deg', 1, 4);
+            case 'darkGrid':
+                return `${stripe('0deg', 2, 2)}, ${stripe('90deg', 2, 2)}`;
+            case 'lightGrid':
+                return `${stripe('0deg', 1, 4)}, ${stripe('90deg', 1, 4)}`;
+            case 'darkTrellis':
+                return `${stripe('45deg', 2, 2)}, ${stripe('135deg', 2, 2)}`;
+            case 'lightTrellis':
+                return `${stripe('45deg', 1, 4)}, ${stripe('135deg', 1, 4)}`;
+            default:
+                return null;
+        }
     }
     function applyBorder(td, border, theme) {
         if (!border)
@@ -4438,6 +4543,45 @@
             const color = resolveColor(s.color, theme) ?? '#000';
             td.style[cssSide] = `${width} ${style} ${color}`;
         }
+        if (border.diagonalUp || border.diagonalDown) {
+            const diagCss = diagonalBorderToCss(border, theme);
+            if (diagCss)
+                appendBackgroundImage(td, diagCss);
+        }
+    }
+    function appendBackgroundImage(td, value) {
+        const existingStyle = td.getAttribute('style') ?? '';
+        const match = /(?:^|;)\s*background-image\s*:\s*([^;]+?)\s*(?=;|$)/i.exec(existingStyle);
+        if (match) {
+            const merged = `${match[1]}, ${value}`;
+            const replaced = existingStyle.slice(0, match.index) +
+                (match.index === 0 ? '' : ';') +
+                `background-image: ${merged}` +
+                existingStyle.slice(match.index + match[0].length);
+            td.setAttribute('style', replaced);
+            return;
+        }
+        const separator = existingStyle && !existingStyle.trim().endsWith(';') ? '; ' : '';
+        td.setAttribute('style', `${existingStyle}${separator}background-image: ${value};`);
+    }
+    function diagonalBorderToCss(border, theme) {
+        const styleName = border.diagonal.style ?? 'thin';
+        const widthPx = Math.max(1, parseInt(borderWidth(styleName), 10) || 1);
+        const half = widthPx / 2;
+        const color = resolveColor(border.diagonal.color, theme) ?? '#000';
+        const gradients = [];
+        const band = (direction) => `linear-gradient(${direction}, ` +
+            `transparent calc(50% - ${half}px), ` +
+            `${color} calc(50% - ${half}px), ` +
+            `${color} calc(50% + ${half}px), ` +
+            `transparent calc(50% + ${half}px))`;
+        if (border.diagonalDown)
+            gradients.push(band('to bottom right'));
+        if (border.diagonalUp)
+            gradients.push(band('to top right'));
+        if (gradients.length === 0)
+            return null;
+        return gradients.join(', ');
     }
     function borderWidth(style) {
         switch (style) {

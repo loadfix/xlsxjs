@@ -12,7 +12,8 @@ containing column-letter headers, row-number gutter, cell values, merged
 cells (horizontal + vertical), column widths + hidden columns from
 `<cols>`, row heights + hidden rows from `<row ht>/<row hidden>`, and cell
 formatting from `xl/styles.xml` — fonts (bold/italic/underline/size/color),
-solid pattern fills, borders (per side), alignment, and number formats
+pattern fills (solid + stripe/grid approximations), gradient fills,
+diagonal + orthogonal borders, alignment, and number formats
 (currency, percent, dates via `yyyy-mm-dd`/`d-mmm-yy`/etc). Named-style
 inheritance is honoured: a `cellXfs` entry with `xfId` picks up its base
 formatting from `cellStyleXfs` whenever its own `applyX` flags are off.
@@ -88,10 +89,20 @@ does not evaluate formulas — a cell with no cached value renders blank.
 
 Deliberately deferred: chart rendering, SmartArt, shape-geometry
 rendering (preset anchors + text surface but no stroke/fill glyphs),
-form-control VML fallback decoding, diagonal / double borders,
-in-flow image positioning (images render after the table, not
-overlaid on the cell grid), full expression-rule interpretation
-beyond the narrow form.
+form-control VML fallback decoding, double borders, in-flow image
+positioning (images render after the table, not overlaid on the cell
+grid), full expression-rule interpretation beyond the narrow form.
+
+**Fills + borders**: `FillStyle` is a discriminated union covering
+`{ kind: 'pattern', patternType, fgColor, bgColor }` (solid + the
+`darkHorizontal` / `darkGrid` / `lightTrellis` family, approximated
+with `repeating-linear-gradient`), `{ kind: 'gradient', type, degree,
+stops[] }` (linear renders as CSS `linear-gradient`; path gradients
+fall back to the first stop's colour), and `{ kind: 'none' }`.
+`BorderStyle` carries `left`/`right`/`top`/`bottom`/`diagonal` sides
+plus `diagonalUp` / `diagonalDown` flags; the renderer paints diagonals
+as stacked `linear-gradient(to bottom|top right, …)` overlays on the
+td's `background-image`, preserving any existing gradient fill.
 
 ### Excel width → pixel conversion
 
@@ -162,7 +173,8 @@ the feature's XML looks like.
 - SmartArt (`xl/diagrams/*.xml`) — outer shape surfaces via `Sheet.shapes`, but the data/layout XML is not parsed.
 - Shape glyph rendering — presets land on `Sheet.shapes` as of `feat/shapes-textboxes`, but the `<aside>` placeholder doesn't paint the actual preset geometry (rect / line / callout tail).
 - In-flow image positioning (currently images render after the table).
-- Gradient fills and diagonal / double borders.
+- Double borders (diagonal + gradient fills + non-solid pattern fills
+  are now handled; see the Fills + borders block above).
 - Full expression-rule interpretation (currently only `=<cellRef> <op> <literal>`).
 
 ## Fixture generation
@@ -187,6 +199,10 @@ the feature's XML looks like.
 - `tests/render-test/image/` — one embedded PNG anchored at B3.
   `~/code/python-xlsx/.venv/bin/python scripts/make-image-fixture.py`
   (PIL required).
+- `tests/render-test/fills-and-borders/` — hand-written XLSX covering
+  diagonal borders, a linear gradient fill, and a non-solid pattern
+  fill (`darkHorizontal`). Regenerate with
+  `node scripts/make-fills-and-borders-fixture.mjs`.
 
 ## Security constraints (inherited pattern)
 
