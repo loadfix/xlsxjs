@@ -2,7 +2,7 @@
 // sheet, each containing an <h2> sheet name and a <table> of the cells.
 // Numeric cells get a numeric-aligned class; other kinds render as text.
 
-import type { Workbook, Sheet, Cell, MergedRange, RichTextRun, FrozenPanes } from './workbook-parser';
+import type { Workbook, Sheet, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment } from './workbook-parser';
 import { indexToColumnLetters } from './utils';
 import { h } from './html';
 import type { Options } from './xlsx-preview';
@@ -53,6 +53,7 @@ function renderStyle(className: string): HTMLStyleElement {
 .${className} .xlsx-frozen-both { position: sticky; left: 0; top: 0; z-index: 3; background: inherit; }
 .${className} .xlsx-autofilter::after { content: " ▾"; color: #888; font-size: 0.85em; }
 .${className} .xlsx-table-caption { font-size: 0.85em; color: #666; margin: 0.25rem 0 0; }
+.${className} .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
     `.trim();
     return style;
 }
@@ -341,6 +342,11 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, o
     const dxfByCell = resolveConditionalFormats(sheet, styles);
     const graphicalByCell = resolveGraphicalConditionalFormats(sheet, theme);
 
+    // Comment markers indexed by "row,col" — one marker per anchored
+    // comment is appended to its cell's <td> content after styling runs.
+    const commentByCell = new Map<string, typeof sheet.comments[0]>();
+    for (const cmt of sheet.comments) commentByCell.set(`${cmt.row},${cmt.col}`, cmt);
+
     // Row dimensions by row index — applied to <tr>. Per-row height is set
     // on the <tr> (browsers honour this); hidden rows get display:none.
     const rowDim = new Map<number, typeof sheet.rowDimensions[0]>();
@@ -367,6 +373,8 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, o
             if (dxf) applyDxf(td, dxf, theme);
             const gfx = graphicalByCell.get(`${r},${c}`);
             if (gfx) applyGraphicalCf(td, gfx);
+            const cmt = commentByCell.get(`${r},${c}`);
+            if (cmt) appendCommentMarker(td, cmt);
             if (hiddenCols.has(c)) td.style.display = 'none';
             if (frozen) tagFrozen(td, r, c, frozen);
             if (autoFilter && r === autoFilter.row && c >= autoFilter.col && c <= autoFilter.endCol) {
@@ -422,6 +430,22 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, o
         section.appendChild(fig);
     }
     return section;
+}
+
+// Append a small "●" marker to a cell that has a classic comment. Author
+// and body text are attacker-controlled — we route them through
+// setAttribute (HTML-encoded) for the title, never through innerHTML.
+function appendCommentMarker(td: HTMLTableCellElement, comment: SheetComment): void {
+    const marker = document.createElement('span');
+    marker.className = 'xlsx-comment-marker';
+    marker.setAttribute('role', 'note');
+    const author = comment.author && comment.author.length > 0 ? comment.author : null;
+    const title = author ? `${author}: ${comment.text}` : comment.text;
+    marker.setAttribute('title', title);
+    // Unicode bullet as the visible marker; textContent ensures the glyph
+    // is literal rather than interpreted.
+    marker.textContent = '●';
+    td.appendChild(marker);
 }
 
 function tagFrozen(td: HTMLTableCellElement, row: number, col: number, panes: FrozenPanes): void {

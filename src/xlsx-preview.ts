@@ -4,7 +4,7 @@ import { WorkbookParser } from './workbook-parser';
 import { HtmlRenderer } from './html-renderer';
 import { h } from './html';
 
-export type { Workbook as ParsedWorkbook, Sheet, Cell, RichTextRun, SharedString, FrozenPanes, AutoFilter, TableDef } from './workbook-parser';
+export type { Workbook as ParsedWorkbook, Sheet, Cell, RichTextRun, SharedString, FrozenPanes, AutoFilter, TableDef, SheetComment } from './workbook-parser';
 export type { Styles, CellXf, FontStyle, FillStyle, BorderStyle, Dxf } from './styles';
 export type { Theme, ColorRef } from './theme';
 export type { ConditionalFormatting, CfRule, CfRuleType, CfOperator, CellRange, Cfvo, ColorScale, DataBar, IconSet } from './conditional-format';
