@@ -34,7 +34,8 @@ The public surface is:
   path: parse + render in one call.
 - `defaultOptions` — the options object used when none is passed.
 - Test-visible helpers: `formatNumber`, `parseStyles`, `resolveEffectiveXf`,
-  `sanitizeHexColor`, `a1ToR1c1`, `r1c1ToA1`, `emuToPx`.
+  `sanitizeHexColor`, `sanitizeFontFamily`, `isSafeHyperlinkHref`, `a1ToR1c1`,
+  `r1c1ToA1`, `emuToPx`, `evaluateRule`.
 
 Options of note:
 
@@ -53,17 +54,28 @@ specific version if you rely on the shape of the workbook model.
 Drawings beyond raster images (`xdr:sp` text boxes / WordArt and
 `xdr:cxnSp` connectors) surface on `Sheet.shapes` with their preset
 geometry, text body, and anchor coordinates; the renderer emits an
-`<aside class="xlsx-shape">` per shape after the table.
+`<aside class="xlsx-shape">` per shape with an inline SVG for recognised
+presets (rect, ellipse, line, triangle, arrows, callouts, flowchart shapes).
+
+Images render as absolutely-positioned `<figure>`s inside a zero-height
+`.xlsx-image-layer` above the `<table>`, so anchor coordinates place the
+figure over the correct cell range.
+
+Expression-rule conditional formatting supports `AND` / `OR` / `NOT`,
+`ISNUMBER` / `ISBLANK` / `ISERROR`, `SEARCH`, `MOD(ROW()/COLUMN(), n)`,
+`ISEVEN` / `ISODD`, and `LEFT` / `RIGHT` equality alongside the narrow
+`=<cellRef> <op> <literal>` form.
 
 Deliberately deferred: chart rendering, SmartArt, form-control VML
-fallbacks, double borders, and full expression-rule interpretation.
+fallbacks, and double borders.
 
 ## Contributing
 
 ```bash
 npm install
 npm run build
-npm run test:render   # jsdom depth harness (78 scenarios)
+npm run test:render   # jsdom depth harness (85 scenarios)
+npm run test:golden   # golden HTML diff against result.html snapshots
 npm test              # Playwright browser smoke (real Chrome, port :3002)
 npm run dev           # static demo server at :8767
 ```

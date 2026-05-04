@@ -2,30 +2,12 @@
 
 What's still open. The "Resolved in fork" block at the bottom tracks
 features that have shipped on `master` and live in the harness / fixtures.
-Last reconciled 2026-05-04 after Wave 6 (fills+borders, sheet metadata,
-cell metadata, cellStyle chain + custom icons).
+Last reconciled 2026-05-04 after Wave 7 (golden diff, in-flow images,
+shape SVGs, expression rules, security review).
 
 ## Open — medium items (one slice each)
 
-- [ ] **Golden HTML diff mode for the smoke tool** — docxjs-style. First run
-  against a fixture captures a `result.html` snapshot; subsequent runs diff
-  the rendered container against it and flag drift. Catches regressions that
-  the current "does it crash?" smoke can't see. Touches `scripts/smoke-test.mjs`.
-- [ ] **Shape preset geometry rendering** — `Sheet.shapes` models the
-  preset name (`rect` / `line` / `flowChartProcess` / …) but the renderer
-  emits a plain `<aside>`. Emit an SVG per preset so a text box actually
-  looks like a text box instead of a generic bordered card.
-- [ ] **Full expression-rule interpretation** — today's narrow form is
-  `=<cellRef> <op> <literal>`. Common Excel expression rules also use
-  `AND(…)`, `OR(…)`, `SEARCH("…")`, `ISNUMBER(…)`, `MOD(ROW(), 2)=0`
-  (banding). A tiny formula interpreter covering those five would unlock
-  most real expression-cf cases.
-- [ ] **Security review** — write `SECURITY_REVIEW.md` in the docxjs style.
-  Audit: XML billion-laughs guard on the parse path, URL-scheme allowlist
-  on hyperlinks (we have it, but review), `<img src>` MIME allowlist on
-  inlined media (we embed raw media — verify), CSS identifier validation
-  on any class interpolated from XLSX-derived strings, `textContent` vs
-  `innerHTML` sinks.
+_Empty — all medium slices shipped in Wave 7._
 
 ## Open — big projects (library-scale)
 
@@ -52,16 +34,38 @@ cell metadata, cellStyle chain + custom icons).
 
 ## Resolved in fork
 
-Most recent first (Wave 6 landed 2026-05-04). Earlier groupings blurred
-together in the interest of a readable tail. Last updated 2026-05-02.
+Most recent first (Wave 7 landed 2026-05-04). Earlier groupings blurred
+together in the interest of a readable tail.
 
-### Post-wave 6 (2026-05-02)
+### Wave 7 (medium items, 2026-05-04)
+- ✅ **Golden HTML diff mode** — `scripts/golden-diff.mjs` captures each
+  fixture's rendered `<section class="xlsx">` as `tests/render-test/*/result.html`;
+  `npm run test:golden` diffs against it, `npm run test:golden:capture` rewrites.
+  37 snapshots in the harness; normalised for date stamps in headers/footers.
 - ✅ **In-flow image positioning** — images now render as `position: absolute`
   `<figure>`s inside a zero-height `.xlsx-image-layer` that sits directly
   above the `<table>`. twoCell / oneCell anchors compute CSS `left` / `top`
   by summing declared column widths + row heights (with Excel's 8.43-char /
   15-pt defaults for undeclared dimensions + a ~30px gutter estimate for
   the row-number column); absolute anchors keep their EMU pixel offsets.
+- ✅ **Shape preset geometry rendering** — `src/shape-presets.ts` maps
+  26 prstGeom presets (rect, roundRect, ellipse, line, triangle, rtTriangle,
+  diamond, parallelogram, trapezoid, pentagon, hexagon, octagon, star5,
+  rightArrow / leftArrow / upArrow / downArrow / leftRightArrow,
+  flowChartProcess / Decision / Terminator / Connector, callout1,
+  wedgeRectCallout, wedgeEllipseCallout, cloudCallout) to inline SVG.
+  Unknown presets fall through to the plain bordered `<aside>`.
+- ✅ **Full expression-rule interpretation** — `conditional-format.ts`
+  `evalExpression` now handles AND / OR / NOT combinators, ISNUMBER /
+  ISBLANK / ISERROR predicates, SEARCH (case-insensitive), MOD(ROW()) /
+  MOD(COLUMN()) banding, ISEVEN / ISODD, LEFT / RIGHT equality, plus
+  the pre-existing narrow cellRef-op-literal form. Unknown formulas
+  silently return false.
+- ✅ **Security review** — `SECURITY_REVIEW.md` covers 12 attack surfaces;
+  4 findings fixed in the same pass: control-char bypass in
+  `isSafeHyperlinkHref`, unbounded range expansion in hyperlinks +
+  data-validations (capped at 1,048,576 cells), unbounded media inlining
+  (32 MiB cap + MIME allowlist in `sanitizeMediaMime`).
 
 ### Wave 6 (small items, 2026-05-04)
 - ✅ **Diagonal borders** — `BorderStyle.diagonal` + `diagonalUp` /
