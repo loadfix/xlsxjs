@@ -803,7 +803,18 @@
         const percent = el.getAttribute('percent') === '1';
         const bottom = el.getAttribute('bottom') === '1';
         const stopIfTrue = el.getAttribute('stopIfTrue') === '1';
-        const rule = { type, priority, dxfId, operator, formulas, text, rank, percent, bottom, stopIfTrue };
+        const aboveAverageAttr = el.getAttribute('aboveAverage');
+        const aboveAverage = aboveAverageAttr !== '0';
+        const equalAverage = el.getAttribute('equalAverage') === '1';
+        const stdDevAttr = el.getAttribute('stdDev');
+        const stdDevN = stdDevAttr != null ? Number(stdDevAttr) : NaN;
+        const stdDev = Number.isFinite(stdDevN) ? stdDevN : null;
+        const timePeriod = el.getAttribute('timePeriod');
+        const rule = {
+            type, priority, dxfId, operator, formulas, text, rank, percent, bottom, stopIfTrue,
+            aboveAverage, equalAverage, stdDev,
+            timePeriod: timePeriod ?? null,
+        };
         if (type === 'colorScale')
             rule.colorScale = parseColorScale(el);
         else if (type === 'dataBar')
@@ -896,6 +907,12 @@
             case 'uniqueValues':
             case 'top10':
             case 'expression':
+            case 'containsBlanks':
+            case 'notContainsBlanks':
+            case 'containsErrors':
+            case 'notContainsErrors':
+            case 'aboveAverage':
+            case 'timePeriod':
             case 'colorScale':
             case 'dataBar':
             case 'iconSet':
@@ -922,6 +939,14 @@
         }
     }
     function evaluateRule(rule, cell, range, ctx) {
+        if (rule.type === 'containsBlanks')
+            return evalContainsBlanks(cell);
+        if (rule.type === 'notContainsBlanks')
+            return !evalContainsBlanks(cell);
+        if (rule.type === 'containsErrors')
+            return evalContainsErrors(cell);
+        if (rule.type === 'notContainsErrors')
+            return !evalContainsErrors(cell);
         if (!cell)
             return false;
         switch (rule.type) {
@@ -934,8 +959,25 @@
             case 'uniqueValues': return evalDuplicate(cell, range, ctx, false);
             case 'top10': return evalTop10(rule, cell, range, ctx);
             case 'expression': return evalExpression(rule, cell);
+            case 'aboveAverage': return evalAboveAverage(rule, cell, range, ctx);
+            case 'timePeriod': return evalTimePeriod(rule, cell, ctx);
             case 'unsupported': return false;
         }
+        return false;
+    }
+    function evalContainsBlanks(cell) {
+        if (!cell)
+            return true;
+        if (cell.kind === 'empty')
+            return true;
+        if (cell.value === '' || cell.value == null)
+            return true;
+        return false;
+    }
+    function evalContainsErrors(cell) {
+        if (!cell)
+            return false;
+        return cell.kind === 'error';
     }
     function numericValue(cell) {
         if (cell.kind !== 'number' && cell.kind !== 'boolean') {
@@ -1036,6 +1078,93 @@
         if (v === null)
             return false;
         return rule.bottom ? v <= threshold : v >= threshold;
+    }
+    function evalAboveAverage(rule, cell, range, ctx) {
+        const cells = ctx.cellsInRange(range);
+        const values = [];
+        for (const entry of cells) {
+            if (!entry.cell)
+                continue;
+            const n = numericValue(entry.cell);
+            if (n === null)
+                continue;
+            values.push(n);
+        }
+        if (values.length === 0)
+            return false;
+        const mean = values.reduce((a, b) => a + b, 0) / values.length;
+        let threshold = mean;
+        if (rule.stdDev !== null && rule.stdDev !== undefined) {
+            let variance = 0;
+            for (const v of values) {
+                const d = v - mean;
+                variance += d * d;
+            }
+            variance /= values.length;
+            const stddev = Math.sqrt(variance);
+            threshold = mean + rule.stdDev * stddev;
+        }
+        const v = numericValue(cell);
+        if (v === null)
+            return false;
+        const above = rule.aboveAverage;
+        const incl = rule.equalAverage;
+        if (above)
+            return incl ? v >= threshold : v > threshold;
+        return incl ? v <= threshold : v < threshold;
+    }
+    const MS_PER_DAY$1 = 86400000;
+    const EPOCH_MS_1900$1 = Date.UTC(1899, 11, 30);
+    const EPOCH_MS_1904$1 = Date.UTC(1904, 0, 1);
+    function serialToDate$1(serial, date1904) {
+        let days = Math.floor(serial);
+        if (!date1904 && days >= 60)
+            days -= 1;
+        const epoch = date1904 ? EPOCH_MS_1904$1 : EPOCH_MS_1900$1;
+        return new Date(epoch + days * MS_PER_DAY$1);
+    }
+    function startOfDayUtc(d) {
+        return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    }
+    function startOfWeekUtc(d) {
+        const dow = d.getUTCDay();
+        return startOfDayUtc(d) - dow * MS_PER_DAY$1;
+    }
+    function evalTimePeriod(rule, cell, ctx) {
+        if (!rule.timePeriod)
+            return false;
+        const n = numericValue(cell);
+        if (n === null)
+            return false;
+        const date1904 = ctx.date1904 === true;
+        const cellDate = serialToDate$1(n, date1904);
+        const cellDay = startOfDayUtc(cellDate);
+        const now = new Date();
+        const today = startOfDayUtc(now);
+        const yesterday = today - MS_PER_DAY$1;
+        const tomorrow = today + MS_PER_DAY$1;
+        const thisWeekStart = startOfWeekUtc(now);
+        const lastWeekStart = thisWeekStart - 7 * MS_PER_DAY$1;
+        const nextWeekStart = thisWeekStart + 7 * MS_PER_DAY$1;
+        const last7Start = today - 6 * MS_PER_DAY$1;
+        const thisMonthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+        const thisMonthEnd = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
+        const lastMonthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1);
+        const nextMonthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
+        const nextMonthEnd = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 2, 1);
+        switch (rule.timePeriod) {
+            case 'today': return cellDay === today;
+            case 'yesterday': return cellDay === yesterday;
+            case 'tomorrow': return cellDay === tomorrow;
+            case 'last7Days': return cellDay >= last7Start && cellDay <= today;
+            case 'thisWeek': return cellDay >= thisWeekStart && cellDay < nextWeekStart;
+            case 'lastWeek': return cellDay >= lastWeekStart && cellDay < thisWeekStart;
+            case 'nextWeek': return cellDay >= nextWeekStart && cellDay < nextWeekStart + 7 * MS_PER_DAY$1;
+            case 'thisMonth': return cellDay >= thisMonthStart && cellDay < thisMonthEnd;
+            case 'lastMonth': return cellDay >= lastMonthStart && cellDay < thisMonthStart;
+            case 'nextMonth': return cellDay >= nextMonthStart && cellDay < nextMonthEnd;
+            default: return false;
+        }
     }
     function resolveCfvo(cfvo, values) {
         if (values.length === 0)
@@ -2637,8 +2766,9 @@
     `.trim();
         return style;
     }
-    function makeCfContext(sheet) {
+    function makeCfContext(sheet, date1904) {
         return {
+            date1904,
             cellsInRange(range) {
                 const out = [];
                 for (let r = range.row; r <= range.endRow; r++) {
@@ -2655,9 +2785,9 @@
     function rangeContains(range, row, col) {
         return row >= range.row && row <= range.endRow && col >= range.col && col <= range.endCol;
     }
-    function resolveGraphicalConditionalFormats(sheet, theme) {
+    function resolveGraphicalConditionalFormats(sheet, theme, date1904) {
         const out = new Map();
-        const ctx = makeCfContext(sheet);
+        const ctx = makeCfContext(sheet, date1904);
         const pairs = [];
         for (const block of sheet.conditionalFormatting) {
             for (const range of block.ranges) {
@@ -2776,14 +2906,14 @@
             out.set(key, existing);
         }
     }
-    function resolveConditionalFormats(sheet, styles) {
+    function resolveConditionalFormats(sheet, styles, date1904) {
         const out = new Map();
         if (!styles?.dxfs.length)
             return out;
         const blocks = sheet.conditionalFormatting;
         if (!blocks.length)
             return out;
-        const ctx = makeCfContext(sheet);
+        const ctx = makeCfContext(sheet, date1904);
         const pairs = [];
         for (const block of blocks) {
             for (const range of block.ranges) {
@@ -2887,8 +3017,8 @@
                 }
             }
         }
-        const dxfByCell = resolveConditionalFormats(sheet, styles);
-        const graphicalByCell = resolveGraphicalConditionalFormats(sheet, theme);
+        const dxfByCell = resolveConditionalFormats(sheet, styles, date1904);
+        const graphicalByCell = resolveGraphicalConditionalFormats(sheet, theme, date1904);
         const commentByCell = new Map();
         for (const cmt of sheet.comments)
             commentByCell.set(`${cmt.row},${cmt.col}`, cmt);

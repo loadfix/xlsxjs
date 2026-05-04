@@ -771,3 +771,80 @@ await writeFixture('merged', {
     writeFileSync(out, buf);
     console.log(`wrote ${out} (${buf.length} bytes)`);
 }
+
+// ── cf-new-rules ──────────────────────────────────────────────────────────
+// Hand-built XLSX exercising the new cf rule types (containsBlanks,
+// notContainsErrors, aboveAverage). A1:A5 = [1, 2, 3, '', 5]. Three dxfs:
+//   0: red fill       → containsBlanks → only A4 matches
+//   1: green fill     → notContainsErrors → all cells match (no error cells)
+//   2: bold font      → aboveAverage → cells above mean of {1,2,3,5} (2.75)
+// Priorities are ordered so the test can disentangle which dxf landed where.
+{
+    const outDir = resolve(repo, 'tests/render-test/cf-new-rules');
+    mkdirSync(outDir, { recursive: true });
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>`);
+    zip.file('_rels/.rels', rootRels);
+    zip.file('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`);
+    zip.file('xl/workbook.xml', workbookXml('CfNewRules'));
+    // Three dxfs:
+    //   0: solid red fill         (FFFF9999)
+    //   1: solid green fill       (FF99FF99)
+    //   2: bold font
+    zip.file('xl/styles.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellXfs count="1">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+  </cellXfs>
+  <dxfs count="3">
+    <dxf><fill><patternFill><bgColor rgb="FFFF9999"/></patternFill></fill></dxf>
+    <dxf><fill><patternFill><bgColor rgb="FF99FF99"/></patternFill></fill></dxf>
+    <dxf><font><b/></font></dxf>
+  </dxfs>
+</styleSheet>`);
+    // Rules chosen so each cell gets a single unambiguous dxf match:
+    //   priority 1 (lowest = highest priority): aboveAverage → bold on A5.
+    //   priority 2:                             containsBlanks → red on A4.
+    //   priority 3:                             notContainsErrors → green
+    //     on everything else (A1, A2, A3). A4 and A5 are already claimed
+    //     by higher-priority rules so the green rule doesn't overwrite them.
+    //
+    // A1:A5 = 1, 2, 3, "", 5  — A4 is genuinely blank (no <c> cell at all).
+    zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="A1"><v>1</v></c></row>
+    <row r="2"><c r="A2"><v>2</v></c></row>
+    <row r="3"><c r="A3"><v>3</v></c></row>
+    <row r="4"/>
+    <row r="5"><c r="A5"><v>5</v></c></row>
+  </sheetData>
+  <conditionalFormatting sqref="A1:A5">
+    <cfRule type="aboveAverage" dxfId="2" priority="1"/>
+    <cfRule type="containsBlanks" dxfId="0" priority="2">
+      <formula>LEN(TRIM(A1))=0</formula>
+    </cfRule>
+    <cfRule type="notContainsErrors" dxfId="1" priority="3">
+      <formula>NOT(ISERROR(A1))</formula>
+    </cfRule>
+  </conditionalFormatting>
+</worksheet>`);
+    const buf = await zip.generateAsync({ type: 'nodebuffer' });
+    const out = resolve(outDir, 'workbook.xlsx');
+    writeFileSync(out, buf);
+    console.log(`wrote ${out} (${buf.length} bytes)`);
+}

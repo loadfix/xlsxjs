@@ -8,12 +8,15 @@
 //   - top10                  top/bottom N, optional percent
 //   - expression             only the narrow "=$C2>X" form is interpreted;
 //                            anything else falls back to "no match"
+//   - containsBlanks         / notContainsBlanks
+//   - containsErrors         / notContainsErrors
+//   - aboveAverage           / belowAverage (equalAverage + stdDev shift)
+//   - timePeriod             today / yesterday / tomorrow / last7Days /
+//                            thisWeek / lastWeek / nextWeek /
+//                            thisMonth / lastMonth / nextMonth
 //
 // Out of scope (rule types we ignore for now):
 //   - colorScale / dataBar / iconSet (gradient / graphical rules)
-//   - timePeriod variants
-//   - containsBlanks / notContainsBlanks / containsErrors / notContainsErrors
-//   - aboveAverage / belowAverage
 
 import { parseCellRef } from './utils';
 import { sanitizeHexColor } from './styles';
@@ -34,6 +37,10 @@ export type CfRuleType =
     | 'duplicateValues' | 'uniqueValues'
     | 'top10'
     | 'expression'
+    | 'containsBlanks' | 'notContainsBlanks'
+    | 'containsErrors' | 'notContainsErrors'
+    | 'aboveAverage'
+    | 'timePeriod'
     | 'colorScale' | 'dataBar' | 'iconSet'
     | 'unsupported';
 
@@ -78,6 +85,17 @@ export interface CfRule {
     percent?: boolean;        // top10 top/bottom by percent
     bottom?: boolean;         // top10 bottom instead of top
     stopIfTrue: boolean;
+    // aboveAverage rule attributes. `aboveAverage` defaults to true (matches
+    // above-mean); when false the rule matches below-mean. `equalAverage`
+    // flips the inequality to inclusive (>= / <=). `stdDev` shifts the
+    // threshold by N * population-stddev from the mean (may be negative).
+    aboveAverage: boolean;
+    equalAverage: boolean;
+    stdDev: number | null;
+    // timePeriod rule attribute — one of today / yesterday / tomorrow /
+    // last7Days / thisWeek / lastWeek / nextWeek / thisMonth / lastMonth
+    // / nextMonth. Null for rules that don't use it.
+    timePeriod: string | null;
     // Graphical payloads. Present on exactly one of these rule types.
     colorScale?: ColorScale;
     dataBar?: DataBar;
@@ -162,7 +180,20 @@ function parseCfRule(el: Element): CfRule | null {
     const bottom = el.getAttribute('bottom') === '1';
     const stopIfTrue = el.getAttribute('stopIfTrue') === '1';
 
-    const rule: CfRule = { type, priority, dxfId, operator, formulas, text, rank, percent, bottom, stopIfTrue };
+    // aboveAverage defaults to true per the schema. Only "0" flips it.
+    const aboveAverageAttr = el.getAttribute('aboveAverage');
+    const aboveAverage = aboveAverageAttr !== '0';
+    const equalAverage = el.getAttribute('equalAverage') === '1';
+    const stdDevAttr = el.getAttribute('stdDev');
+    const stdDevN = stdDevAttr != null ? Number(stdDevAttr) : NaN;
+    const stdDev = Number.isFinite(stdDevN) ? stdDevN : null;
+    const timePeriod = el.getAttribute('timePeriod');
+
+    const rule: CfRule = {
+        type, priority, dxfId, operator, formulas, text, rank, percent, bottom, stopIfTrue,
+        aboveAverage, equalAverage, stdDev,
+        timePeriod: timePeriod ?? null,
+    };
 
     if (type === 'colorScale') rule.colorScale = parseColorScale(el);
     else if (type === 'dataBar') rule.dataBar = parseDataBar(el);
@@ -256,6 +287,12 @@ function asRuleType(s: string): CfRuleType {
         case 'uniqueValues':
         case 'top10':
         case 'expression':
+        case 'containsBlanks':
+        case 'notContainsBlanks':
+        case 'containsErrors':
+        case 'notContainsErrors':
+        case 'aboveAverage':
+        case 'timePeriod':
         case 'colorScale':
         case 'dataBar':
         case 'iconSet':
@@ -290,9 +327,22 @@ export interface CfContext {
     // rangeKey → list of (col,row,Cell). Used by top10 / duplicateValues to
     // know which cells they're ranking against.
     cellsInRange(range: CellRange): { col: number; row: number; cell: Cell | null }[];
+    // Workbook-level date epoch. The timePeriod evaluator needs it to turn
+    // a cell's numeric serial into a calendar date using the same rules the
+    // number-format formatter uses elsewhere. Optional so the context can
+    // still be built from code that predates the timePeriod evaluator.
+    date1904?: boolean;
 }
 
 export function evaluateRule(rule: CfRule, cell: Cell | null, range: CellRange, ctx: CfContext): boolean {
+    // Blank / error rules have to fire even when the cell is empty or null,
+    // so branch before the early null return. Every other rule still needs
+    // a cell to compare against.
+    if (rule.type === 'containsBlanks')    return evalContainsBlanks(cell);
+    if (rule.type === 'notContainsBlanks') return !evalContainsBlanks(cell);
+    if (rule.type === 'containsErrors')    return evalContainsErrors(cell);
+    if (rule.type === 'notContainsErrors') return !evalContainsErrors(cell);
+
     if (!cell) return false;
     switch (rule.type) {
         case 'cellIs':         return evalCellIs(rule, cell);
@@ -304,8 +354,25 @@ export function evaluateRule(rule: CfRule, cell: Cell | null, range: CellRange, 
         case 'uniqueValues':   return evalDuplicate(cell, range, ctx, false);
         case 'top10':          return evalTop10(rule, cell, range, ctx);
         case 'expression':     return evalExpression(rule, cell, range, ctx);
+        case 'aboveAverage':   return evalAboveAverage(rule, cell, range, ctx);
+        case 'timePeriod':     return evalTimePeriod(rule, cell, ctx);
         case 'unsupported':    return false;
     }
+    return false;
+}
+
+// containsBlanks matches cells that are genuinely empty: no cell at all,
+// kind === 'empty', or a present cell whose value string is empty.
+function evalContainsBlanks(cell: Cell | null): boolean {
+    if (!cell) return true;
+    if (cell.kind === 'empty') return true;
+    if (cell.value === '' || cell.value == null) return true;
+    return false;
+}
+
+function evalContainsErrors(cell: Cell | null): boolean {
+    if (!cell) return false;
+    return cell.kind === 'error';
 }
 
 function numericValue(cell: Cell): number | null {
@@ -399,6 +466,115 @@ function evalTop10(rule: CfRule, cell: Cell, range: CellRange, ctx: CfContext): 
     const v = numericValue(cell);
     if (v === null) return false;
     return rule.bottom ? v <= threshold : v >= threshold;
+}
+
+// aboveAverage: compute the mean of every numeric value in the range, then
+// test the cell's numeric value against the mean (optionally shifted by
+// stdDev * population-stddev). `aboveAverage` flips the comparison to
+// below-mean; `equalAverage` flips the inequality to inclusive (>= / <=).
+function evalAboveAverage(rule: CfRule, cell: Cell, range: CellRange, ctx: CfContext): boolean {
+    const cells = ctx.cellsInRange(range);
+    const values: number[] = [];
+    for (const entry of cells) {
+        if (!entry.cell) continue;
+        const n = numericValue(entry.cell);
+        if (n === null) continue;
+        values.push(n);
+    }
+    if (values.length === 0) return false;
+
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    let threshold = mean;
+    if (rule.stdDev !== null && rule.stdDev !== undefined) {
+        // Population stddev: sqrt(sum((x-mean)^2) / n).
+        let variance = 0;
+        for (const v of values) {
+            const d = v - mean;
+            variance += d * d;
+        }
+        variance /= values.length;
+        const stddev = Math.sqrt(variance);
+        threshold = mean + rule.stdDev * stddev;
+    }
+
+    const v = numericValue(cell);
+    if (v === null) return false;
+    const above = rule.aboveAverage;
+    const incl = rule.equalAverage;
+    if (above) return incl ? v >= threshold : v > threshold;
+    return incl ? v <= threshold : v < threshold;
+}
+
+// Excel date epochs. 1900 system: serial 1 = 1900-01-01, but Excel also
+// treats the (non-existent) 1900-02-29 as serial 60 — hence the "fudge"
+// that the number-format formatter applies. 1904 system: serial 0 =
+// 1904-01-01, no fudge. We don't have access to the formatter's helpers
+// here (would be a circular import), so replicate the core conversion.
+const MS_PER_DAY = 86400000;
+const EPOCH_MS_1900 = Date.UTC(1899, 11, 30); // 1899-12-30 sentinel
+const EPOCH_MS_1904 = Date.UTC(1904, 0, 1);
+
+function serialToDate(serial: number, date1904: boolean): Date {
+    let days = Math.floor(serial);
+    // 1900 leap-year fudge: serials ≥ 60 are off by one day because Excel
+    // counts 1900-02-29 as a real date.
+    if (!date1904 && days >= 60) days -= 1;
+    const epoch = date1904 ? EPOCH_MS_1904 : EPOCH_MS_1900;
+    return new Date(epoch + days * MS_PER_DAY);
+}
+
+// Normalise a Date to midnight UTC so day-level comparisons don't wobble
+// over timezone boundaries. The cell's serial is already in UTC-space so
+// the comparison today value must live in the same space.
+function startOfDayUtc(d: Date): number {
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}
+
+// Start of the ISO-ish week containing `d`, anchored on Sunday (Excel's
+// default "first day of week"). Returns a UTC-midnight ms timestamp.
+function startOfWeekUtc(d: Date): number {
+    const dow = d.getUTCDay(); // 0 = Sun … 6 = Sat
+    return startOfDayUtc(d) - dow * MS_PER_DAY;
+}
+
+function evalTimePeriod(rule: CfRule, cell: Cell, ctx: CfContext): boolean {
+    if (!rule.timePeriod) return false;
+    const n = numericValue(cell);
+    if (n === null) return false;
+    // Note: we use the workbook-level 1900/1904 epoch from the context,
+    // falling back to 1900 when the ambient context didn't pass it. The
+    // docstring on makeCfContext in html-renderer threads this through.
+    const date1904 = ctx.date1904 === true;
+    const cellDate = serialToDate(n, date1904);
+    const cellDay = startOfDayUtc(cellDate);
+
+    const now = new Date();
+    const today = startOfDayUtc(now);
+    const yesterday = today - MS_PER_DAY;
+    const tomorrow = today + MS_PER_DAY;
+    const thisWeekStart = startOfWeekUtc(now);
+    const lastWeekStart = thisWeekStart - 7 * MS_PER_DAY;
+    const nextWeekStart = thisWeekStart + 7 * MS_PER_DAY;
+    const last7Start = today - 6 * MS_PER_DAY; // inclusive of today
+    const thisMonthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+    const thisMonthEnd = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
+    const lastMonthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1);
+    const nextMonthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
+    const nextMonthEnd = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 2, 1);
+
+    switch (rule.timePeriod) {
+        case 'today':     return cellDay === today;
+        case 'yesterday': return cellDay === yesterday;
+        case 'tomorrow':  return cellDay === tomorrow;
+        case 'last7Days': return cellDay >= last7Start && cellDay <= today;
+        case 'thisWeek':  return cellDay >= thisWeekStart && cellDay < nextWeekStart;
+        case 'lastWeek':  return cellDay >= lastWeekStart && cellDay < thisWeekStart;
+        case 'nextWeek':  return cellDay >= nextWeekStart && cellDay < nextWeekStart + 7 * MS_PER_DAY;
+        case 'thisMonth': return cellDay >= thisMonthStart && cellDay < thisMonthEnd;
+        case 'lastMonth': return cellDay >= lastMonthStart && cellDay < thisMonthStart;
+        case 'nextMonth': return cellDay >= nextMonthStart && cellDay < nextMonthEnd;
+        default: return false;
+    }
 }
 
 // Resolve a cfvo against the numeric values in a range. Returns the

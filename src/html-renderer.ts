@@ -86,9 +86,12 @@ function renderStyle(className: string): HTMLStyleElement {
 
 // Build a CfContext scoped to one sheet. `cellsInRange` walks the sparse
 // row array and returns every intersecting cell — enough for duplicateValues
-// and top10 to function correctly across a range.
-function makeCfContext(sheet: Sheet): CfContext {
+// and top10 to function correctly across a range. `date1904` is threaded
+// through so the timePeriod evaluator can pick the right epoch when it
+// turns a cell's serial value into a calendar date.
+function makeCfContext(sheet: Sheet, date1904: boolean): CfContext {
     return {
+        date1904,
         cellsInRange(range: CellRange) {
             const out: { col: number; row: number; cell: Cell | null }[] = [];
             for (let r = range.row; r <= range.endRow; r++) {
@@ -120,9 +123,10 @@ interface GraphicalCfState {
 function resolveGraphicalConditionalFormats(
     sheet: Sheet,
     theme: Theme | null,
+    date1904: boolean,
 ): Map<string, GraphicalCfState> {
     const out = new Map<string, GraphicalCfState>();
-    const ctx = makeCfContext(sheet);
+    const ctx = makeCfContext(sheet, date1904);
 
     const pairs: { range: CellRange; rule: CfRule }[] = [];
     for (const block of sheet.conditionalFormatting) {
@@ -255,13 +259,13 @@ function applyDataBar(
 // Excel's model) after walking the sheet's conditional-format blocks. If a
 // rule has stopIfTrue, no lower-priority rule can override. Keyed by
 // "row,col" for O(1) lookup from the main render loop.
-function resolveConditionalFormats(sheet: Sheet, styles: Styles | null): Map<string, Dxf> {
+function resolveConditionalFormats(sheet: Sheet, styles: Styles | null, date1904: boolean): Map<string, Dxf> {
     const out = new Map<string, Dxf>();
     if (!styles?.dxfs.length) return out;
     const blocks = sheet.conditionalFormatting;
     if (!blocks.length) return out;
 
-    const ctx = makeCfContext(sheet);
+    const ctx = makeCfContext(sheet, date1904);
 
     // Flatten to (range, rule) pairs, then sort by priority ascending — Excel
     // applies the lowest-priority matching rule (ascending = higher priority).
@@ -378,8 +382,8 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
         }
     }
 
-    const dxfByCell = resolveConditionalFormats(sheet, styles);
-    const graphicalByCell = resolveGraphicalConditionalFormats(sheet, theme);
+    const dxfByCell = resolveConditionalFormats(sheet, styles, date1904);
+    const graphicalByCell = resolveGraphicalConditionalFormats(sheet, theme, date1904);
 
     // Comment markers indexed by "row,col" — one marker per anchored
     // comment is appended to its cell's <td> content after styling runs.

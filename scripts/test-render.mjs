@@ -1314,6 +1314,144 @@ async function renderFixture(path, options) {
         `43f: A2 should NOT carry the validation class`);
 }
 
+// ── 47. cf-new-rules fixture: parse containsBlanks / notContainsErrors /
+//       aboveAverage rules off the sheet ─────────────────────────────────
+{
+    const { wb } = await renderFixture('cf-new-rules');
+    const sheet = wb.parsed.sheets[0];
+    assert(wb.parsed.styles.dxfs.length === 3, `47a: expected 3 dxfs (got ${wb.parsed.styles.dxfs.length})`);
+    const rules = sheet.conditionalFormatting.flatMap((b) => b.rules);
+    assert(rules.length === 3, `47b: expected 3 cfRules (got ${rules.length})`);
+    const byType = rules.reduce((acc, r) => { acc[r.type] = r; return acc; }, {});
+    assert(byType.aboveAverage, '47c: aboveAverage rule parsed');
+    assert(byType.containsBlanks, '47d: containsBlanks rule parsed');
+    assert(byType.notContainsErrors, '47e: notContainsErrors rule parsed');
+    // Default attribute values on the parsed rule.
+    assert(byType.aboveAverage.aboveAverage === true,
+        `47f: aboveAverage default true (got ${byType.aboveAverage.aboveAverage})`);
+    assert(byType.aboveAverage.equalAverage === false,
+        `47g: equalAverage default false (got ${byType.aboveAverage.equalAverage})`);
+    assert(byType.aboveAverage.stdDev === null,
+        `47h: stdDev default null (got ${byType.aboveAverage.stdDev})`);
+}
+
+// ── 48. cf-new-rules: DOM wiring for containsBlanks + aboveAverage ────────
+{
+    const { container } = await renderFixture('cf-new-rules');
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    const tdAt = (rIdx) => rows[rIdx].querySelectorAll('td')[0];
+
+    const a1 = tdAt(0); // val=1
+    const a2 = tdAt(1); // val=2
+    const a3 = tdAt(2); // val=3 (also above mean 2.75 — bold)
+    const a4 = tdAt(3); // blank
+    const a5 = tdAt(4); // val=5 (above mean — bold)
+
+    // A4 (blank) should carry the red fill from the containsBlanks dxf.
+    assert(a4.classList.contains('xlsx-cf'),
+        `48a: A4 should carry .xlsx-cf from containsBlanks (classes: "${a4.className}")`);
+    assert(/rgb\(255,\s*153,\s*153\)/.test(a4.style.backgroundColor),
+        `48b: A4 should have red fill rgb(255,153,153) (got "${a4.style.backgroundColor}")`);
+
+    // A5 matched aboveAverage → bold dxf.
+    assert(a5.style.fontWeight === 'bold', `48c: A5 should be bold (got "${a5.style.fontWeight}")`);
+    assert(a5.classList.contains('xlsx-cf'), `48d: A5 should carry .xlsx-cf`);
+    // A3 also matched aboveAverage (3 > 2.75) → bold.
+    assert(a3.style.fontWeight === 'bold', `48e: A3 should be bold (got "${a3.style.fontWeight}")`);
+
+    // Negative: A1 (value 1) is below mean → NOT bold, and gets the
+    // notContainsErrors green fill instead.
+    assert(a1.style.fontWeight !== 'bold',
+        `48f: A1 should NOT be bold (got "${a1.style.fontWeight}")`);
+    // A2 (value 2) also below mean, should not carry the above-average bold.
+    assert(a2.style.fontWeight !== 'bold',
+        `48g: A2 should NOT carry above-average bold (got "${a2.style.fontWeight}")`);
+    assert(/rgb\(153,\s*255,\s*153\)/.test(a1.style.backgroundColor),
+        `48h: A1 should have green notContainsErrors fill (got "${a1.style.backgroundColor}")`);
+    assert(/rgb\(153,\s*255,\s*153\)/.test(a2.style.backgroundColor),
+        `48i: A2 should have green notContainsErrors fill (got "${a2.style.backgroundColor}")`);
+}
+
+// ── 49. evaluateRule direct: hostile / edge-case inputs ────────────────────
+// These exercise the evaluator surface the harness can't hit naturally
+// through rendered DOM — null cells, error cells, stdDev shift on
+// aboveAverage, timePeriod against a known epoch.
+{
+    const { evaluateRule } = globalThis.xlsx;
+    assert(typeof evaluateRule === 'function', '49a: evaluateRule re-exported');
+
+    const mkCell = (over) => ({
+        col: 0, row: 0, value: '', kind: 'number', styleIndex: -1, formula: null, runs: null,
+        ...over,
+    });
+    const range = { col: 0, row: 0, endCol: 0, endRow: 0 };
+    const emptyCtx = { cellsInRange: () => [] };
+
+    // containsBlanks: null, empty-kind, and empty-string cells all match.
+    const blanksRule = { type: 'containsBlanks', priority: 1, dxfId: 0, formulas: [], stopIfTrue: false, aboveAverage: true, equalAverage: false, stdDev: null, timePeriod: null };
+    assert(evaluateRule(blanksRule, null, range, emptyCtx) === true,
+        '49b: containsBlanks should match a null cell');
+    assert(evaluateRule(blanksRule, mkCell({ kind: 'empty', value: '' }), range, emptyCtx) === true,
+        '49c: containsBlanks should match kind=empty');
+    assert(evaluateRule(blanksRule, mkCell({ kind: 'string', value: '' }), range, emptyCtx) === true,
+        '49d: containsBlanks should match empty-string string cell');
+    assert(evaluateRule(blanksRule, mkCell({ kind: 'string', value: 'x' }), range, emptyCtx) === false,
+        '49e: containsBlanks should NOT match a non-empty cell');
+
+    // notContainsBlanks inverts.
+    const notBlanksRule = { ...blanksRule, type: 'notContainsBlanks' };
+    assert(evaluateRule(notBlanksRule, mkCell({ kind: 'string', value: 'x' }), range, emptyCtx) === true,
+        '49f: notContainsBlanks matches non-empty');
+    assert(evaluateRule(notBlanksRule, null, range, emptyCtx) === false,
+        '49g: notContainsBlanks does NOT match null');
+
+    // containsErrors: only fires on error-kind cells. Null is not an error.
+    const errRule = { ...blanksRule, type: 'containsErrors' };
+    assert(evaluateRule(errRule, mkCell({ kind: 'error', value: '#DIV/0!' }), range, emptyCtx) === true,
+        '49h: containsErrors matches error cell');
+    assert(evaluateRule(errRule, mkCell({ kind: 'number', value: '1' }), range, emptyCtx) === false,
+        '49i: containsErrors does NOT match number cell');
+    assert(evaluateRule(errRule, null, range, emptyCtx) === false,
+        '49j: containsErrors does NOT match null cell');
+
+    // aboveAverage with stdDev shift: range values [1,2,3,5], mean=2.75,
+    // population stddev ≈ 1.479. threshold at stdDev=1 = 4.229. Value 5
+    // should match (> 4.229), value 4 should not.
+    const cells = [1, 2, 3, 5].map((v, i) => ({ col: 0, row: i, cell: mkCell({ kind: 'number', value: String(v), row: i }) }));
+    const ctx = { cellsInRange: () => cells };
+    const avgRule = { ...blanksRule, type: 'aboveAverage', aboveAverage: true, equalAverage: false, stdDev: 1 };
+    assert(evaluateRule(avgRule, mkCell({ kind: 'number', value: '5' }), range, ctx) === true,
+        '49k: aboveAverage with stdDev=1 matches value 5');
+    assert(evaluateRule(avgRule, mkCell({ kind: 'number', value: '4' }), range, ctx) === false,
+        '49l: aboveAverage with stdDev=1 does NOT match value 4');
+    // equalAverage flips to inclusive.
+    const avgIncl = { ...avgRule, stdDev: null, equalAverage: true };
+    assert(evaluateRule(avgIncl, mkCell({ kind: 'number', value: '2.75' }), range, ctx) === true,
+        '49m: aboveAverage equalAverage=true matches mean');
+    // belowAverage: aboveAverage=false.
+    const belowRule = { ...avgRule, stdDev: null, aboveAverage: false };
+    assert(evaluateRule(belowRule, mkCell({ kind: 'number', value: '1' }), range, ctx) === true,
+        '49n: belowAverage matches value below mean');
+    assert(evaluateRule(belowRule, mkCell({ kind: 'number', value: '5' }), range, ctx) === false,
+        '49o: belowAverage does NOT match value above mean');
+
+    // timePeriod=today: encode today's Excel serial from the 1900 epoch.
+    const today = new Date();
+    const todayUtc = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
+    const epoch1900 = Date.UTC(1899, 11, 30);
+    let serial = Math.floor((todayUtc - epoch1900) / 86400000);
+    // 1900 leap-year fudge: add 1 when serial ≥ 60.
+    if (serial >= 60) serial += 1;
+    const timeCtx = { cellsInRange: () => [], date1904: false };
+    const timeRule = { ...blanksRule, type: 'timePeriod', timePeriod: 'today' };
+    assert(evaluateRule(timeRule, mkCell({ kind: 'number', value: String(serial) }), range, timeCtx) === true,
+        `49p: timePeriod=today matches today's serial (${serial})`);
+    // Unknown timePeriod → false.
+    const badRule = { ...timeRule, timePeriod: 'nextMillennium' };
+    assert(evaluateRule(badRule, mkCell({ kind: 'number', value: String(serial) }), range, timeCtx) === false,
+        '49q: unknown timePeriod returns false');
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
