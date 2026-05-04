@@ -1784,6 +1784,81 @@ async function renderFixture(path, options) {
         `60b: frozen-state fixture should set kind='frozen' (got ${JSON.stringify(sheet.frozenPanes.kind)})`);
 }
 
+// ── 65. theme-fontscheme: parseTheme lifts majorFont / minorFont latin ────
+// The theme declares <a:majorFont><a:latin typeface="Cambria"/></a:majorFont>
+// and <a:minorFont><a:latin typeface="Calibri"/></a:minorFont>; the parser
+// surfaces both on Theme so the renderer can resolve <font scheme="major|minor"/>.
+{
+    const { wb } = await renderFixture('theme-fontscheme');
+    const theme = wb.parsed.theme;
+    assert(theme !== null, '65a: theme should be parsed on theme-fontscheme fixture');
+    assert(theme.majorFont === 'Cambria', `65b: theme.majorFont should be "Cambria" (got ${JSON.stringify(theme?.majorFont)})`);
+    assert(theme.minorFont === 'Calibri', `65c: theme.minorFont should be "Calibri" (got ${JSON.stringify(theme?.minorFont)})`);
+}
+
+// ── 66. theme-fontscheme: FontStyle.scheme parsed + renderer resolves via theme
+// fonts[1] has <scheme val="major"/>, fonts[2] has <scheme val="minor"/>.
+// A1 uses xf[1] → majorFont ("Cambria"), A2 uses xf[2] → minorFont ("Calibri").
+// sanitizeFontFamily wraps the typeface in double quotes before assigning to
+// td.style.fontFamily.
+{
+    const { wb, container } = await renderFixture('theme-fontscheme');
+    const fonts = wb.parsed.styles.fonts;
+    assert(fonts[1].scheme === 'major', `66a: fonts[1].scheme should be "major" (got ${fonts[1].scheme})`);
+    assert(fonts[2].scheme === 'minor', `66b: fonts[2].scheme should be "minor" (got ${fonts[2].scheme})`);
+    assert(fonts[0].scheme === null, `66c: fonts[0].scheme should be null (got ${fonts[0].scheme})`);
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    const a1 = rows[0].querySelectorAll('td')[0];
+    const a2 = rows[1].querySelectorAll('td')[0];
+    assert(a1.style.fontFamily === '"Cambria"', `66d: A1 fontFamily should be '"Cambria"' (got ${JSON.stringify(a1.style.fontFamily)})`);
+    assert(a2.style.fontFamily === '"Calibri"', `66e: A2 fontFamily should be '"Calibri"' (got ${JSON.stringify(a2.style.fontFamily)})`);
+}
+
+// ── 67. phonetics: parseSi lifts <rPh> + renderer emits HTML5 <ruby> markup ─
+// The shared string carries base "漢字" with phonetic "かんじ" over [0..2),
+// and an inline-str cell carries "東京" with "とうきょう" over [0..2). The
+// model exposes both phonetic annotations; the rendered td contains a <ruby>
+// with an <rt> holding the phonetic reading.
+{
+    const { wb, container } = await renderFixture('phonetics');
+    const si = wb.parsed; // just to anchor a name; the shared strings live on the sheet's cells
+    // Inspect the sheet's first cell for its PhoneticRun[] (mirrors the source si).
+    const sheet = wb.parsed.sheets[0];
+    const a1 = sheet.rows[0][0];
+    assert(a1.phonetics !== null, '67a: A1 should carry phonetics from the shared string');
+    assert(a1.phonetics.length === 1, `67b: A1 should have one phonetic entry (got ${a1.phonetics?.length})`);
+    assert(a1.phonetics[0].base === '漢字', `67c: phonetic base should be "漢字" (got ${JSON.stringify(a1.phonetics?.[0].base)})`);
+    assert(a1.phonetics[0].phonetic === 'かんじ', `67d: phonetic reading should be "かんじ" (got ${JSON.stringify(a1.phonetics?.[0].phonetic)})`);
+    assert(a1.phonetics[0].startIdx === 0 && a1.phonetics[0].endIdx === 2,
+        `67e: phonetic span should be [0..2) (got [${a1.phonetics?.[0].startIdx}..${a1.phonetics?.[0].endIdx}))`);
+
+    // A2 (inline-string) should have phonetics too.
+    const a2 = sheet.rows[1][0];
+    assert(a2.phonetics !== null && a2.phonetics.length === 1, '67f: A2 (inlineStr) should carry phonetics');
+    assert(a2.phonetics[0].phonetic === 'とうきょう',
+        `67g: A2 phonetic reading should be "とうきょう" (got ${JSON.stringify(a2.phonetics?.[0].phonetic)})`);
+
+    // Rendered DOM: first row's td should contain <ruby>漢字<rt>かんじ</rt></ruby>.
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    const td1 = rows[0].querySelectorAll('td')[0];
+    const ruby1 = td1.querySelector('ruby');
+    assert(!!ruby1, '67h: A1 td should contain a <ruby> element');
+    const rt1 = ruby1?.querySelector('rt');
+    assert(!!rt1, '67i: A1 <ruby> should contain an <rt> element');
+    assert(rt1?.textContent === 'かんじ', `67j: <rt> text should be "かんじ" (got ${JSON.stringify(rt1?.textContent)})`);
+    // The base kanji characters must also be inside the <ruby> (before the <rt>).
+    assert(ruby1?.textContent.startsWith('漢字'),
+        `67k: <ruby> should start with the base text "漢字" (got ${JSON.stringify(ruby1?.textContent)})`);
+
+    // Inline-str row: same structure.
+    const td2 = rows[1].querySelectorAll('td')[0];
+    const ruby2 = td2.querySelector('ruby');
+    assert(!!ruby2, '67l: A2 (inlineStr) td should contain a <ruby> element');
+    assert(ruby2?.querySelector('rt')?.textContent === 'とうきょう',
+        `67m: A2 <rt> text should be "とうきょう" (got ${JSON.stringify(ruby2?.querySelector('rt')?.textContent)})`);
+    void si;
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

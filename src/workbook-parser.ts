@@ -58,12 +58,34 @@ export interface RichTextRun {
     name: string | null;
 }
 
+// A phonetic-ruby annotation attached to a <si>. East-Asian text (most often
+// Japanese kanji) can carry one or more <rPh> children that map a phonetic
+// reading onto a substring of the main text via [startIdx..endIdx) offsets.
+// The renderer emits these as HTML5 <ruby>…<rt>…</rt></ruby> markup.
+export interface PhoneticRun {
+    // The kanji (or other base) substring spanning [startIdx..endIdx) of the
+    // shared-string / inline-string body. Precomputed for consumer
+    // convenience — equivalent to `text.slice(startIdx, endIdx)`.
+    base: string;
+    // The phonetic reading — hiragana / katakana / romaji — that Excel wants
+    // rendered above the base characters.
+    phonetic: string;
+    // 0-based inclusive start index of the base span in the main text.
+    startIdx: number;
+    // 0-based exclusive end index of the base span in the main text.
+    endIdx: number;
+}
+
 // A shared-string entry. Plain strings carry text only; rich entries also
 // carry the runs so the renderer can emit <span> per run with the correct
 // styling. `text` is always the concatenated plain-text projection.
 export interface SharedString {
     text: string;
     runs: RichTextRun[] | null;
+    // Phonetic-ruby annotations (<rPh>) attached to the string, or null when
+    // the <si> declared none. Each entry maps a phonetic reading onto a
+    // substring of `text`. The renderer wraps covered spans in HTML5 <ruby>.
+    phonetics: PhoneticRun[] | null;
 }
 
 export interface Cell {
@@ -81,6 +103,9 @@ export interface Cell {
     // runs are preserved here so the renderer can emit formatted spans.
     // Null on non-string cells or plain strings.
     runs: RichTextRun[] | null;
+    // Phonetic-ruby annotations inherited from the shared-string / inline-
+    // string source. Null when the source <si>/<is> declared no <rPh>.
+    phonetics: PhoneticRun[] | null;
 }
 
 export interface MergedRange {
@@ -812,7 +837,7 @@ function parseComments(xml: string): SheetComment[] {
         // The <text> child has the same shape as a shared-string <si>:
         // plain <t>, or <r>/<rPr>/<t> runs. parseSi handles both.
         const textEl = c.getElementsByTagNameNS(NS.main, 'text').item(0);
-        const body = textEl ? parseSi(textEl) : { text: '', runs: null };
+        const body = textEl ? parseSi(textEl) : { text: '', runs: null, phonetics: null };
         out.push({
             col: parsed.col,
             row: parsed.row,
@@ -1032,10 +1057,15 @@ function parseSharedStrings(xml: string): SharedString[] {
 //   - <t>plain text</t>
 //   - <r><rPr>…</rPr><t>run text</t></r>… (optionally many runs, with or
 //     without a terminating bare <t>)
-// We walk direct children in order so a mix produces the correct runs.
+//   - any combination of the above + <rPh sb="..." eb="..."><t>…</t></rPh>
+//     phonetic-ruby annotations
+// We walk direct children in order so a mix produces the correct runs; rPh
+// children are collected separately and resolved against the final text
+// after the main body is assembled.
 function parseSi(si: Element): SharedString {
     const runs: RichTextRun[] = [];
     let sawRun = false;
+    const phonetics: PhoneticRun[] = [];
     for (let i = 0; i < si.childNodes.length; i++) {
         const node = si.childNodes[i];
         if (node.nodeType !== 1) continue;
@@ -1048,10 +1078,47 @@ function parseSi(si: Element): SharedString {
         if (el.localName === 'r') {
             sawRun = true;
             runs.push(parseRun(el));
+            continue;
+        }
+        if (el.localName === 'rPh') {
+            const parsed = parseRPh(el);
+            if (parsed) phonetics.push(parsed);
         }
     }
     const text = runs.map((r) => r.text).join('');
-    return { text, runs: sawRun ? runs : null };
+    // Resolve each phonetic's `base` substring once the body is assembled,
+    // so consumers don't need to re-slice. Clamp indices defensively so a
+    // producer that emits out-of-range sb/eb can't crash the renderer.
+    for (const p of phonetics) {
+        const start = Math.max(0, Math.min(text.length, p.startIdx));
+        const end = Math.max(start, Math.min(text.length, p.endIdx));
+        p.startIdx = start;
+        p.endIdx = end;
+        p.base = text.slice(start, end);
+    }
+    return { text, runs: sawRun ? runs : null, phonetics: phonetics.length > 0 ? phonetics : null };
+}
+
+// Parse a <rPh sb="startIdx" eb="endIdx"><t>phonetic</t></rPh> into a
+// PhoneticRun. `sb` and `eb` are required per the schema; missing/invalid
+// numeric attributes drop the entry rather than produce a degenerate run.
+// The `base` field is resolved later by parseSi once the body text is known.
+function parseRPh(el: Element): PhoneticRun | null {
+    const sbAttr = el.getAttribute('sb');
+    const ebAttr = el.getAttribute('eb');
+    if (sbAttr === null || ebAttr === null) return null;
+    const sb = Number(sbAttr);
+    const eb = Number(ebAttr);
+    if (!Number.isFinite(sb) || !Number.isFinite(eb)) return null;
+    if (sb < 0 || eb < sb) return null;
+    const tEl = el.getElementsByTagNameNS(NS.main, 't').item(0);
+    const phonetic = tEl?.textContent ?? '';
+    return {
+        base: '', // filled in by parseSi once the body text is assembled
+        phonetic,
+        startIdx: Math.floor(sb),
+        endIdx: Math.floor(eb),
+    };
 }
 
 function emptyRun(text: string): RichTextRun {
@@ -1675,23 +1742,23 @@ function parseCell(c: Element, fallbackRow: number, sharedStrings: SharedString[
             const idx = Number(raw);
             const entry = Number.isFinite(idx) && idx >= 0 && idx < sharedStrings.length
                 ? sharedStrings[idx]
-                : { text: '', runs: null };
-            return { ...base, value: entry.text, runs: entry.runs, kind: 'string' };
+                : { text: '', runs: null, phonetics: null };
+            return { ...base, value: entry.text, runs: entry.runs, phonetics: entry.phonetics, kind: 'string' };
         }
         case 'inlineStr': {
             const is = c.getElementsByTagNameNS(NS.main, 'is').item(0);
-            const entry = is ? parseSi(is) : { text: '', runs: null };
-            return { ...base, value: entry.text, runs: entry.runs, kind: 'inlineStr' };
+            const entry = is ? parseSi(is) : { text: '', runs: null, phonetics: null };
+            return { ...base, value: entry.text, runs: entry.runs, phonetics: entry.phonetics, kind: 'inlineStr' };
         }
         case 'b':
-            return { ...base, value: raw === '1' ? 'TRUE' : 'FALSE', runs: null, kind: 'boolean' };
+            return { ...base, value: raw === '1' ? 'TRUE' : 'FALSE', runs: null, phonetics: null, kind: 'boolean' };
         case 'e':
-            return { ...base, value: raw, runs: null, kind: 'error' };
+            return { ...base, value: raw, runs: null, phonetics: null, kind: 'error' };
         case 'str':
-            return { ...base, value: raw, runs: null, kind: 'string' };
+            return { ...base, value: raw, runs: null, phonetics: null, kind: 'string' };
         case 'n':
         default:
-            if (raw === '') return { ...base, value: '', runs: null, kind: 'empty' };
-            return { ...base, value: raw, runs: null, kind: 'number' };
+            if (raw === '') return { ...base, value: '', runs: null, phonetics: null, kind: 'empty' };
+            return { ...base, value: raw, runs: null, phonetics: null, kind: 'number' };
     }
 }

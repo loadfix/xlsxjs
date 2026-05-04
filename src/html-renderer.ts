@@ -2,7 +2,7 @@
 // sheet, each containing an <h2> sheet name and a <table> of the cells.
 // Numeric cells get a numeric-aligned class; other kinds render as text.
 
-import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, ThreadedCommentEntry, Hyperlink } from './workbook-parser';
+import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, ThreadedCommentEntry, Hyperlink, PhoneticRun } from './workbook-parser';
 import { isSafeHyperlinkHref } from './workbook-parser';
 import { indexToColumnLetters } from './utils';
 import { h } from './html';
@@ -791,6 +791,12 @@ function renderCellContent(td: HTMLTableCellElement, cell: Cell, styles: Styles 
         // on top. Text content goes via textContent on each span so attacker
         // strings are HTML-encoded by the DOM.
         for (const run of cell.runs) appendRunSpan(td, run, theme);
+    } else if (cell.phonetics && (cell.kind === 'string' || cell.kind === 'inlineStr')) {
+        // Phonetic-ruby path: the cell carries <rPh> annotations but no rich
+        // runs, so we can walk the base text and wrap annotated spans in
+        // HTML5 <ruby>. Plain segments between annotations are appended as
+        // text nodes — never via innerHTML.
+        appendPhoneticText(td, cell.value, cell.phonetics);
     } else {
         td.textContent = text;
     }
@@ -836,6 +842,47 @@ function appendRunSpan(td: HTMLTableCellElement, run: RichTextRun, theme: Theme 
     td.appendChild(span);
 }
 
+// Emit a cell's plain text body interleaved with HTML5 <ruby> wrappers for
+// any phonetic (<rPh>) annotations. The base text between / after annotated
+// spans goes in as raw text nodes; each phonetic hit becomes
+// <ruby>basechars<rt>phonetic</rt></ruby>. Every string reaches the DOM via
+// createTextNode / textContent (never innerHTML) so attacker-controlled
+// content can't escape.
+export function appendPhoneticText(
+    parent: Node,
+    text: string,
+    phonetics: PhoneticRun[],
+): void {
+    // Sort defensively and clip to the text length so overlapping / reversed
+    // producer input can't emit mis-ordered DOM.
+    const sorted = phonetics
+        .map((p) => ({
+            startIdx: Math.max(0, Math.min(text.length, p.startIdx)),
+            endIdx: Math.max(0, Math.min(text.length, p.endIdx)),
+            phonetic: p.phonetic,
+        }))
+        .filter((p) => p.endIdx > p.startIdx)
+        .sort((a, b) => a.startIdx - b.startIdx);
+    let cursor = 0;
+    for (const p of sorted) {
+        // Skip overlapping entries — we already rendered ruby over this range.
+        if (p.startIdx < cursor) continue;
+        if (p.startIdx > cursor) {
+            parent.appendChild(document.createTextNode(text.slice(cursor, p.startIdx)));
+        }
+        const ruby = document.createElement('ruby');
+        ruby.appendChild(document.createTextNode(text.slice(p.startIdx, p.endIdx)));
+        const rt = document.createElement('rt');
+        rt.textContent = p.phonetic;
+        ruby.appendChild(rt);
+        parent.appendChild(ruby);
+        cursor = p.endIdx;
+    }
+    if (cursor < text.length) {
+        parent.appendChild(document.createTextNode(text.slice(cursor)));
+    }
+}
+
 // Compose textDecoration from an underline variant + strike-through. Both
 // can coexist, so we build the shorthand from the truthy tokens.
 function applyTextDecoration(
@@ -878,9 +925,21 @@ function applyFont(td: HTMLTableCellElement, font: FontStyle | undefined, theme:
     if (color) td.style.color = color;
     // font.name goes through sanitizeFontFamily (strict alphanumeric /
     // space / hyphen / dot allowlist, quoted on output) so an attacker
-    // can't escape the font-family CSS property.
-    const family = sanitizeFontFamily(font.name);
+    // can't escape the font-family CSS property. When no explicit name is
+    // set but the font carries a <scheme val="major|minor"/>, resolve the
+    // theme-declared typeface and feed that through the sanitizer instead.
+    const family = sanitizeFontFamily(font.name) ?? resolveSchemeFontFamily(font.scheme, theme);
     if (family) td.style.fontFamily = family;
+}
+
+// Resolve a <font scheme="major|minor"/> reference to a CSS font-family value
+// via the theme's fontScheme. The typeface string is routed through
+// sanitizeFontFamily so an attacker who tampers with theme1.xml still can't
+// break out of the font-family property.
+function resolveSchemeFontFamily(scheme: 'major' | 'minor' | null, theme: Theme | null): string | null {
+    if (!scheme || !theme) return null;
+    const name = scheme === 'major' ? theme.majorFont : theme.minorFont;
+    return sanitizeFontFamily(name);
 }
 
 function applyFill(td: HTMLTableCellElement, fill: FillStyle | undefined, theme: Theme | null): void {

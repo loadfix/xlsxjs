@@ -33,6 +33,10 @@ export interface FontStyle {
     size: number | null;
     color: ColorRef;
     name: string | null;
+    // <scheme val="major|minor"/> — a reference to the theme's fontScheme.
+    // Resolved by the renderer against `Theme.majorFont` / `Theme.minorFont`
+    // when no explicit `name` is set. null when the font has no <scheme/>.
+    scheme: 'major' | 'minor' | null;
 }
 
 export interface FillStyle {
@@ -295,7 +299,19 @@ function parseFont(el: Element): FontStyle {
         size: sizeAttr ? Number(sizeAttr) : null,
         color: parseColorElement(colorEl),
         name: firstAttr('name', 'val') ?? firstAttr('rFont', 'val'),
+        scheme: parseScheme(el),
     };
+}
+
+// ECMA-376 §18.8.35: <scheme val="major|minor"/> inside a <font/> marks the
+// font as the theme's major or minor face. Anything unrecognised (including
+// legacy `val="none"`) falls back to null so the renderer ignores the hint.
+function parseScheme(parent: Element): 'major' | 'minor' | null {
+    const s = parent.getElementsByTagNameNS(NS_MAIN, 'scheme').item(0);
+    if (!s) return null;
+    const val = s.getAttribute('val');
+    if (val === 'major' || val === 'minor') return val;
+    return null;
 }
 
 // ECMA-376 §18.8.36: <u/> with no val attribute means 'single'; explicit
