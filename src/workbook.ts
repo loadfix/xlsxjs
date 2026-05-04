@@ -107,11 +107,42 @@ export class Workbook {
             }
         }
 
-        // xl/drawings/drawingN.xml + their rels. Drawings anchor images (and
-        // charts — charts are out of scope) to cell positions on a sheet.
+        // xl/drawings/drawingN.xml + their rels. Drawings anchor images and
+        // charts to cell positions on a sheet.
         for (const p of Object.keys(zip.files)) {
             if (/^xl\/drawings\/.*\.xml$/i.test(p) ||
                 /^xl\/drawings\/_rels\/.*\.xml\.rels$/i.test(p)) {
+                const xml = await readIfPresent(p);
+                if (xml) wb.parts[p] = xml;
+            }
+        }
+
+        // xl/charts/*.xml — both classic (c:chartSpace) and chartEx
+        // (cx:chartSpace). The renderer does not draw the chart content; the
+        // parser peeks at the chart XML to surface a chart-type name and the
+        // loader exposes the raw XML for any consumers that want it.
+        for (const p of Object.keys(zip.files)) {
+            if (/^xl\/charts\/.*\.xml$/i.test(p)) {
+                const xml = await readIfPresent(p);
+                if (xml) wb.parts[p] = xml;
+            }
+        }
+
+        // Pivot tables, slicers, timelines, and their caches. xlsxjs does not
+        // re-compute pivot values (the sheet xml already carries them), but we
+        // surface the anchored range + name on the model so consumers can
+        // render their own affordance, and so the smoke tool stops flagging
+        // these parts as "dropped".
+        //
+        // pivotCacheRecords*.xml are intentionally skipped — they're the
+        // materialised records and can be large.
+        for (const p of Object.keys(zip.files)) {
+            if (/^xl\/pivotTables\/.*\.xml$/i.test(p) ||
+                /^xl\/pivotCache\/pivotCacheDefinition\d+\.xml$/i.test(p) ||
+                /^xl\/slicers\/.*\.xml$/i.test(p) ||
+                /^xl\/slicerCaches\/.*\.xml$/i.test(p) ||
+                /^xl\/timelines\/.*\.xml$/i.test(p) ||
+                /^xl\/timelineCaches\/.*\.xml$/i.test(p)) {
                 const xml = await readIfPresent(p);
                 if (xml) wb.parts[p] = xml;
             }

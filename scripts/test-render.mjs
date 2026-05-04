@@ -686,6 +686,29 @@ async function renderFixture(path, options) {
     assert(fn('1234', 'General').text === '1234', '24i: General integer');
 }
 
+// ── 25. Chart detection + placeholder rendering ─────────────────────────
+// Uses a chart-bearing workbook copied in from the 365 corpus
+// (chart_sunburst.xlsx) so we exercise a real chartEx part and the
+// mc:AlternateContent wrapping Excel emits.
+{
+    const { wb, container } = await renderFixture('chart-detect');
+    const sheet = wb.parsed.sheets[0];
+    assert(sheet.charts.length >= 1, `25a: sheet should detect ≥1 chart (got ${sheet.charts.length})`);
+    const chart = sheet.charts[0];
+    assert(chart.kind === 'chartex' || chart.kind === 'classic', `25b: chart.kind enum (got ${chart.kind})`);
+    // Anchor should come off the drawing's <from>. chart_sunburst anchors at
+    // F11 (col=5, row=10); we check finite numbers rather than exact match
+    // so the assertion survives cosmetic fixture drift.
+    assert(Number.isFinite(chart.col) && Number.isFinite(chart.row), '25c: chart anchor should be finite');
+    // Placeholder emitted after the table.
+    const ph = container.querySelector('.xlsx-chart-placeholder');
+    assert(!!ph, '25d: a .xlsx-chart-placeholder element should be rendered');
+    assert(ph.getAttribute('data-chart-kind') === chart.kind, `25e: placeholder data-chart-kind should match (got "${ph.getAttribute('data-chart-kind')}")`);
+    assert(/\[chart: /.test(ph.textContent ?? ''), `25f: placeholder text should contain "[chart: …]" (got "${ph.textContent}")`);
+    // extLst rollup should surface on the sheet model.
+    assert(Array.isArray(sheet.extensions), '25g: sheet.extensions should be an array');
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

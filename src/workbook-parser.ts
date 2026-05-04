@@ -95,6 +95,39 @@ export interface AutoFilter {
     endCol: number; endRow: number;
 }
 
+// A detected chart anchored inside a sheet. xlsxjs does NOT render the chart
+// content — the model carries the position + a rough chart-type name so
+// consumers (and the renderer) can emit a placeholder.
+export interface SheetChart {
+    // 'classic' is c:chartSpace (charts 1.0), 'chartex' is cx:chartSpace
+    // (the 2014 extensions: treemap, sunburst, waterfall, funnel, pareto,
+    // box-whisker, histogram, map).
+    kind: 'classic' | 'chartex';
+    // Best-effort chart-type tag: e.g. 'barChart', 'lineChart', 'pieChart'
+    // for classic; 'treemap', 'sunburst', 'waterfall', … for chartEx.
+    // null when the chart xml couldn't be found or had no recognisable type.
+    chartType: string | null;
+    col: number; row: number;
+    endCol: number | null;
+    endRow: number | null;
+}
+
+// A pivot table anchored inside a sheet. Detection-only — the sheet's cell
+// values already carry the materialised pivot output.
+export interface SheetPivot {
+    name: string;
+    col: number; row: number;
+    endCol: number; endRow: number;
+}
+
+// Count of sheet-level <extLst><ext uri="…"> entries. Surfaced so the smoke
+// tool can roll up unknown extension uses (sparklines, dynamic-array spill,
+// protected ranges, etc.) without re-scanning the raw XML.
+export interface SheetExtensionUri {
+    uri: string;
+    count: number;
+}
+
 // A rendered image anchored inside a sheet. Coordinates are 0-based.
 // xlsxjs ships only the "twoCellAnchor" and "oneCellAnchor" positioning
 // — absolute pixel anchors are rare and reported with `col=0, row=0`.
@@ -139,6 +172,9 @@ export interface Sheet {
     autoFilter: AutoFilter | null;
     tables: TableDef[];
     images: SheetImage[];
+    charts: SheetChart[];
+    pivots: SheetPivot[];
+    extensions: SheetExtensionUri[];
 }
 
 export interface Workbook {
@@ -153,6 +189,8 @@ const NS = {
     rels:  'http://schemas.openxmlformats.org/package/2006/relationships',
     xdr:   'http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing',
     a:     'http://schemas.openxmlformats.org/drawingml/2006/main',
+    c:     'http://schemas.openxmlformats.org/drawingml/2006/chart',
+    cx:    'http://schemas.microsoft.com/office/drawing/2014/chartex',
 };
 
 export class WorkbookParser {
@@ -198,8 +236,9 @@ export class WorkbookParser {
             const xml = parts[xmlPath];
             if (!xml) continue;
             const tables = resolveTablesForSheet(xmlPath, parts);
-            const images = resolveImagesForSheet(xmlPath, parts, media);
-            sheets.push(parseSheet(name, xml, sharedStrings, tables, images));
+            const { images, charts } = resolveDrawingsForSheet(xmlPath, parts, media);
+            const pivots = resolvePivotsForSheet(xmlPath, parts);
+            sheets.push(parseSheet(name, xml, sharedStrings, tables, images, charts, pivots));
         }
 
         return { sheets, styles, theme };
@@ -269,17 +308,18 @@ function normaliseRelPath(path: string): string {
     return stack.join('/');
 }
 
-function resolveImagesForSheet(
+function resolveDrawingsForSheet(
     sheetPath: string,
     parts: Record<string, string>,
     media: Record<string, string>,
-): SheetImage[] {
+): { images: SheetImage[]; charts: SheetChart[] } {
     const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
     const relsXml = parts[relsPath];
-    if (!relsXml) return [];
+    if (!relsXml) return { images: [], charts: [] };
     const rels = parseRelationships(relsXml);
     const dir = sheetPath.replace(/\/[^/]+$/, '');
-    const out: SheetImage[] = [];
+    const images: SheetImage[] = [];
+    const charts: SheetChart[] = [];
     for (const [, rel] of rels) {
         if (!rel.type.endsWith('/drawing')) continue;
         const drawingPath = rel.target.startsWith('/')
@@ -287,46 +327,83 @@ function resolveImagesForSheet(
             : normaliseRelPath(`${dir}/${rel.target}`);
         const drawingXml = parts[drawingPath];
         if (!drawingXml) continue;
-        // The drawing has its own rels part binding rIds to media files.
+        // The drawing has its own rels part binding rIds to media files
+        // and to chart parts.
         const drawingRelsPath = drawingPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
         const drawingRelsXml = parts[drawingRelsPath];
         if (!drawingRelsXml) continue;
         const drawingRels = parseRelationships(drawingRelsXml);
         const drawingDir = drawingPath.replace(/\/[^/]+$/, '');
-        out.push(...parseDrawing(drawingXml, drawingRels, drawingDir, media));
+        const parsed = parseDrawing(drawingXml, drawingRels, drawingDir, parts, media);
+        images.push(...parsed.images);
+        charts.push(...parsed.charts);
+    }
+    return { images, charts };
+}
+
+function resolvePivotsForSheet(
+    sheetPath: string,
+    parts: Record<string, string>,
+): SheetPivot[] {
+    const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
+    const relsXml = parts[relsPath];
+    if (!relsXml) return [];
+    const rels = parseRelationships(relsXml);
+    const dir = sheetPath.replace(/\/[^/]+$/, '');
+    const out: SheetPivot[] = [];
+    for (const [, rel] of rels) {
+        // The official rel type ends in "/pivotTable".
+        if (!rel.type.endsWith('/pivotTable')) continue;
+        const pivotPath = rel.target.startsWith('/')
+            ? rel.target.slice(1)
+            : normaliseRelPath(`${dir}/${rel.target}`);
+        const xml = parts[pivotPath];
+        if (!xml) continue;
+        const parsed = parsePivotTable(xml);
+        if (parsed) out.push(parsed);
     }
     return out;
+}
+
+function parsePivotTable(xml: string): SheetPivot | null {
+    const doc = parseXml(xml);
+    const def = doc.getElementsByTagNameNS(NS.main, 'pivotTableDefinition').item(0);
+    if (!def) return null;
+    const name = def.getAttribute('name') ?? '';
+    const loc = def.getElementsByTagNameNS(NS.main, 'location').item(0);
+    if (!loc) return null;
+    const ref = loc.getAttribute('ref');
+    if (!ref) return null;
+    const parts = ref.split(':');
+    const a = parseCellRef(parts[0]);
+    const b = parts[1] ? parseCellRef(parts[1]) : a;
+    if (!a || !b) return null;
+    return {
+        name,
+        col: Math.min(a.col, b.col),
+        row: Math.min(a.row, b.row),
+        endCol: Math.max(a.col, b.col),
+        endRow: Math.max(a.row, b.row),
+    };
 }
 
 function parseDrawing(
     xml: string,
     rels: Map<string, { target: string; type: string }>,
     drawingDir: string,
+    parts: Record<string, string>,
     media: Record<string, string>,
-): SheetImage[] {
+): { images: SheetImage[]; charts: SheetChart[] } {
     const doc = parseXml(xml);
-    const out: SheetImage[] = [];
-    // Both twoCellAnchor and oneCellAnchor carry <pic> children. We iterate
-    // each anchor in order; their children determine the positioning.
+    const images: SheetImage[] = [];
+    const charts: SheetChart[] = [];
+    // Both twoCellAnchor and oneCellAnchor carry child <pic> / <graphicFrame>
+    // elements. We walk each anchor in order, checking both.
     const anchors = [
         ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'twoCellAnchor')),
         ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'oneCellAnchor')),
     ];
     for (const anchor of anchors) {
-        const pic = anchor.getElementsByTagNameNS(NS.xdr, 'pic').item(0);
-        if (!pic) continue;
-        const blip = pic.getElementsByTagNameNS(NS.a, 'blip').item(0);
-        if (!blip) continue;
-        const embed = blip.getAttributeNS(NS.rel, 'embed');
-        if (!embed) continue;
-        const rel = rels.get(embed);
-        if (!rel) continue;
-        const mediaPath = rel.target.startsWith('/')
-            ? rel.target.slice(1)
-            : normaliseRelPath(`${drawingDir}/${rel.target}`);
-        const dataUrl = media[mediaPath];
-        if (!dataUrl) continue;
-
         const from = anchor.getElementsByTagNameNS(NS.xdr, 'from').item(0);
         const to = anchor.getElementsByTagNameNS(NS.xdr, 'to').item(0);
         const col = anchorCellValue(from, 'col');
@@ -336,30 +413,111 @@ function parseDrawing(
         const colOff = anchorCellValue(from, 'colOff');
         const rowOff = anchorCellValue(from, 'rowOff');
 
-        // Extent (explicit size for oneCellAnchor / absolute). Not always
-        // present on twoCellAnchor; renderer falls back to anchor-based sizing.
-        const ext = anchor.getElementsByTagNameNS(NS.xdr, 'ext').item(0);
-        const widthEmu = ext ? Number(ext.getAttribute('cx')) : null;
-        const heightEmu = ext ? Number(ext.getAttribute('cy')) : null;
+        const pic = anchor.getElementsByTagNameNS(NS.xdr, 'pic').item(0);
+        if (pic) {
+            const blip = pic.getElementsByTagNameNS(NS.a, 'blip').item(0);
+            const embed = blip?.getAttributeNS(NS.rel, 'embed');
+            const rel = embed ? rels.get(embed) : undefined;
+            if (rel) {
+                const mediaPath = rel.target.startsWith('/')
+                    ? rel.target.slice(1)
+                    : normaliseRelPath(`${drawingDir}/${rel.target}`);
+                const dataUrl = media[mediaPath];
+                if (dataUrl) {
+                    // Extent (explicit size for oneCellAnchor / absolute). Not
+                    // always present on twoCellAnchor; renderer falls back to
+                    // anchor-based sizing.
+                    const ext = anchor.getElementsByTagNameNS(NS.xdr, 'ext').item(0);
+                    const widthEmu = ext ? Number(ext.getAttribute('cx')) : null;
+                    const heightEmu = ext ? Number(ext.getAttribute('cy')) : null;
+                    // Alt text lives under pic/nvPicPr/cNvPr.
+                    const cNvPr = pic.getElementsByTagNameNS(NS.xdr, 'cNvPr').item(0);
+                    const alt = cNvPr?.getAttribute('descr') ?? cNvPr?.getAttribute('title') ?? null;
+                    images.push({
+                        col: col ?? 0,
+                        row: row ?? 0,
+                        endCol,
+                        endRow,
+                        colOff: colOff ?? 0,
+                        rowOff: rowOff ?? 0,
+                        dataUrl,
+                        widthEmu: Number.isFinite(widthEmu as number) ? (widthEmu as number) : null,
+                        heightEmu: Number.isFinite(heightEmu as number) ? (heightEmu as number) : null,
+                        alt,
+                    });
+                }
+            }
+        }
 
-        // Alt text lives under pic/nvPicPr/cNvPr.
-        const cNvPr = pic.getElementsByTagNameNS(NS.xdr, 'cNvPr').item(0);
-        const alt = cNvPr?.getAttribute('descr') ?? cNvPr?.getAttribute('title') ?? null;
-
-        out.push({
-            col: col ?? 0,
-            row: row ?? 0,
-            endCol,
-            endRow,
-            colOff: colOff ?? 0,
-            rowOff: rowOff ?? 0,
-            dataUrl,
-            widthEmu: Number.isFinite(widthEmu as number) ? (widthEmu as number) : null,
-            heightEmu: Number.isFinite(heightEmu as number) ? (heightEmu as number) : null,
-            alt,
-        });
+        // Chart detection. A chart-bearing graphicFrame wraps either a
+        // <c:chart r:id="…"/> (classic) or a <cx:chart r:id="…"/> (chartEx).
+        // Modern Excel wraps the whole graphicFrame in mc:AlternateContent so
+        // old consumers fall back to a <sp>. We use getElementsByTagNameNS on
+        // the anchor so either shape is discovered.
+        const chartEl = anchor.getElementsByTagNameNS(NS.c, 'chart').item(0)
+            ?? anchor.getElementsByTagNameNS(NS.cx, 'chart').item(0);
+        if (chartEl) {
+            const kind: 'classic' | 'chartex' = chartEl.namespaceURI === NS.cx ? 'chartex' : 'classic';
+            const rId = chartEl.getAttributeNS(NS.rel, 'id');
+            let chartType: string | null = null;
+            if (rId) {
+                const rel = rels.get(rId);
+                if (rel) {
+                    const chartPath = rel.target.startsWith('/')
+                        ? rel.target.slice(1)
+                        : normaliseRelPath(`${drawingDir}/${rel.target}`);
+                    const chartXml = parts[chartPath];
+                    if (chartXml) chartType = peekChartType(chartXml, kind);
+                }
+            }
+            charts.push({
+                kind,
+                chartType,
+                col: col ?? 0,
+                row: row ?? 0,
+                endCol,
+                endRow,
+            });
+        }
     }
-    return out;
+    return { images, charts };
+}
+
+// Peek at a chart part and pull a chart-type name. For classic charts this is
+// the first child element tag under c:chartSpace/c:chart/c:plotArea (e.g.
+// "barChart", "lineChart"). For chartEx it's the series' layoutId attribute
+// (e.g. "treemap", "sunburst", "waterfall"); when that's missing we fall
+// through to the first recognisable child of cx:chart.
+function peekChartType(xml: string, kind: 'classic' | 'chartex'): string | null {
+    const doc = parseXml(xml);
+    if (kind === 'classic') {
+        const plotArea = doc.getElementsByTagNameNS(NS.c, 'plotArea').item(0);
+        if (!plotArea) return null;
+        for (let i = 0; i < plotArea.childNodes.length; i++) {
+            const node = plotArea.childNodes[i];
+            if (node.nodeType !== 1) continue;
+            const el = node as Element;
+            if (el.namespaceURI !== NS.c) continue;
+            // Axis children aren't chart-type entries — skip them.
+            if (/Ax$/.test(el.localName) || el.localName === 'numFmt') continue;
+            if (/Chart$/.test(el.localName) || el.localName === 'chartEx') return el.localName;
+        }
+        return null;
+    }
+    // chartEx
+    const series = doc.getElementsByTagNameNS(NS.cx, 'series').item(0);
+    const layoutId = series?.getAttribute('layoutId');
+    if (layoutId) return layoutId;
+    const chart = doc.getElementsByTagNameNS(NS.cx, 'chart').item(0);
+    if (!chart) return null;
+    for (let i = 0; i < chart.childNodes.length; i++) {
+        const node = chart.childNodes[i];
+        if (node.nodeType !== 1) continue;
+        const el = node as Element;
+        if (el.namespaceURI !== NS.cx) continue;
+        if (el.localName !== 'plotArea' && el.localName !== 'title') return el.localName;
+    }
+    return null;
 }
 
 function anchorCellValue(parent: Element | null, tag: string): number | null {
@@ -491,7 +649,15 @@ function parseRun(el: Element): RichTextRun {
     };
 }
 
-function parseSheet(name: string, xml: string, sharedStrings: SharedString[], tables: TableDef[] = [], images: SheetImage[] = []): Sheet {
+function parseSheet(
+    name: string,
+    xml: string,
+    sharedStrings: SharedString[],
+    tables: TableDef[] = [],
+    images: SheetImage[] = [],
+    charts: SheetChart[] = [],
+    pivots: SheetPivot[] = [],
+): Sheet {
     const doc = parseXml(xml);
     const rowEls = doc.getElementsByTagNameNS(NS.main, 'row');
     const rows: Cell[][] = [];
@@ -548,11 +714,34 @@ function parseSheet(name: string, xml: string, sharedStrings: SharedString[], ta
     const conditionalFormatting = parseConditionalFormatting(doc);
     const frozenPanes = parseFrozenPanes(doc);
     const autoFilter = parseAutoFilter(doc);
+    const extensions = collectExtensionUris(doc);
 
     return {
         name, rows, maxCol, maxRow, merges, columns, rowDimensions,
         conditionalFormatting, frozenPanes, autoFilter, tables, images,
+        charts, pivots, extensions,
     };
+}
+
+// Walk every <ext uri="…"> in the sheet xml (sheet-level <extLst>, and any
+// nested <extLst> that Excel writes inside conditional-format /
+// dataValidations / etc.) and roll up by uri. xlsxjs does not render any of
+// these — this is purely a triage signal.
+function collectExtensionUris(doc: Document): SheetExtensionUri[] {
+    // <ext> elements are emitted in multiple XSD namespaces (main, x14, etc.).
+    // Rather than enumerate them we walk localName 'ext' across the tree.
+    const counts = new Map<string, number>();
+    const all = doc.getElementsByTagName('*');
+    for (let i = 0; i < all.length; i++) {
+        const el = all[i];
+        if (el.localName !== 'ext') continue;
+        const uri = el.getAttribute('uri');
+        if (!uri) continue;
+        counts.set(uri, (counts.get(uri) ?? 0) + 1);
+    }
+    const out: SheetExtensionUri[] = [];
+    for (const [uri, count] of counts) out.push({ uri, count });
+    return out;
 }
 
 function parseFrozenPanes(doc: Document): FrozenPanes | null {
