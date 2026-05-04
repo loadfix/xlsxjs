@@ -170,6 +170,20 @@ export interface SheetComment {
     runs: RichTextRun[] | null;  // preserved when the <text> body had runs
 }
 
+// A single entry in a threaded-comment thread. Parent comments carry
+// `parentId = null`; replies reference the starter by GUID. `author` has
+// already been resolved through the workbook-wide person.xml registry,
+// so the renderer never needs to cross-reference IDs. `date` is the raw
+// ISO string off the `dT` attribute — we don't parse / reformat it here.
+export interface ThreadedCommentEntry {
+    id: string;
+    col: number; row: number;
+    author: string | null;    // resolved from personId via person.xml
+    date: string | null;      // raw ISO string from dT attribute
+    text: string;
+    parentId: string | null;  // null for thread starter
+}
+
 export interface Sheet {
     name: string;
     rows: Cell[][]; // sparse: rows[rowIndex] may be undefined
@@ -187,12 +201,16 @@ export interface Sheet {
     pivots: SheetPivot[];
     extensions: SheetExtensionUri[];
     comments: SheetComment[];
+    threadedComments: ThreadedCommentEntry[];
 }
 
 export interface Workbook {
     sheets: Sheet[];
     styles: Styles | null;
     theme: Theme | null;
+    // Workbook-wide author registry (personId GUID → displayName). Empty
+    // Map when the package carries no xl/persons/person.xml.
+    persons: Map<string, string>;
 }
 
 const NS = {
@@ -203,6 +221,7 @@ const NS = {
     a:     'http://schemas.openxmlformats.org/drawingml/2006/main',
     c:     'http://schemas.openxmlformats.org/drawingml/2006/chart',
     cx:    'http://schemas.microsoft.com/office/drawing/2014/chartex',
+    tc:    'http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments',
 };
 
 export class WorkbookParser {
@@ -232,6 +251,12 @@ export class WorkbookParser {
             ? parseRelationships(parts['xl/_rels/workbook.xml.rels'])
             : new Map<string, { target: string; type: string }>();
 
+        // Workbook-wide person registry (threaded comments). The rel type
+        // ends in "/person" and points at a package-wide person.xml. We fall
+        // back to the conventional xl/persons/person.xml path if no rel is
+        // declared but the file is present.
+        const persons = resolvePersons(rels, parts);
+
         const sheetMeta = parseSheetList(workbookXml);
         const sheets: Sheet[] = [];
         for (let i = 0; i < sheetMeta.length; i++) {
@@ -251,11 +276,112 @@ export class WorkbookParser {
             const { images, charts } = resolveDrawingsForSheet(xmlPath, parts, media);
             const pivots = resolvePivotsForSheet(xmlPath, parts);
             const comments = resolveCommentsForSheet(xmlPath, parts);
-            sheets.push(parseSheet(name, xml, sharedStrings, tables, images, charts, pivots, comments));
+            const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
+            sheets.push(parseSheet(name, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments));
         }
 
-        return { sheets, styles, theme };
+        return { sheets, styles, theme, persons };
     }
+}
+
+// xl/persons/person.xml holds the GUID → displayName registry shared by
+// every threaded comment in the package. Excel 365 writes exactly one
+// such file; the rel type is a Microsoft-specific URL ending in
+// "/person" (not the office-document namespace). If the rel is missing
+// but the file is there, fall back to the conventional path.
+function resolvePersons(
+    workbookRels: Map<string, { target: string; type: string }>,
+    parts: Record<string, string>,
+): Map<string, string> {
+    let xmlPath: string | null = null;
+    for (const [, rel] of workbookRels) {
+        if (rel.type.endsWith('/person')) {
+            xmlPath = resolveWorkbookRelTarget(rel.target);
+            break;
+        }
+    }
+    if (!xmlPath || !parts[xmlPath]) {
+        // Fallback: convention is xl/persons/person.xml, but we accept any
+        // xl/persons/*.xml file if only one is present.
+        const candidates = Object.keys(parts).filter((p) => /^xl\/persons\/.*\.xml$/i.test(p));
+        xmlPath = candidates[0] ?? null;
+    }
+    if (!xmlPath || !parts[xmlPath]) return new Map();
+    return parsePersons(parts[xmlPath]);
+}
+
+function parsePersons(xml: string): Map<string, string> {
+    const out = new Map<string, string>();
+    const doc = parseXml(xml);
+    const nodes = doc.getElementsByTagNameNS(NS.tc, 'person');
+    for (let i = 0; i < nodes.length; i++) {
+        const el = nodes[i];
+        const id = el.getAttribute('id');
+        const displayName = el.getAttribute('displayName');
+        if (!id) continue;
+        out.set(id, displayName ?? '');
+    }
+    return out;
+}
+
+// Resolve every threadedComments*.xml referenced from the sheet's rels
+// (type ending in "/threadedComment") and parse it into ThreadedCommentEntry[].
+// Each personId is resolved to a display name via the workbook-wide
+// registry; unknown IDs fall back to `null` (renderer displays "Unknown").
+function resolveThreadedCommentsForSheet(
+    sheetPath: string,
+    parts: Record<string, string>,
+    persons: Map<string, string>,
+): ThreadedCommentEntry[] {
+    const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
+    const relsXml = parts[relsPath];
+    if (!relsXml) return [];
+    const rels = parseRelationships(relsXml);
+    const dir = sheetPath.replace(/\/[^/]+$/, '');
+    const out: ThreadedCommentEntry[] = [];
+    for (const [, rel] of rels) {
+        if (!rel.type.endsWith('/threadedComment')) continue;
+        const target = rel.target.startsWith('/')
+            ? rel.target.slice(1)
+            : normaliseRelPath(`${dir}/${rel.target}`);
+        const xml = parts[target];
+        if (!xml) continue;
+        out.push(...parseThreadedComments(xml, persons));
+    }
+    return out;
+}
+
+// Parse a single threadedComment{N}.xml into a flat list of entries.
+// Thread structure (parent vs. reply) is preserved via parentId; the
+// renderer groups them back into threads at display time.
+export function parseThreadedComments(xml: string, persons: Map<string, string>): ThreadedCommentEntry[] {
+    const doc = parseXml(xml);
+    const nodes = doc.getElementsByTagNameNS(NS.tc, 'threadedComment');
+    const out: ThreadedCommentEntry[] = [];
+    for (let i = 0; i < nodes.length; i++) {
+        const el = nodes[i];
+        const ref = el.getAttribute('ref');
+        const id = el.getAttribute('id');
+        if (!ref || !id) continue;
+        const cell = parseCellRef(ref);
+        if (!cell) continue;
+        const personId = el.getAttribute('personId');
+        const author = personId && persons.has(personId) ? persons.get(personId)! : null;
+        const textEl = el.getElementsByTagNameNS(NS.tc, 'text').item(0);
+        const text = textEl?.textContent ?? '';
+        const date = el.getAttribute('dT');
+        const parentId = el.getAttribute('parentId');
+        out.push({
+            id,
+            col: cell.col,
+            row: cell.row,
+            author: author && author.length > 0 ? author : null,
+            date: date ?? null,
+            text,
+            parentId: parentId ?? null,
+        });
+    }
+    return out;
 }
 
 function parseRelationships(xml: string): Map<string, { target: string; type: string }> {
@@ -730,6 +856,7 @@ function parseSheet(
     charts: SheetChart[] = [],
     pivots: SheetPivot[] = [],
     comments: SheetComment[] = [],
+    threadedComments: ThreadedCommentEntry[] = [],
 ): Sheet {
     const doc = parseXml(xml);
     const rowEls = doc.getElementsByTagNameNS(NS.main, 'row');
@@ -792,7 +919,7 @@ function parseSheet(
     return {
         name, rows, maxCol, maxRow, merges, columns, rowDimensions,
         conditionalFormatting, frozenPanes, autoFilter, tables, images,
-        charts, pivots, extensions, comments,
+        charts, pivots, extensions, comments, threadedComments,
     };
 }
 

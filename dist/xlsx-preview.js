@@ -124,6 +124,20 @@
                 }
             }
             for (const p of Object.keys(zip.files)) {
+                if (/^xl\/threadedComments\/.*\.xml$/i.test(p)) {
+                    const xml = await readIfPresent(p);
+                    if (xml)
+                        wb.parts[p] = xml;
+                }
+            }
+            for (const p of Object.keys(zip.files)) {
+                if (/^xl\/persons\/.*\.xml$/i.test(p)) {
+                    const xml = await readIfPresent(p);
+                    if (xml)
+                        wb.parts[p] = xml;
+                }
+            }
+            for (const p of Object.keys(zip.files)) {
                 if (/^xl\/media\/[^/]+$/i.test(p)) {
                     const bin = zip.file(p);
                     if (!bin)
@@ -1034,6 +1048,7 @@
         a: 'http://schemas.openxmlformats.org/drawingml/2006/main',
         c: 'http://schemas.openxmlformats.org/drawingml/2006/chart',
         cx: 'http://schemas.microsoft.com/office/drawing/2014/chartex',
+        tc: 'http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments',
     };
     class WorkbookParser {
         constructor(_options) {
@@ -1052,6 +1067,7 @@
             const rels = parts['xl/_rels/workbook.xml.rels']
                 ? parseRelationships(parts['xl/_rels/workbook.xml.rels'])
                 : new Map();
+            const persons = resolvePersons(rels, parts);
             const sheetMeta = parseSheetList(workbookXml);
             const sheets = [];
             for (let i = 0; i < sheetMeta.length; i++) {
@@ -1071,10 +1087,93 @@
                 const { images, charts } = resolveDrawingsForSheet(xmlPath, parts, media);
                 const pivots = resolvePivotsForSheet(xmlPath, parts);
                 const comments = resolveCommentsForSheet(xmlPath, parts);
-                sheets.push(parseSheet(name, xml, sharedStrings, tables, images, charts, pivots, comments));
+                const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
+                sheets.push(parseSheet(name, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments));
             }
-            return { sheets, styles, theme };
+            return { sheets, styles, theme, persons };
         }
+    }
+    function resolvePersons(workbookRels, parts) {
+        let xmlPath = null;
+        for (const [, rel] of workbookRels) {
+            if (rel.type.endsWith('/person')) {
+                xmlPath = resolveWorkbookRelTarget(rel.target);
+                break;
+            }
+        }
+        if (!xmlPath || !parts[xmlPath]) {
+            const candidates = Object.keys(parts).filter((p) => /^xl\/persons\/.*\.xml$/i.test(p));
+            xmlPath = candidates[0] ?? null;
+        }
+        if (!xmlPath || !parts[xmlPath])
+            return new Map();
+        return parsePersons(parts[xmlPath]);
+    }
+    function parsePersons(xml) {
+        const out = new Map();
+        const doc = parseXml(xml);
+        const nodes = doc.getElementsByTagNameNS(NS.tc, 'person');
+        for (let i = 0; i < nodes.length; i++) {
+            const el = nodes[i];
+            const id = el.getAttribute('id');
+            const displayName = el.getAttribute('displayName');
+            if (!id)
+                continue;
+            out.set(id, displayName ?? '');
+        }
+        return out;
+    }
+    function resolveThreadedCommentsForSheet(sheetPath, parts, persons) {
+        const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
+        const relsXml = parts[relsPath];
+        if (!relsXml)
+            return [];
+        const rels = parseRelationships(relsXml);
+        const dir = sheetPath.replace(/\/[^/]+$/, '');
+        const out = [];
+        for (const [, rel] of rels) {
+            if (!rel.type.endsWith('/threadedComment'))
+                continue;
+            const target = rel.target.startsWith('/')
+                ? rel.target.slice(1)
+                : normaliseRelPath(`${dir}/${rel.target}`);
+            const xml = parts[target];
+            if (!xml)
+                continue;
+            out.push(...parseThreadedComments(xml, persons));
+        }
+        return out;
+    }
+    function parseThreadedComments(xml, persons) {
+        const doc = parseXml(xml);
+        const nodes = doc.getElementsByTagNameNS(NS.tc, 'threadedComment');
+        const out = [];
+        for (let i = 0; i < nodes.length; i++) {
+            const el = nodes[i];
+            const ref = el.getAttribute('ref');
+            const id = el.getAttribute('id');
+            if (!ref || !id)
+                continue;
+            const cell = parseCellRef(ref);
+            if (!cell)
+                continue;
+            const personId = el.getAttribute('personId');
+            const author = personId && persons.has(personId) ? persons.get(personId) : null;
+            const textEl = el.getElementsByTagNameNS(NS.tc, 'text').item(0);
+            const text = textEl?.textContent ?? '';
+            const date = el.getAttribute('dT');
+            const parentId = el.getAttribute('parentId');
+            out.push({
+                id,
+                col: cell.col,
+                row: cell.row,
+                author: author && author.length > 0 ? author : null,
+                date: date ?? null,
+                text,
+                parentId: parentId ?? null,
+            });
+        }
+        return out;
     }
     function parseRelationships(xml) {
         const out = new Map();
@@ -1504,7 +1603,7 @@
             name: firstAttr('rFont', 'val') ?? firstAttr('name', 'val'),
         };
     }
-    function parseSheet(name, xml, sharedStrings, tables = [], images = [], charts = [], pivots = [], comments = []) {
+    function parseSheet(name, xml, sharedStrings, tables = [], images = [], charts = [], pivots = [], comments = [], threadedComments = []) {
         const doc = parseXml(xml);
         const rowEls = doc.getElementsByTagNameNS(NS.main, 'row');
         const rows = [];
@@ -1564,7 +1663,7 @@
         return {
             name, rows, maxCol, maxRow, merges, columns, rowDimensions,
             conditionalFormatting, frozenPanes, autoFilter, tables, images,
-            charts, pivots, extensions, comments,
+            charts, pivots, extensions, comments, threadedComments,
         };
     }
     function collectExtensionUris(doc) {
@@ -2159,6 +2258,7 @@
     color: #666; font-size: 0.9em; text-align: center;
 }
 .${className} .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
+.${className} .xlsx-threaded { color: #0066cc; margin-left: 4px; cursor: help; }
     `.trim();
         return style;
     }
@@ -2403,6 +2503,15 @@
         const commentByCell = new Map();
         for (const cmt of sheet.comments)
             commentByCell.set(`${cmt.row},${cmt.col}`, cmt);
+        const threadedByCell = new Map();
+        for (const entry of sheet.threadedComments) {
+            const key = `${entry.row},${entry.col}`;
+            const list = threadedByCell.get(key);
+            if (list)
+                list.push(entry);
+            else
+                threadedByCell.set(key, [entry]);
+        }
         const rowDim = new Map();
         for (const d of sheet.rowDimensions)
             rowDim.set(d.row, d);
@@ -2444,6 +2553,9 @@
                 if (autoFilter && r === autoFilter.row && c >= autoFilter.col && c <= autoFilter.endCol) {
                     td.classList.add('xlsx-autofilter');
                 }
+                const threaded = threadedByCell.get(`${r},${c}`);
+                if (threaded && threaded.length)
+                    appendThreadedCommentMarker(td, threaded);
                 const merge = mergeByAnchor.get(`${r},${c}`);
                 if (merge) {
                     if (merge.colSpan > 1)
@@ -2514,6 +2626,40 @@
         marker.setAttribute('title', title);
         marker.textContent = '●';
         td.appendChild(marker);
+    }
+    function appendThreadedCommentMarker(td, entries) {
+        const marker = document.createElement('span');
+        marker.className = 'xlsx-comment-marker xlsx-threaded';
+        marker.setAttribute('role', 'note');
+        marker.setAttribute('title', formatThreadTitle(entries));
+        marker.textContent = '💬';
+        td.appendChild(marker);
+    }
+    function formatThreadTitle(entries) {
+        const byId = new Map();
+        for (const e of entries)
+            byId.set(e.id, e);
+        const sortByDate = (arr) => arr.slice().sort((a, b) => (a.date ?? '').localeCompare(b.date ?? ''));
+        const starters = sortByDate(entries.filter((e) => !e.parentId || !byId.has(e.parentId)));
+        const repliesByParent = new Map();
+        for (const e of entries) {
+            if (!e.parentId || !byId.has(e.parentId))
+                continue;
+            const list = repliesByParent.get(e.parentId);
+            if (list)
+                list.push(e);
+            else
+                repliesByParent.set(e.parentId, [e]);
+        }
+        const ordered = [];
+        for (const starter of starters) {
+            ordered.push(starter);
+            const replies = repliesByParent.get(starter.id);
+            if (replies)
+                for (const r of sortByDate(replies))
+                    ordered.push(r);
+        }
+        return ordered.map((e) => `${e.author ?? 'Unknown'}: ${e.text}`).join('\n');
     }
     function tagFrozen(td, row, col, panes) {
         const inX = panes.xSplit !== null && col < panes.xSplit;
@@ -2756,6 +2902,7 @@
     exports.parseConditionalFormatting = parseConditionalFormatting;
     exports.parseStyles = parseStyles;
     exports.parseTheme = parseTheme;
+    exports.parseThreadedComments = parseThreadedComments;
     exports.r1c1ToA1 = r1c1ToA1;
     exports.renderAsync = renderAsync;
     exports.renderWorkbook = renderWorkbook;

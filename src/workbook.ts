@@ -163,6 +163,25 @@ export class Workbook {
             }
         }
 
+        // xl/threadedComments/threadedCommentN.xml — Excel 365's modern
+        // comment threads, bound to sheets via the sheet rels. The author
+        // registry is packaged separately under xl/persons/.
+        for (const p of Object.keys(zip.files)) {
+            if (/^xl\/threadedComments\/.*\.xml$/i.test(p)) {
+                const xml = await readIfPresent(p);
+                if (xml) wb.parts[p] = xml;
+            }
+        }
+
+        // xl/persons/person.xml — workbook-wide author registry referenced
+        // from threaded comments via personId GUID.
+        for (const p of Object.keys(zip.files)) {
+            if (/^xl\/persons\/.*\.xml$/i.test(p)) {
+                const xml = await readIfPresent(p);
+                if (xml) wb.parts[p] = xml;
+            }
+        }
+
         // Media binaries — embed as data: URLs so the renderer can use them
         // without any runtime fetch. Kept separate from `parts` (strings).
         for (const p of Object.keys(zip.files)) {
