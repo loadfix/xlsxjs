@@ -4449,6 +4449,112 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 109. OLE CFB reader: parseOleCfb surfaces streams from the .bin ──────
+// The ole-cfb fixture carries a hand-crafted 4096-byte CFB container with
+// three streams: \x01Ole (20 bytes of OLE v1 header), CONTENTS ("hello cfb"),
+// and meta (5 fixed bytes). With parseOleCfb=true, Sheet.embeddings[0].cfb
+// is populated with the root CLSID + those streams. We also exercise the
+// exported parseCfb helper directly for junk / tiny / oversized buffers.
+{
+    const { wb } = await renderFixture('ole-cfb', { parseOleCfb: true });
+    const sheet = wb.parsed.sheets[0];
+    assert(sheet.embeddings.length === 1,
+        `109a: expected exactly 1 embedding (got ${sheet.embeddings.length})`);
+    const ole = sheet.embeddings[0];
+    assert(ole.kind === 'ole', `109b: embedding kind should be "ole" (got ${ole.kind})`);
+    assert(ole.cfb && typeof ole.cfb === 'object',
+        `109c: cfb model should be populated when parseOleCfb=true (got ${ole.cfb})`);
+    if (ole.cfb) {
+        assert(ole.cfb.clsid === '{0001F5EE-0000-0000-C000-000000000046}',
+            `109d: cfb.clsid should round-trip the fixture's root CLSID (got ${JSON.stringify(ole.cfb.clsid)})`);
+        const names = ole.cfb.streams.map((s) => s.name);
+        assert(names.length === 3,
+            `109e: expected 3 CFB streams (got ${names.length}: ${JSON.stringify(names)})`);
+        assert(names.includes('\x01Ole'),
+            `109f: CFB streams should include the "\\x01Ole" control stream (got ${JSON.stringify(names)})`);
+        assert(names.includes('CONTENTS'),
+            `109g: CFB streams should include "CONTENTS" (got ${JSON.stringify(names)})`);
+        assert(names.includes('meta'),
+            `109h: CFB streams should include "meta" (got ${JSON.stringify(names)})`);
+        const contents = ole.cfb.streams.find((s) => s.name === 'CONTENTS');
+        if (contents) {
+            const decoded = new TextDecoder().decode(contents.bytes);
+            assert(decoded === 'hello cfb',
+                `109i: CONTENTS bytes should decode to "hello cfb" (got ${JSON.stringify(decoded)})`);
+        }
+        const meta = ole.cfb.streams.find((s) => s.name === 'meta');
+        if (meta) {
+            assert(meta.bytes.length === 5 &&
+                   meta.bytes[0] === 0x01 && meta.bytes[1] === 0x02 &&
+                   meta.bytes[2] === 0x03 && meta.bytes[3] === 0x04 &&
+                   meta.bytes[4] === 0x05,
+                `109j: meta bytes should be [1,2,3,4,5] (got [${Array.from(meta.bytes).join(',')}])`);
+        }
+    }
+
+    // Direct parseCfb exercise — malformed inputs return null rather than throw.
+    const { parseCfb } = globalThis.xlsx;
+    if (typeof parseCfb === 'function') {
+        assert(parseCfb(new Uint8Array(0)) === null,
+            '109k: parseCfb(empty) should return null');
+        assert(parseCfb(new Uint8Array([1, 2, 3])) === null,
+            '109l: parseCfb(tiny junk) should return null');
+        // 513-byte junk with wrong magic → still null.
+        const wrongMagic = new Uint8Array(1024);
+        assert(parseCfb(wrongMagic) === null,
+            '109m: parseCfb(no-magic, 1024 bytes) should return null');
+        // Oversized buffer (> 32 MiB) → rejected up front.
+        const oversized = new Uint8Array(33 * 1024 * 1024);
+        // Stamp the magic so the size check (not the magic check) is what triggers.
+        oversized.set([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+        assert(parseCfb(oversized) === null,
+            '109n: parseCfb should reject buffers over MAX_EMBEDDING_BYTES');
+        // Direct round-trip of the fixture bytes via parseCfb.
+        const { readFileSync: readFs } = await import('node:fs');
+        const JSZipMod = (await import('jszip')).default;
+        const outer = await JSZipMod.loadAsync(readFs(`${repo}/tests/render-test/ole-cfb/workbook.xlsx`));
+        const raw = await outer.file('xl/embeddings/oleObject1.bin').async('uint8array');
+        const directModel = parseCfb(raw);
+        assert(directModel && directModel.streams.length === 3,
+            `109o: direct parseCfb of the fixture bin should surface 3 streams (got ${directModel?.streams.length})`);
+        assert(directModel && directModel.clsid === '{0001F5EE-0000-0000-C000-000000000046}',
+            `109p: direct parseCfb clsid should match (got ${directModel?.clsid})`);
+    }
+}
+
+// ── 110. OLE CFB reader: default-off path keeps cfb=null + byte-stable ───
+// With default options (parseOleCfb unset → false), no CFB parsing runs: the
+// ole-cfb fixture's single embedding has cfb=null, AND the existing
+// ole-embeddings snapshot stays unaffected (that's policed separately by the
+// golden-diff harness; here we verify the model).
+{
+    const { wb } = await renderFixture('ole-cfb');
+    const sheet = wb.parsed.sheets[0];
+    for (const e of sheet.embeddings) {
+        assert(e.cfb === null,
+            `110a: default (parseOleCfb unset) should leave cfb=null on every embedding (kind=${e.kind}, got ${e.cfb === null ? 'null' : 'object'})`);
+    }
+
+    // Also cross-check ole-embeddings — the Wave-8 fixture — stays cfb=null
+    // by default even though its .bin is not a real CFB (we never even try
+    // to parse it). This pins the default-off byte-stability invariant.
+    const { wb: wb2 } = await renderFixture('ole-embeddings');
+    for (const e of wb2.parsed.sheets[0].embeddings) {
+        assert(e.cfb === null,
+            `110b: ole-embeddings default path cfb should be null (kind=${e.kind})`);
+    }
+
+    // And confirm that with parseOleCfb=true, the ole-embeddings fixture's
+    // "OLE" bin (which is NOT a valid CFB — just 512 zero bytes after the
+    // magic) yields cfb=null (graceful failure, not a throw). The package
+    // entry stays cfb=null because package embeddings are not CFB.
+    const { wb: wb3 } = await renderFixture('ole-embeddings', { parseOleCfb: true });
+    for (const e of wb3.parsed.sheets[0].embeddings) {
+        assert(e.cfb === null,
+            `110c: ole-embeddings + parseOleCfb should still leave cfb=null (kind=${e.kind}) because the .bin isn't a real CFB and packages are skipped`);
+    }
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

@@ -13,8 +13,11 @@ import { parseConditionalFormatting, parseSqref, type ConditionalFormatting } fr
 import { bytesToDataUrl, sanitizeMediaMime } from './workbook';
 import { parseChart as parseChartModel, type ChartModel } from './chart-parser';
 import { parseSmartArt, type SmartArtModel } from './smartart-parser';
+import { parseCfb, type CfbModel } from './ole-cfb';
 export type { SmartArtModel, SmartArtNode } from './smartart-parser';
+export type { CfbModel, CfbStream } from './ole-cfb';
 export { parseSmartArt } from './smartart-parser';
+export { parseCfb } from './ole-cfb';
 
 // URL schemes we'll emit as an `<a href="…">` in the rendered sheet. Anything
 // outside this set (most importantly `javascript:` / `data:` / `vbscript:` /
@@ -563,6 +566,12 @@ export interface SheetEmbedding {
     size: number;
     dataUrl: string | null;
     altText: string | null;
+    // CFB stream list extracted from the raw `.bin` payload when the caller
+    // opted in via Options.parseOleCfb AND kind === 'ole'. Null otherwise
+    // (including when kind === 'package', since package embeddings are not
+    // CFB containers). The list is capped + guardrailed — see parseCfb() in
+    // src/ole-cfb.ts.
+    cfb: CfbModel | null;
 }
 
 // A defined table (<table> inside xl/tables/tableN.xml, referenced from
@@ -862,6 +871,7 @@ export class WorkbookParser {
             const embeddings = resolveEmbeddingsForSheet(
                 xmlPath, xml, parts, embeddingBytes, contentTypes,
                 this._options.inlineEmbeddings === true,
+                this._options.parseOleCfb === true,
             );
             sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, shapes, formControls, embeddings, pivots, slicers, timelines, comments, threadedComments, hyperlinkTargets, i, definedNames, metadata, smartArt));
         }
@@ -956,6 +966,7 @@ function resolveEmbeddingsForSheet(
     embeddingBytes: Record<string, Uint8Array>,
     contentTypes: ContentTypeMap,
     inline: boolean,
+    parseOleCfb: boolean,
 ): SheetEmbedding[] {
     const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
     const relsXml = parts[relsPath];
@@ -1025,6 +1036,12 @@ function resolveEmbeddingsForSheet(
                 dataUrl = bytesToDataUrl(bytes, contentType);
             }
         }
+        // Opt-in CFB extraction. Only ole payloads are CFB containers;
+        // packaged real files are their own format and shouldn't be parsed
+        // as CFB. parseCfb returns null on any error, so consumers can't
+        // distinguish "flag off" from "invalid CFB" without comparing the
+        // flag — intentional, keeps the API shape simple.
+        const cfb = (parseOleCfb && rel.kind === 'ole') ? parseCfb(bytes) : null;
         out.push({
             kind: rel.kind,
             contentType,
@@ -1037,6 +1054,7 @@ function resolveEmbeddingsForSheet(
             size: bytes.byteLength,
             dataUrl,
             altText: anchor?.altText ?? null,
+            cfb,
         });
     }
     return out;

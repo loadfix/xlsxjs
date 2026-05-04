@@ -5,8 +5,8 @@ import { HtmlRenderer } from './html-renderer';
 export { applyFormControlUpdate } from './html-renderer';
 import { h } from './html';
 
-export type { Workbook as ParsedWorkbook, Sheet, SheetView, Cell, RichTextRun, SharedString, PhoneticRun, FrozenPanes, AutoFilter, TableDef, SheetChart, SheetPivot, SheetSlicer, SheetTimeline, SheetExtensionUri, SheetImage, SheetEmbedding, SheetComment, ThreadedCommentEntry, SheetOutline, DefinedName, ColumnWidth, RowDimension, Hyperlink, DataValidationList, PageBreaks, PrintAreaRange, HeaderFooter, HeaderFooterZones, SheetSmartArt, SmartArtModel, SmartArtNode } from './workbook-parser';
-export { parseThreadedComments, isSafeHyperlinkHref, parseSmartArt } from './workbook-parser';
+export type { Workbook as ParsedWorkbook, Sheet, SheetView, Cell, RichTextRun, SharedString, PhoneticRun, FrozenPanes, AutoFilter, TableDef, SheetChart, SheetPivot, SheetSlicer, SheetTimeline, SheetExtensionUri, SheetImage, SheetEmbedding, SheetComment, ThreadedCommentEntry, SheetOutline, DefinedName, ColumnWidth, RowDimension, Hyperlink, DataValidationList, PageBreaks, PrintAreaRange, HeaderFooter, HeaderFooterZones, SheetSmartArt, SmartArtModel, SmartArtNode, CfbModel, CfbStream } from './workbook-parser';
+export { parseThreadedComments, isSafeHyperlinkHref, parseSmartArt, parseCfb } from './workbook-parser';
 export type { Styles, CellXf, FontStyle, FillStyle, BorderStyle, Dxf, UnderlineStyle } from './styles';
 export type { Theme, ColorRef } from './theme';
 export type { ConditionalFormatting, CfRule, CfRuleType, CfOperator, CellRange, Cfvo, ColorScale, DataBar, IconSet } from './conditional-format';
@@ -40,6 +40,15 @@ export interface Options {
     // model and DOM memory. Oversized payloads (>32 MiB) or MIMEs outside
     // the sanitizer's allowlist keep `dataUrl` null even when this is true.
     inlineEmbeddings: boolean;
+    // Opt-in OLE Compound File Binary parsing for raw `.bin` payloads
+    // attached via `/oleObject` rels. When true, each SheetEmbedding with
+    // kind === 'ole' gets its `cfb` field populated with the root CLSID and
+    // a capped list of streams (name + bytes). Used by downstream consumers
+    // to route the payload to a Word / Excel / equation renderer. The flag
+    // is orthogonal to `inlineEmbeddings` — CFB parsing runs on the raw
+    // bytes xlsxjs already has in memory; no `data:` URL is projected.
+    // Default off to keep Wave-8 golden output byte-stable.
+    parseOleCfb: boolean;
     // Controls whether classic chartSpace charts render as inline SVG
     // (default) or fall back to the dashed placeholder. Producers that
     // want to style their own chart widget — and consumers who only need
@@ -87,6 +96,7 @@ export const defaultOptions: Options = {
     showFormulas: false,
     formulaNotation: 'a1',
     inlineEmbeddings: false,
+    parseOleCfb: false,
     renderCharts: true,
     interactiveFormControls: false,
     interactiveSlicers: false,

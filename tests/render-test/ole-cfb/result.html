@@ -1,0 +1,133 @@
+<style data-xlsxjs="">.xlsx { font-family: system-ui, sans-serif; }
+.xlsx table { border-collapse: separate; border-spacing: 0; }
+.xlsx th, .xlsx td { border: 1px solid #d0d0d0; padding: 2px 6px; }
+.xlsx th { background: #f3f3f3; font-weight: normal; color: #555; }
+.xlsx td.xlsx-numeric { text-align: right; font-variant-numeric: tabular-nums; }
+.xlsx .xlsx-sheet-name { margin: 1rem 0 0.25rem; font-size: 1rem; font-weight: 600; }
+.xlsx .xlsx-frozen-col { position: sticky; left: 0; z-index: 1; background: inherit; }
+.xlsx .xlsx-frozen-row { position: sticky; top: 0; z-index: 2; background: inherit; }
+.xlsx .xlsx-frozen-both { position: sticky; left: 0; top: 0; z-index: 3; background: inherit; }
+.xlsx .xlsx-autofilter::after { content: " ▾"; color: #888; font-size: 0.85em; }
+.xlsx .xlsx-validation-list::after { content: " ▾"; color: #888; font-size: 0.85em; }
+.xlsx a.xlsx-hyperlink { color: #0563c1; text-decoration: underline; }
+.xlsx .xlsx-table-caption { font-size: 0.85em; color: #666; margin: 0.25rem 0 0; }
+.xlsx .xlsx-chart-placeholder {
+    border: 1px dashed #999; padding: 1em; margin: 0.5em 0;
+    color: #666; font-size: 0.9em; text-align: center;
+}
+.xlsx .xlsx-shape {
+    border: 1px solid #e0e0e0; border-radius: 2px;
+    padding: 0.5em; margin: 0.5em 0;
+    color: #555; font-size: 0.9em;
+    position: relative;
+}
+.xlsx .xlsx-shape[data-preset] { border-color: transparent; }
+.xlsx .xlsx-shape[data-kind="connector"] {
+    border-style: dashed; color: #888;
+}
+.xlsx .xlsx-shape[data-kind="connector"][data-preset] { border-style: none; }
+.xlsx .xlsx-shape > svg {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    pointer-events: none; z-index: 0;
+}
+.xlsx .xlsx-shape > pre {
+    margin: 0; white-space: pre-line;
+    font-family: inherit; font-size: inherit;
+    position: relative; z-index: 1;
+}
+.xlsx .xlsx-embedding {
+    border: 1px dashed #b0b0b0; border-radius: 2px;
+    padding: 0.5em; margin: 0.5em 0;
+    color: #555; font-size: 0.9em;
+    background: #fafafa;
+}
+.xlsx .xlsx-embedding > pre {
+    margin: 0; white-space: pre-wrap;
+    font-family: inherit; font-size: inherit;
+}
+.xlsx .xlsx-image-layer > .xlsx-embedding {
+    position: absolute; pointer-events: auto;
+    max-width: 320px;
+}
+.xlsx .xlsx-form-control {
+    position: absolute;
+    display: inline-flex; align-items: center; gap: 4px;
+    border: 1px dashed #bbb; border-radius: 2px;
+    padding: 2px 6px; margin: 0;
+    color: #333; background: rgba(255, 255, 255, 0.85);
+    font-size: 0.85em; pointer-events: auto;
+}
+.xlsx .xlsx-form-control[data-kind="button"] {
+    border-style: solid; background: #f3f3f3;
+}
+.xlsx .xlsx-form-control[data-kind="groupBox"] {
+    border-style: solid; background: transparent;
+}
+.xlsx .xlsx-form-control[data-kind="scrollbar"],
+.xlsx .xlsx-form-control[data-kind="spinner"] {
+    background: #eef2f7; color: #555;
+}
+.xlsx .xlsx-form-control > .xlsx-form-control-glyph {
+    font-size: 1em; line-height: 1; color: #333;
+}
+.xlsx .xlsx-form-control > legend {
+    font-size: 0.85em; color: #333; padding: 0 4px;
+}
+.xlsx .xlsx-spill-anchor { outline: 1px dashed #0066cc; outline-offset: -1px; }
+.xlsx .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
+.xlsx .xlsx-threaded { color: #0066cc; margin-left: 4px; cursor: help; }
+.xlsx .xlsx-shrink-to-fit { font-size: clamp(0.55em, 0.95em, 1em); overflow: hidden; }
+.xlsx.xlsx-no-gridlines th, .xlsx.xlsx-no-gridlines td { border: none; }
+.xlsx.xlsx-no-headers thead tr > th:first-child,
+.xlsx.xlsx-no-headers tbody tr > th:first-child { display: none; }
+.xlsx.xlsx-no-headers thead tr:first-child { display: none; }
+.xlsx .xlsx-outline-1 > th:first-child { padding-left: 0.5rem; }
+.xlsx .xlsx-outline-2 > th:first-child { padding-left: 1rem; }
+.xlsx .xlsx-outline-3 > th:first-child { padding-left: 1.5rem; }
+.xlsx .xlsx-outline-4 > th:first-child { padding-left: 2rem; }
+.xlsx .xlsx-outline-5 > th:first-child { padding-left: 2.5rem; }
+.xlsx .xlsx-outline-6 > th:first-child { padding-left: 3rem; }
+.xlsx .xlsx-outline-7 > th:first-child { padding-left: 3.5rem; }
+.xlsx col.xlsx-outline-1 { border-left: 2px solid #ddd; }
+.xlsx col.xlsx-outline-2 { border-left: 3px solid #ccc; }
+.xlsx col.xlsx-outline-3 { border-left: 4px solid #bbb; }
+.xlsx .xlsx-header, .xlsx .xlsx-footer {
+    display: grid; grid-template-columns: 1fr 1fr 1fr;
+    font-size: 0.85em; color: #666; margin: 0.5em 0;
+}</style>
+<section class="xlsx" data-sheet-name="CFB">
+<div class="xlsx-sheet-name">CFB</div>
+<div class="xlsx-image-layer" style="position: relative; height: 0px; pointer-events: none;">
+<aside class="xlsx-embedding" data-kind="ole" data-progid="Word.Document.12" data-filename="oleObject1.bin" data-content-type="application/vnd.openxmlformats-officedocument.oleObject" data-size="4096" data-anchor-col="1" data-anchor-row="1" data-anchor-end-col="3" data-anchor-end-row="3" style="left: 94px; top: 20px;">
+<pre>ole: oleObject1.bin
+type: application/vnd.openxmlformats-officedocument.oleObject
+size: 4096 bytes
+progId: Word.Document.12</pre>
+</aside>
+</div>
+<table>
+<colgroup>
+<col>
+<col>
+</colgroup>
+<thead>
+<tr>
+<th>
+</th>
+<th>A</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<th>1</th>
+<td>
+</td>
+</tr>
+<tr>
+<th>2</th>
+<td>CFB Word:</td>
+</tr>
+</tbody>
+</table>
+</section>
