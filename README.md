@@ -27,7 +27,7 @@ npm install xlsx-preview
 The public surface is:
 
 - `parseAsync(data, options)` — open an XLSX blob/ArrayBuffer/Uint8Array and
-  return the parsed workbook model (`{ sheets, styles, theme, … }`).
+  return the parsed workbook model (`{ sheets, styles, theme, date1904, … }`).
 - `renderWorkbook(wb, options)` — render a previously-parsed workbook into
   `<section class="xlsx">` elements (one per sheet).
 - `renderAsync(data, bodyContainer, styleContainer?, options)` — the common

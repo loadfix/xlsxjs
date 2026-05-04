@@ -132,15 +132,34 @@ already tracked elsewhere in this file is excluded.*
 - **Diagonal borders** (`border/diagonal` + `@diagonalUp`/`@diagonalDown`) — the crossed-out-cell convention; parser reads only the four orthogonal sides.
 
 ### Number formats
-- **Accounting formats** (numFmt codes with `_(` / `_)` padding) — the `_` pad-to-width operator is stripped as a literal today, collapsing accounting columns' trailing-paren alignment.
-- **Fill character** (`*` in a format code, e.g. `"$"* #,##0`) — repeats the next char to fill column width; common on accounting formats, currently rendered as a literal `*`.
 - **Fraction formats** (`# ?/?`, `# ??/??` — numFmt IDs 12/13 and custom) — displayed via the generic numeric path today, so "0.25" shows as `0.25` instead of `1/4`.
-- **Elapsed-time markers** (`[h]`/`[m]`/`[s]` inside format codes) — bracketed elapsed units are stripped without adding the accumulated elapsed value, so durations > 24h render wrong.
 - **Conditional section formats** (`[>100]#,##0;[Red]-#,##0`) — the bracketed conditional predicate is stripped and the first section is always used regardless of value.
 - **Colour modifiers in format codes** (`[Red]`, `[Blue]`, `[Color 14]`) — parsed as brackets and dropped; the intended per-section colour never reaches the td.
 - **Scientific notation** (numFmt IDs 11/48 and custom `0.00E+00`) — the E+NN exponent syntax is not expanded; numbers render via the generic numeric path.
-- **Locale currency symbols** (`[$€-2]`, `[$¥-411]`, `[$-409]`) — the locale-tagged currency/calendar prefix is stripped with the rest of the brackets, dropping the symbol.
-- **1904 date system** (`workbook/workbookPr/@date1904`) — the 1904 epoch flag is ignored; files authored on Mac Office pre-2011 render every date four years and one day off.
+
+## Resolved in fork
+
+- **Elapsed-time markers** (`[h]`/`[hh]`/`[m]`/`[mm]`/`[s]`/`[ss]`) — `formatDateTime`
+  now detects elapsed tokens before the bracket-strip pass and substitutes the
+  accumulated hours/minutes/seconds (serial × 24/1440/86400). Non-bracketed
+  tokens after the elapsed marker keep their modulo wall-clock meaning, so
+  `[h]:mm` on 1.5 renders "36:00". Harness scenario 34.
+- **Accounting padding** (`_<char>`) — `renderLiteralsAroundNumber` now emits
+  a single ASCII space per `_<char>` sequence instead of dropping both
+  characters silently, so `_( _) _-` forms align. Harness scenario 35.
+- **Fill character** (`*<char>`) — the sequence is now silently stripped
+  (previously the `*` surfaced as a literal in the output). Documented as a
+  compromise in the file header of `number-format.ts`: a web renderer can't
+  measure remaining column width without a layout pass. Harness scenario 35.
+- **Locale currency symbols** (`[$€-2]`, `[$¥-411]`, `[$-409]`) — a new
+  `extractLocaleCurrency` pass rewrites `[$<symbol>-<localeHex>]` to a quoted
+  literal carrying just the symbol before the generic bracket strip. Empty
+  symbols (`[$-409]`) become nothing. Harness scenario 36.
+- **1904 date system** — `Workbook.date1904` now lives on the Workbook model,
+  populated from `<workbookPr date1904="1"/>` via a new `parseWorkbookMeta`
+  reader. `formatNumber` takes an options bag with `date1904` that flips the
+  epoch from 1899-12-30 to 1904-01-01 (no leap-bug fudge). `html-renderer.ts`
+  threads the flag through per sheet. Harness scenario 37.
 
 ### Display & layout
 - **Sheet visibility state** (`workbook/sheets/sheet/@state` = `hidden`|`veryHidden`) — hidden and very-hidden sheets render as regular visible sheets; Excel's viewer omits them by default.

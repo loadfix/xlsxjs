@@ -11,12 +11,24 @@
 //   - Decimals (0.00, 0.0%)        → fixed-digit rounding
 //   - Dates (yyyy, yy, m, d, mmm)  → from Excel serial to Y/M/D components
 //   - Times (h, hh, mm, ss, AM/PM) → from fractional day component
+//   - Elapsed time ([h], [mm], [ss]) → accumulated units past the modulo
+//   - Accounting padding (_( _) _-) → one space per _<char> sequence
+//   - Fill character (*<char>)      → stripped (can't measure column width)
+//   - Locale currency ([$€-2])      → symbol preserved, locale id dropped
 //   - Text ("@")                   → the raw cell text unchanged
 //
 // Excel's format-code grammar supports positive;negative;zero;text sections.
 // We honour the split but only apply the matched section to the absolute
 // value. Colour codes ([Red], [Blue]) and conditional sections ([>100]) are
 // parsed but not rendered — they're dropped silently.
+//
+// Compromises worth flagging for downstream consumers:
+//   - `*<char>` is a "fill the remaining column width with <char>" marker in
+//     Excel. A web renderer can't measure remaining cell width without a
+//     layout pass, so we silently drop the marker rather than emit a bogus
+//     single repeat character. Accounting columns that rely on the fill to
+//     visually line up their currency symbol and digits will look slightly
+//     tighter than in Excel, but the digits themselves are correct.
 
 export interface FormatResult {
     text: string;
@@ -25,13 +37,20 @@ export interface FormatResult {
     numeric: boolean;
 }
 
+// Options passed through from the parsed workbook. `date1904` flips the
+// date-serial epoch from 1899-12-30 (PC convention with the historical leap
+// bug) to 1904-01-01 (Mac Office pre-2011 convention with no leap bug).
+export interface FormatOptions {
+    date1904?: boolean;
+}
+
 const NUMERIC_SECTION_INDEX = {
     positive: 0,
     negative: 1,
     zero: 2,
 } as const;
 
-export function formatNumber(value: string, formatCode: string): FormatResult {
+export function formatNumber(value: string, formatCode: string, options?: FormatOptions): FormatResult {
     if (formatCode === '' || formatCode.toLowerCase() === 'general') {
         return formatGeneral(value);
     }
@@ -56,15 +75,38 @@ export function formatNumber(value: string, formatCode: string): FormatResult {
     else sectionIndex = sections[NUMERIC_SECTION_INDEX.zero] ? NUMERIC_SECTION_INDEX.zero : NUMERIC_SECTION_INDEX.positive;
 
     const section = sections[sectionIndex] ?? formatCode;
-    const cleaned = stripSquareBracketModifiers(section);
+    // [$<symbol>-<localeHex>] is a locale-tagged currency marker. Pull out the
+    // symbol (if any) BEFORE stripSquareBracketModifiers eats the whole thing,
+    // then splice it back in at the same spot as a quoted literal so the rest
+    // of the pipeline treats it as an ordinary literal prefix.
+    const { code: sectionWithSymbol } = extractLocaleCurrency(section);
+    const cleaned = stripSquareBracketModifiers(sectionWithSymbol);
     // Negative numbers: the negative section format itself typically includes
     // the sign or parentheses. If we fall back to the positive section, prefix
     // a minus.
     let magnitude = Math.abs(num);
     if (num < 0 && sectionIndex === NUMERIC_SECTION_INDEX.positive) {
-        return { text: '-' + applyFormat(cleaned, magnitude), numeric: true };
+        return { text: '-' + applyFormat(cleaned, magnitude, options), numeric: true };
     }
-    return { text: applyFormat(cleaned, magnitude), numeric: true };
+    return { text: applyFormat(cleaned, magnitude, options), numeric: true };
+}
+
+// Find any [$<symbol>-<locale>] modifier and rewrite it in place as a quoted
+// literal carrying only the symbol. `[$-409]` (locale-only, no symbol) is
+// rewritten to empty. Non-locale brackets ([Red], [>100], [h]) are left alone.
+function extractLocaleCurrency(code: string): { code: string } {
+    return {
+        code: code.replace(/\[\$([^\]]*)\]/g, (_, inner: string) => {
+            // Inner layout: <symbol>-<localeHex>, or just <symbol>, or -<localeHex>.
+            const dashIdx = inner.indexOf('-');
+            const symbol = dashIdx >= 0 ? inner.slice(0, dashIdx) : inner;
+            if (!symbol) return '';
+            // Quote it so a `$` inside doesn't trip up downstream parsing, and
+            // so a stray number placeholder inside the symbol (unlikely but
+            // possible, e.g. "¥") renders verbatim.
+            return `"${symbol.replace(/"/g, '')}"`;
+        }),
+    };
 }
 
 function splitSections(code: string): string[] {
@@ -97,21 +139,31 @@ function splitSections(code: string): string[] {
 
 function stripSquareBracketModifiers(code: string): string {
     // Drop [Red], [Blue], [>100] etc. Interior of brackets may not contain a
-    // closing bracket, so a lazy match is fine.
-    return code.replace(/\[[^\]]*\]/g, '');
+    // closing bracket, so a lazy match is fine. Elapsed-time markers
+    // ([h], [hh], [m], [mm], [s], [ss]) are preserved — formatDateTime
+    // reads them directly to accumulate units past the modulo boundary.
+    return code.replace(/\[([^\]]*)\]/g, (match, inner: string) => {
+        if (/^(hh?|mm?|ss?)$/i.test(inner)) return match;
+        return '';
+    });
 }
 
-function applyFormat(code: string, value: number): string {
+function applyFormat(code: string, value: number, options?: FormatOptions): string {
     // Fast path: a "General" literal inside a section.
     if (code.trim().toLowerCase() === 'general') {
         return formatGeneralNumber(value);
+    }
+    // Elapsed-time markers forcibly put us on the date/time path even if the
+    // non-bracketed body has no date tokens (e.g. "[s]" alone).
+    if (/\[(hh?|mm?|ss?)\]/.test(code)) {
+        return formatDateTime(code, value, options);
     }
     // If any date/time token is present, treat the code as a date/time format.
     if (/[yMdhsmAP]/.test(stripQuotedLiterals(code))) {
         // Heuristic: "m" is month when adjacent to y/d, minute when adjacent
         // to h/s. The dedicated date path handles that.
         if (/[yMdAPhs]/.test(stripQuotedLiterals(code))) {
-            return formatDateTime(code, value);
+            return formatDateTime(code, value, options);
         }
     }
     return formatNumeric(code, value);
@@ -196,6 +248,22 @@ function renderLiteralsAroundNumber(code: string, numberText: string): string {
             i += 2;
             continue;
         }
+        if (c === '_') {
+            // `_<char>` = leave a space equal to the width of <char>. We emit
+            // a single ASCII space as a reasonable proxy; this powers
+            // accounting-style `_( _) _-` alignment even though we can't match
+            // the glyph width exactly.
+            if (i + 1 < code.length) out += ' ';
+            i += 2;
+            continue;
+        }
+        if (c === '*') {
+            // `*<char>` = fill the remaining column width with <char>. Without
+            // a layout pass we can't know how much to emit, so drop both
+            // characters. See the file-header compromise note.
+            i += 2;
+            continue;
+        }
         if (c === '0' || c === '#' || c === '?' || c === '.' || c === ',') {
             if (!inserted) {
                 out += numberText;
@@ -236,20 +304,27 @@ function formatGeneralNumber(n: number): string {
 // counted from 1900-01-01; the conventional fix is to treat serial 0 as
 // 1899-12-30 so serial 1 = 1900-01-01 and serial 60 = 1900-02-28 (we skip
 // 29th, matching Excel).
-const EPOCH_MS = Date.UTC(1899, 11, 30); // 1899-12-30 UTC
+//
+// The 1904 date system (Mac Office pre-2011) has no such leap bug: serial 0
+// is 1904-01-01 exactly, and every serial counts forward from there with no
+// fudge. Workbook flag `workbookPr/@date1904` selects the mode.
+const EPOCH_MS_1900 = Date.UTC(1899, 11, 30); // 1899-12-30 UTC
+const EPOCH_MS_1904 = Date.UTC(1904, 0, 1);   // 1904-01-01 UTC
 const MS_PER_DAY = 86400000;
 
-function serialToDate(serial: number): Date {
+function serialToDate(serial: number, date1904: boolean): Date {
     // Round the ms-within-day to nearest second to avoid floating-point
     // artifacts (e.g. 0.75 * 86400 = 64799.999… → 23:59:60).
     const whole = Math.floor(serial);
     const frac = serial - whole;
-    const ms = EPOCH_MS + whole * MS_PER_DAY + Math.round(frac * MS_PER_DAY);
+    const epoch = date1904 ? EPOCH_MS_1904 : EPOCH_MS_1900;
+    const ms = epoch + whole * MS_PER_DAY + Math.round(frac * MS_PER_DAY);
     return new Date(ms);
 }
 
-function formatDateTime(code: string, value: number): string {
-    const date = serialToDate(value);
+function formatDateTime(code: string, value: number, options?: FormatOptions): string {
+    const date1904 = options?.date1904 === true;
+    const date = serialToDate(value, date1904);
     const Y = date.getUTCFullYear();
     const M = date.getUTCMonth() + 1;
     const D = date.getUTCDate();
@@ -259,6 +334,16 @@ function formatDateTime(code: string, value: number): string {
     const ampm = /AM\/PM|am\/pm/.test(stripQuotedLiterals(code));
     const h12 = ((h24 + 11) % 12) + 1;
     const hour = ampm ? h12 : h24;
+
+    // Elapsed-time accumulators: total hours / minutes / seconds since the
+    // epoch, floored to integer units. When the format code carries `[h]`
+    // etc. these replace the wall-clock value, and any remaining non-bracketed
+    // minute/second tokens render the remainder inside the next-smaller unit.
+    // We use the raw serial here (not the rounded Date) so that e.g. serial
+    // 1.5 with `[h]:mm` is 36 hours exactly, not 35:59.
+    const totalHours = Math.floor(value * 24);
+    const totalMinutes = Math.floor(value * 1440);
+    const totalSeconds = Math.floor(value * 86400);
 
     // Token walker. "m" is month when adjacent to y or d, minute when adjacent
     // to h or s. Track whether we just saw an h/hh token to disambiguate.
@@ -279,14 +364,24 @@ function formatDateTime(code: string, value: number): string {
             continue;
         }
         if (c === '[' ) {
-            // [h] etc. are elapsed-time markers; we just strip them here.
+            // [h] / [hh] / [m] / [mm] / [s] / [ss] are elapsed-time markers —
+            // the accumulated count of that unit since serial 0, not the
+            // modulo wall-clock value. Any other bracket (e.g. [Red] or a
+            // stripped locale tag) is skipped silently.
             const end = code.indexOf(']', i);
             if (end < 0) { i++; continue; }
-            const inner = code.slice(i + 1, end);
+            const inner = code.slice(i + 1, end).toLowerCase();
             i = end + 1;
-            if (inner.toLowerCase() === 'h') { out += String(h24); lastSawHour = true; }
-            else if (inner.toLowerCase() === 'mm') { out += pad2(m); lastSawHour = false; }
-            else if (inner.toLowerCase() === 'ss') { out += pad2(s); lastSawHour = false; }
+            if (inner === 'h' || inner === 'hh') {
+                out += inner.length >= 2 ? pad2(totalHours) : String(totalHours);
+                lastSawHour = true;
+            } else if (inner === 'm' || inner === 'mm') {
+                out += inner.length >= 2 ? pad2(totalMinutes) : String(totalMinutes);
+                lastSawHour = false;
+            } else if (inner === 's' || inner === 'ss') {
+                out += inner.length >= 2 ? pad2(totalSeconds) : String(totalSeconds);
+                lastSawHour = false;
+            }
             continue;
         }
         const run = readRun(code, i, c.toLowerCase());
