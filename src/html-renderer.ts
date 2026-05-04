@@ -2,7 +2,7 @@
 // sheet, each containing an <h2> sheet name and a <table> of the cells.
 // Numeric cells get a numeric-aligned class; other kinds render as text.
 
-import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, SheetShape, SheetImage, SheetFormControl, RowDimension, ThreadedCommentEntry, Hyperlink, PhoneticRun } from './workbook-parser';
+import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, SheetShape, SheetSlicer, SheetTimeline, SheetImage, SheetFormControl, RowDimension, ThreadedCommentEntry, Hyperlink, PhoneticRun } from './workbook-parser';
 import { isSafeHyperlinkHref } from './workbook-parser';
 import { indexToColumnLetters, emuToPx } from './utils';
 import { h } from './html';
@@ -698,6 +698,19 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
         section.appendChild(renderShape(shape));
     }
 
+    // Slicers + timelines: detect-only placeholders. Excel's live widgets are
+    // clickable filter affordances; xlsxjs emits a summary <aside> per
+    // widget so the DOM reflects the slicer/timeline's presence + current
+    // selection without trying to reproduce the interactive UI. Same
+    // security contract as shapes — attacker-controlled strings reach the
+    // DOM only via textContent / setAttribute.
+    for (const slicer of sheet.slicers) {
+        section.appendChild(renderSlicer(slicer));
+    }
+    for (const timeline of sheet.timelines) {
+        section.appendChild(renderTimeline(timeline));
+    }
+
     // Header / footer — rendered as 3-column grids after the table. Zone
     // strings come pre-substituted (dates / sheet name / literal markers);
     // they're attacker-controlled so they reach the DOM only via textContent.
@@ -947,6 +960,73 @@ function renderFormControl(
         txt.className = 'xlsx-form-control-label';
         txt.textContent = fc.label;
         aside.appendChild(txt);
+    }
+    return aside;
+}
+
+// Build an `<aside class="xlsx-slicer">` carrying the slicer's caption +
+// current selection. xlsxjs does NOT render the clickable slicer UI —
+// this is a read-only summary. All attacker-controlled strings reach
+// the DOM via textContent / setAttribute only. aria-hidden="false" so
+// screen readers pick the aside up (future wave will lay it out in-flow).
+function renderSlicer(slicer: SheetSlicer): HTMLElement {
+    const aside = document.createElement('aside');
+    aside.className = 'xlsx-slicer';
+    aside.setAttribute('aria-hidden', 'false');
+    aside.setAttribute('data-name', slicer.name);
+    if (slicer.caption) aside.setAttribute('data-caption', slicer.caption);
+    if (slicer.sourceName) aside.setAttribute('data-source', slicer.sourceName);
+    if (slicer.style) aside.setAttribute('data-style', slicer.style);
+
+    // Header carries the caption (or the slicer's raw name when no caption
+    // was declared). textContent keeps attacker-controlled strings inert.
+    const header = document.createElement('header');
+    header.textContent = slicer.caption ?? slicer.name;
+    aside.appendChild(header);
+
+    // Selected-item list. Empty array stays rendered as an empty <ul> so
+    // the DOM shape is stable whether Excel wrote "all selected"
+    // (no explicit items) or an explicit selection set.
+    const ul = document.createElement('ul');
+    for (const item of slicer.selectedItems) {
+        const li = document.createElement('li');
+        li.textContent = item;
+        ul.appendChild(li);
+    }
+    aside.appendChild(ul);
+    return aside;
+}
+
+// Build an `<aside class="xlsx-timeline">` carrying the timeline's caption +
+// active level + selected date range. Same read-only contract as the slicer
+// aside. When a selected range is populated we emit a small
+// `<span>start → end</span>` label; otherwise the caption alone lands in
+// the header.
+function renderTimeline(timeline: SheetTimeline): HTMLElement {
+    const aside = document.createElement('aside');
+    aside.className = 'xlsx-timeline';
+    aside.setAttribute('aria-hidden', 'false');
+    aside.setAttribute('data-name', timeline.name);
+    if (timeline.caption) aside.setAttribute('data-caption', timeline.caption);
+    if (timeline.sourceName) aside.setAttribute('data-source', timeline.sourceName);
+    if (timeline.level) aside.setAttribute('data-level', timeline.level);
+    if (timeline.style) aside.setAttribute('data-style', timeline.style);
+
+    const header = document.createElement('header');
+    header.textContent = timeline.caption ?? timeline.name;
+    aside.appendChild(header);
+
+    if (timeline.selectedRange) {
+        const { start, end } = timeline.selectedRange;
+        if (start || end) {
+            const label = document.createElement('span');
+            // We format the range with a plain " → " separator; start/end
+            // are the raw ISO-like strings Excel persisted, e.g.
+            // "2023-01-01T00:00:00". Consumers wanting a localised format
+            // can read the data-level + re-format from the parsed model.
+            label.textContent = `${start ?? ''} → ${end ?? ''}`;
+            aside.appendChild(label);
+        }
     }
     return aside;
 }

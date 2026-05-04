@@ -3048,6 +3048,131 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 88. slicers-timelines parser: Sheet.slicers + Sheet.timelines populate ─
+// The hand-built fixture (scripts/make-slicers-timelines-fixture.mjs)
+// wires exactly one slicer (Region) and one timeline (Date) to the only
+// sheet. We verify the parser surfaces each with the expected caption /
+// sourceName / selection shape. Unselected item (East) must NOT land in
+// selectedItems — the parser only reports items flagged s="1".
+{
+    const { wb } = await renderFixture('slicers-timelines');
+    const sheet = wb.parsed.sheets[0];
+    assert(Array.isArray(sheet.slicers), '88a: Sheet.slicers should be an array');
+    assert(sheet.slicers.length === 1,
+        `88b: expected 1 slicer in fixture (got ${sheet.slicers.length})`);
+    assert(Array.isArray(sheet.timelines), '88c: Sheet.timelines should be an array');
+    assert(sheet.timelines.length === 1,
+        `88d: expected 1 timeline in fixture (got ${sheet.timelines.length})`);
+
+    const slicer = sheet.slicers[0];
+    assert(slicer.name === 'SlicerRegion',
+        `88e: slicer.name should be "SlicerRegion" (got ${JSON.stringify(slicer.name)})`);
+    assert(slicer.caption === 'Region "A"',
+        `88f: slicer.caption should preserve the ASCII double quote (got ${JSON.stringify(slicer.caption)})`);
+    assert(slicer.sourceName === 'Region',
+        `88g: slicer.sourceName should resolve from the cache (got ${JSON.stringify(slicer.sourceName)})`);
+    assert(Array.isArray(slicer.selectedItems),
+        '88h: slicer.selectedItems should be an array');
+    assert(slicer.selectedItems.length === 2,
+        `88i: expected 2 selected items (North + South) (got ${slicer.selectedItems.length})`);
+    assert(slicer.selectedItems.includes('North') && slicer.selectedItems.includes('South'),
+        `88j: selectedItems should include North + South (got ${JSON.stringify(slicer.selectedItems)})`);
+    assert(!slicer.selectedItems.includes('East'),
+        '88k: unselected item "East" must NOT surface in selectedItems');
+    assert(slicer.showCaption === true,
+        `88l: slicer.showCaption should default to true (got ${slicer.showCaption})`);
+    assert(slicer.columnCount === 1,
+        `88m: slicer.columnCount should be 1 (got ${slicer.columnCount})`);
+
+    const timeline = sheet.timelines[0];
+    assert(timeline.name === 'TimelineDate',
+        `88n: timeline.name should be "TimelineDate" (got ${JSON.stringify(timeline.name)})`);
+    assert(timeline.level === 'months',
+        `88o: timeline.level should normalise to "months" (got ${JSON.stringify(timeline.level)})`);
+    assert(timeline.selectedRange !== null,
+        '88p: timeline.selectedRange should be populated when startDate/endDate are declared');
+    if (timeline.selectedRange) {
+        assert(timeline.selectedRange.start === '2023-01-01T00:00:00',
+            `88q: timeline.selectedRange.start should be "2023-01-01T00:00:00" (got ${JSON.stringify(timeline.selectedRange.start)})`);
+        assert(timeline.selectedRange.end === '2023-12-31T00:00:00',
+            `88r: timeline.selectedRange.end should be "2023-12-31T00:00:00" (got ${JSON.stringify(timeline.selectedRange.end)})`);
+    }
+    assert(timeline.sourceName === 'Date',
+        `88s: timeline.sourceName should resolve from the cache (got ${JSON.stringify(timeline.sourceName)})`);
+}
+
+// ── 89. slicers-timelines renderer: one <aside class="xlsx-slicer"> ───────
+// The renderer emits one <aside> per slicer. We verify the aside's
+// data-name / data-caption attributes survive the double quote in
+// caption (setAttribute HTML-encodes it as &quot; in outerHTML) and the
+// selected-item list reaches the DOM as one <li> per selectedItem.
+{
+    const { container } = await renderFixture('slicers-timelines');
+    const asides = container.querySelectorAll('section.xlsx aside.xlsx-slicer');
+    assert(asides.length === 1,
+        `89a: expected 1 <aside class="xlsx-slicer"> (got ${asides.length})`);
+
+    const aside = asides[0];
+    assert(aside.getAttribute('data-name') === 'SlicerRegion',
+        `89b: aside data-name should be "SlicerRegion" (got ${JSON.stringify(aside.getAttribute('data-name'))})`);
+    // DOM round-trip: getAttribute returns the raw string; the HTML
+    // serialisation of the attribute must escape the ASCII double quote.
+    assert(aside.getAttribute('data-caption') === 'Region "A"',
+        `89c: aside data-caption should preserve the raw caption (got ${JSON.stringify(aside.getAttribute('data-caption'))})`);
+    assert(aside.outerHTML.includes('data-caption="Region &quot;A&quot;"'),
+        `89d: serialised data-caption should HTML-encode the double quote (got ${aside.outerHTML})`);
+    // aria-hidden="false" signals the aside is visible to screen readers.
+    assert(aside.getAttribute('aria-hidden') === 'false',
+        `89e: aside should declare aria-hidden="false" (got ${JSON.stringify(aside.getAttribute('aria-hidden'))})`);
+
+    // Header carries the caption (textContent path — attacker strings
+    // reach the DOM as text, not HTML).
+    const header = aside.querySelector('header');
+    assert(header !== null, '89f: aside should contain a <header>');
+    assert(header.textContent === 'Region "A"',
+        `89g: header textContent should be the caption (got ${JSON.stringify(header?.textContent)})`);
+
+    // One <li> per selected item, in declared order.
+    const items = aside.querySelectorAll('ul > li');
+    assert(items.length === 2,
+        `89h: expected 2 <li>s under the slicer aside (got ${items.length})`);
+    const itemTexts = [...items].map((li) => li.textContent);
+    assert(itemTexts.includes('North') && itemTexts.includes('South'),
+        `89i: <li>s should cover North + South (got ${JSON.stringify(itemTexts)})`);
+}
+
+// ── 90. slicers-timelines renderer: <aside class="xlsx-timeline"> data ────
+// One aside per timeline. We verify data-level="months" + the selected-
+// range <span> textContent carries the start → end formatted label.
+{
+    const { container } = await renderFixture('slicers-timelines');
+    const asides = container.querySelectorAll('section.xlsx aside.xlsx-timeline');
+    assert(asides.length === 1,
+        `90a: expected 1 <aside class="xlsx-timeline"> (got ${asides.length})`);
+
+    const aside = asides[0];
+    assert(aside.getAttribute('data-level') === 'months',
+        `90b: aside data-level should be "months" (got ${JSON.stringify(aside.getAttribute('data-level'))})`);
+    assert(aside.getAttribute('data-name') === 'TimelineDate',
+        `90c: aside data-name should be "TimelineDate" (got ${JSON.stringify(aside.getAttribute('data-name'))})`);
+    assert(aside.getAttribute('aria-hidden') === 'false',
+        `90d: aside should declare aria-hidden="false" (got ${JSON.stringify(aside.getAttribute('aria-hidden'))})`);
+
+    // Selected-range label. The renderer formats `start → end` with a
+    // Unicode right-arrow separator; both endpoints should land verbatim
+    // since the raw ISO-like strings Excel persists are not re-parsed.
+    const span = aside.querySelector('span');
+    assert(span !== null, '90e: timeline aside should contain a <span> range label');
+    if (span) {
+        assert(span.textContent?.includes('2023-01-01T00:00:00'),
+            `90f: range label should contain the start date (got ${JSON.stringify(span.textContent)})`);
+        assert(span.textContent?.includes('2023-12-31T00:00:00'),
+            `90g: range label should contain the end date (got ${JSON.stringify(span.textContent)})`);
+        assert(span.textContent?.includes('→'),
+            `90h: range label should use the Unicode right-arrow separator (got ${JSON.stringify(span.textContent)})`);
+    }
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
