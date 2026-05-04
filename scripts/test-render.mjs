@@ -1061,6 +1061,109 @@ async function renderFixture(path, options) {
         `37d: fixture should expose date1904=false by default (got ${wb.parsed.date1904})`);
 }
 
+// ── 41. Hyperlinks: model + rels → target URL for safe + unsafe entries ──
+{
+    const { wb } = await renderFixture('hyperlinks-and-validation');
+    const sheet = wb.parsed.sheets[0];
+
+    assert(sheet.hyperlinks.length === 2, `41a: expected 2 hyperlinks (got ${sheet.hyperlinks.length})`);
+    const byKey = sheet.hyperlinks.reduce((acc, h) => { acc[`${h.row},${h.col}`] = h; return acc; }, {});
+    const a2 = byKey['1,0'];
+    const a3 = byKey['2,0'];
+    assert(a2 && a2.target === 'https://example.com',
+        `41b: A2 hyperlink target should be https://example.com (got ${JSON.stringify(a2?.target)})`);
+    assert(a2.tooltip === 'visit example',
+        `41c: A2 tooltip should be "visit example" (got ${JSON.stringify(a2?.tooltip)})`);
+    assert(a3 && a3.target === 'javascript:alert(1)',
+        `41d: A3 hyperlink target should carry the attacker URL on the model (got ${JSON.stringify(a3?.target)})`);
+
+    // isSafeHyperlinkHref is re-exported from the UMD; verify directly.
+    const { isSafeHyperlinkHref } = globalThis.xlsx;
+    assert(typeof isSafeHyperlinkHref === 'function', '41e: isSafeHyperlinkHref should be re-exported');
+    assert(isSafeHyperlinkHref('https://example.com') === true, '41f: https accepted');
+    assert(isSafeHyperlinkHref('http://example.com') === true, '41g: http accepted');
+    assert(isSafeHyperlinkHref('mailto:a@b.example') === true, '41h: mailto accepted');
+    assert(isSafeHyperlinkHref('tel:+1-555-0100') === true, '41i: tel accepted');
+    assert(isSafeHyperlinkHref('#anchor') === true, '41j: fragment accepted');
+    assert(isSafeHyperlinkHref('foo/bar.html') === true, '41k: relative path accepted');
+    // Attacker URLs: every hostile scheme should be rejected.
+    for (const hostile of [
+        'javascript:alert(1)',
+        'JAVASCRIPT:alert(1)',
+        ' javascript:alert(1)',
+        'data:text/html,<script>alert(1)</script>',
+        'vbscript:msgbox(1)',
+        'file:///etc/passwd',
+        'blob:https://evil.example/abc',
+    ]) {
+        assert(isSafeHyperlinkHref(hostile) === false,
+            `41l: hostile URL ${JSON.stringify(hostile)} must be rejected`);
+    }
+}
+
+// ── 42. Hyperlink render: safe A2 gets an anchor; unsafe A3 stays text ────
+{
+    const { container } = await renderFixture('hyperlinks-and-validation');
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    // sheet rows: r=1 (A2) is rendered row index 1, r=2 (A3) is index 2.
+    const a2Td = rows[1].querySelectorAll('td')[0];
+    const a3Td = rows[2].querySelectorAll('td')[0];
+
+    // A2: wrapped in an <a href="https://example.com">click me</a>.
+    const a2Anchor = a2Td.querySelector('a.xlsx-hyperlink');
+    assert(!!a2Anchor, '42a: A2 should contain an <a.xlsx-hyperlink>');
+    assert(a2Anchor.getAttribute('href') === 'https://example.com',
+        `42b: A2 anchor href (got ${a2Anchor?.getAttribute('href')})`);
+    assert(a2Anchor.textContent === 'click me',
+        `42c: A2 anchor text should be "click me" (got ${JSON.stringify(a2Anchor?.textContent)})`);
+    assert(a2Anchor.getAttribute('target') === '_blank', '42d: A2 anchor target=_blank');
+    assert(/noopener/.test(a2Anchor.getAttribute('rel') ?? ''), '42e: A2 anchor rel carries noopener');
+    assert(a2Anchor.getAttribute('title') === 'visit example',
+        `42f: A2 anchor title from tooltip (got ${a2Anchor?.getAttribute('title')})`);
+
+    // A3: attacker URL should be REJECTED — no anchor, just the cell text.
+    const a3Anchor = a3Td.querySelector('a');
+    assert(a3Anchor === null, `42g: A3 attacker URL should NOT be wrapped in an anchor (got ${a3Anchor?.outerHTML})`);
+    assert(a3Td.textContent === 'danger',
+        `42h: A3 should render as inert text "danger" (got ${JSON.stringify(a3Td.textContent)})`);
+    // Extra belt-and-braces: no element in the whole sheet carries the
+    // javascript: URL, no matter where.
+    const allAnchors = container.querySelectorAll('a');
+    for (const a of allAnchors) {
+        assert(!/javascript:/i.test(a.getAttribute('href') ?? ''),
+            `42i: no anchor should carry a javascript: URL (got "${a.getAttribute('href')}")`);
+    }
+}
+
+// ── 43. Data validation: B2..B4 carry list class + pipe-delimited options ─
+{
+    const { wb, container } = await renderFixture('hyperlinks-and-validation');
+    const sheet = wb.parsed.sheets[0];
+
+    assert(sheet.dataValidationLists.length === 1,
+        `43a: expected 1 list validation range (got ${sheet.dataValidationLists.length})`);
+    const v = sheet.dataValidationLists[0];
+    assert(v.col === 1 && v.row === 1 && v.endCol === 1 && v.endRow === 3,
+        `43b: validation range should cover B2:B4 (got ${JSON.stringify(v)})`);
+    assert(Array.isArray(v.options) && v.options.join(',') === 'Red,Green,Blue',
+        `43c: options should be ["Red","Green","Blue"] (got ${JSON.stringify(v.options)})`);
+
+    // DOM: each of B2, B3, B4 should carry the list class + options attribute.
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    for (const rowIdx of [1, 2, 3]) {
+        const td = rows[rowIdx].querySelectorAll('td')[1];
+        assert(td.classList.contains('xlsx-validation-list'),
+            `43d·${rowIdx}: B${rowIdx + 1} td should carry .xlsx-validation-list (classes: "${td.className}")`);
+        assert(td.getAttribute('data-validation-options') === 'Red|Green|Blue',
+            `43e·${rowIdx}: B${rowIdx + 1} td should carry data-validation-options="Red|Green|Blue" (got "${td.getAttribute('data-validation-options')}")`);
+    }
+
+    // A2 / A3 / cells outside the validation range: no class applied.
+    const a2Td = rows[1].querySelectorAll('td')[0];
+    assert(!a2Td.classList.contains('xlsx-validation-list'),
+        `43f: A2 should NOT carry the validation class`);
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

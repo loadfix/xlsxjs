@@ -606,3 +606,61 @@ await writeFixture('merged', {
     writeFileSync(out, buf);
     console.log(`wrote ${out} (${buf.length} bytes)`);
 }
+
+// ── hyperlinks-and-validation ─────────────────────────────────────────────
+// Exercises both the hyperlink path (URL allowlist at render) and the
+// type="list" data-validation surface. Layout:
+//   A2 = "click me" (shared string), hyperlink rel → https://example.com
+//   A3 = "danger"   (shared string), hyperlink rel → javascript:alert(1)
+//                                                     (renderer MUST reject)
+//   B2..B4 = type="list" data-validation with options "Red,Green,Blue".
+//
+// Note the two hyperlinks share the same <hyperlinks> container but point to
+// different rel ids. The renderer is expected to wrap A2's <td> in an
+// <a href="https://example.com"> while leaving A3 as plain text.
+{
+    const outDir = resolve(repo, 'tests/render-test/hyperlinks-and-validation');
+    mkdirSync(outDir, { recursive: true });
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+</Types>`);
+    zip.file('_rels/.rels', rootRels);
+    zip.file('xl/_rels/workbook.xml.rels', workbookRels);
+    zip.file('xl/workbook.xml', workbookXml('Links'));
+    zip.file('xl/sharedStrings.xml', sharedStringsXml(['click me', 'danger']));
+    // Sheet rels: two hyperlink rels with TargetMode="External". rId1 →
+    // safe https target; rId2 → attacker javascript: URL that must be
+    // stripped at render time by isSafeHyperlinkHref.
+    zip.file('xl/worksheets/_rels/sheet1.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com" TargetMode="External"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="javascript:alert(1)" TargetMode="External"/>
+</Relationships>`);
+    zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+           xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheetData>
+    <row r="2"><c r="A2" t="s"><v>0</v></c></row>
+    <row r="3"><c r="A3" t="s"><v>1</v></c></row>
+  </sheetData>
+  <hyperlinks>
+    <hyperlink ref="A2" r:id="rId1" tooltip="visit example"/>
+    <hyperlink ref="A3" r:id="rId2"/>
+  </hyperlinks>
+  <dataValidations count="1">
+    <dataValidation type="list" sqref="B2:B4" allowBlank="1">
+      <formula1>"Red,Green,Blue"</formula1>
+    </dataValidation>
+  </dataValidations>
+</worksheet>`);
+    const buf = await zip.generateAsync({ type: 'nodebuffer' });
+    const out = resolve(outDir, 'workbook.xlsx');
+    writeFileSync(out, buf);
+    console.log(`wrote ${out} (${buf.length} bytes)`);
+}
