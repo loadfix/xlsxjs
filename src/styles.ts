@@ -46,8 +46,41 @@ export interface BorderStyle {
 }
 
 export interface Alignment {
-    horizontal: 'left' | 'right' | 'center' | 'justify' | null;
-    vertical: 'top' | 'middle' | 'bottom' | null;
+    horizontal: 'left' | 'right' | 'center' | 'justify' | 'distributed' | 'centerContinuous' | 'fill' | null;
+    vertical: 'top' | 'middle' | 'bottom' | 'justify' | 'distributed' | null;
+    // True when <alignment @wrapText="1"/> is present. Renderer maps this to
+    // white-space: normal + word-break so multi-line content stays in cell.
+    wrapText: boolean;
+    // True when <alignment @shrinkToFit="1"/> is present. CSS cannot fully
+    // replicate Excel's shrink behaviour (which measures the rendered text
+    // against cell width), so the renderer tags the td with a class and
+    // leaves fine-tuning to the consumer.
+    shrinkToFit: boolean;
+    // Indent level in Excel character-width units. Conventionally 1 unit ≈
+    // 0.5em; applied as paddingLeft/paddingRight depending on horizontal
+    // alignment + reading order.
+    indent: number;
+    // 0..180 = rotation in degrees (counter-clockwise); 255 = stacked
+    // vertical (East-Asian convention). null = not specified.
+    textRotation: number | null;
+    // 0 = context (default), 1 = LTR, 2 = RTL. 0 leaves direction unset on
+    // the td; 2 emits direction: rtl.
+    readingOrder: 0 | 1 | 2;
+}
+
+// The "untouched" default. Factored out so cellXf and cellStyleXf share the
+// same baseline and the renderer can cheaply check "is any alignment set?"
+// by comparing against this shape.
+function defaultAlignment(): Alignment {
+    return {
+        horizontal: null,
+        vertical: null,
+        wrapText: false,
+        shrinkToFit: false,
+        indent: 0,
+        textRotation: null,
+        readingOrder: 0,
+    };
 }
 
 export interface CellXf {
@@ -331,8 +364,6 @@ function parseCellXf(el: Element): CellXf {
     const bool = (attr: string) => el.getAttribute(attr) === '1';
     const num = (attr: string) => Number(el.getAttribute(attr) ?? '0') | 0;
     const alignEl = el.getElementsByTagNameNS(NS_MAIN, 'alignment').item(0);
-    const h = alignEl?.getAttribute('horizontal') ?? null;
-    const v = alignEl?.getAttribute('vertical') ?? null;
     const xfIdAttr = el.getAttribute('xfId');
     const xfId = xfIdAttr != null && Number.isFinite(Number(xfIdAttr)) ? Number(xfIdAttr) : -1;
     return {
@@ -346,10 +377,47 @@ function parseCellXf(el: Element): CellXf {
         applyFill: bool('applyFill'),
         applyBorder: bool('applyBorder'),
         applyAlignment: bool('applyAlignment'),
-        alignment: {
-            horizontal: (h === 'left' || h === 'right' || h === 'center' || h === 'justify') ? h : null,
-            vertical: (v === 'top' || v === 'middle' || v === 'bottom') ? v : null,
-        },
+        alignment: parseAlignment(alignEl),
+    };
+}
+
+// Parse an <alignment/> child of an <xf>. Values are validated against a
+// strict enum per ECMA-376 §18.8.1; anything unrecognised falls back to
+// null (horizontal/vertical) or the neutral default (booleans, numbers).
+function parseAlignment(el: Element | null): Alignment {
+    if (!el) return defaultAlignment();
+    const h = el.getAttribute('horizontal');
+    const v = el.getAttribute('vertical');
+    const horizontal: Alignment['horizontal'] =
+        h === 'left' || h === 'right' || h === 'center' || h === 'justify' ||
+        h === 'distributed' || h === 'centerContinuous' || h === 'fill' ? h : null;
+    const vertical: Alignment['vertical'] =
+        v === 'top' || v === 'middle' || v === 'bottom' ||
+        v === 'justify' || v === 'distributed' ? v : null;
+    const indentAttr = el.getAttribute('indent');
+    const indent = indentAttr != null && Number.isFinite(Number(indentAttr)) ? Math.max(0, Math.floor(Number(indentAttr))) : 0;
+    const rotAttr = el.getAttribute('textRotation');
+    let textRotation: number | null = null;
+    if (rotAttr != null) {
+        const n = Number(rotAttr);
+        // Per spec: 0..180 inclusive is a rotation angle; 255 is the
+        // stacked-vertical marker. Anything else is ignored.
+        if (Number.isFinite(n) && ((n >= 0 && n <= 180) || n === 255)) {
+            textRotation = Math.round(n);
+        }
+    }
+    const roAttr = el.getAttribute('readingOrder');
+    let readingOrder: 0 | 1 | 2 = 0;
+    if (roAttr === '1') readingOrder = 1;
+    else if (roAttr === '2') readingOrder = 2;
+    return {
+        horizontal,
+        vertical,
+        wrapText: el.getAttribute('wrapText') === '1',
+        shrinkToFit: el.getAttribute('shrinkToFit') === '1',
+        indent,
+        textRotation,
+        readingOrder,
     };
 }
 

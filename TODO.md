@@ -4,6 +4,21 @@ Everything that the real-world Excel-365 smoke test (see
 `scripts/smoke-test.mjs`) surfaced against `/mnt/data/Temp/365/*.xlsx`,
 plus pre-existing known gaps. Organised by effort tier, not by visibility.
 
+## Resolved in fork
+
+- **Alignment flags on `xf/alignment/`**
+  (`feat/alignment-flags`) — `wrapText`, `shrinkToFit`, `indent`,
+  `textRotation` (including `255` = stacked vertical), widened
+  `horizontal` (`justify` / `distributed` / `centerContinuous` /
+  `fill`) and `vertical` (`justify` / `distributed`) enums, and
+  `readingOrder` (0 context / 1 LTR / 2 RTL) now parse into
+  `Alignment` and apply to the td via `applyAlignment`. CSS
+  compromises: `shrinkToFit` is an `.xlsx-shrink-to-fit` class
+  (browsers have no auto-fit rule); `fill` aligns to start (no pure
+  CSS "repeat to fill"); `distributed`/`justify` vertical
+  approximate as `middle`; rotated cells use `transform:rotate(…)`
+  inside the td, which doesn't grow the cell box.
+
 ## Tiny wins (quick fixes)
 
 - [ ] **Detect encrypted files and throw a clear error.** Today
@@ -118,12 +133,6 @@ already tracked elsewhere in this file is excluded.*
 - **Cell metadata / dynamic-array spill** (`xl/metadata.xml` + `c/@cm`/`@vm`) — marks cells that carry rich data types or are part of a spilled array; without it linked data types render as plain strings.
 
 ### Cell formatting
-- **Wrap text** (`xf/alignment/@wrapText`) — multi-line content in a single cell; without it long strings spill into empty neighbours.
-- **Shrink to fit** (`xf/alignment/@shrinkToFit`) — auto-reduces font size so content fits the column width.
-- **Indent levels** (`xf/alignment/@indent`) — left/right indent in character widths, commonly used for grouped row labels.
-- **Text rotation / vertical text** (`xf/alignment/@textRotation`) — 0..180 degrees, 255 = stacked vertically; ubiquitous in header rows.
-- **Justify and distributed alignment** (`xf/alignment/@horizontal='justify'|'distributed'|'centerContinuous'|'fill'`, `@vertical='justify'|'distributed'`) — only `left/right/center/justify` horizontal and `top/middle/bottom` vertical are surfaced today.
-- **Reading order** (`xf/alignment/@readingOrder`) — 1 = LTR, 2 = RTL context for bi-di text inside cells.
 - **Strikethrough** (`font/strike`) — struck-out text; common in change tracking and finished-task lists.
 - **Subscript / superscript** (`font/vertAlign` = `subscript`|`superscript`) — scientific and chemistry sheets rely on this for legibility.
 - **Underline variants** (`font/u/@val` = `double`|`singleAccounting`|`doubleAccounting`) — accounting totals use the double accounting underline by convention; today every `<u>` renders as a single underline.
@@ -177,7 +186,6 @@ already tracked elsewhere in this file is excluded.*
 
 ### Internationalisation & accessibility
 - **Phonetic ruby (furigana)** (`si/rPh`, `worksheet/phoneticPr`) — ruby text above Japanese characters; the `<rPh>` runs are dropped when we flatten an `<si>`.
-- **East-Asian vertical text** (`xf/alignment/@textRotation='255'`) — the stacked-vertical convention distinct from rotation degrees; same gap as text rotation.
 - **Alt text on images** (`xdr:pic/xdr:nvPicPr/xdr:cNvPr/@descr`) — parsed today but also emitted as the `<img alt>` only when `descr` is present; the newer `a:extLst` "decorative" marker is not honoured.
 - **Alt text on tables / charts** (`table/@altText`, `table/@altTextSummary`) — accessibility label on defined tables; not exposed on `TableDef`.
 - **Major/minor font scheme resolution** (`xl/theme/theme1.xml` `a:fontScheme/a:majorFont`/`a:minorFont`) — styles referencing `@scheme='major'|'minor'` on a font fall back to the default family because we don't read the theme's font pair.

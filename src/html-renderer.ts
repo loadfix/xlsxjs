@@ -59,6 +59,7 @@ function renderStyle(className: string): HTMLStyleElement {
 }
 .${className} .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
 .${className} .xlsx-threaded { color: #0066cc; margin-left: 4px; cursor: help; }
+.${className} .xlsx-shrink-to-fit { font-size: clamp(0.55em, 0.95em, 1em); overflow: hidden; }
     `.trim();
     return style;
 }
@@ -659,10 +660,92 @@ function borderStyle(style: string): string {
 }
 
 function applyAlignment(td: HTMLTableCellElement, xf: CellXf): void {
-    if (xf.alignment.horizontal) td.style.textAlign = xf.alignment.horizontal;
-    if (xf.alignment.vertical) {
-        td.style.verticalAlign = xf.alignment.vertical === 'middle' ? 'middle' : xf.alignment.vertical;
+    const a = xf.alignment;
+
+    // Horizontal: left/right/center/justify map straight to CSS text-align.
+    // distributed + centerContinuous don't have a direct CSS equivalent;
+    // we render them as 'justify' and 'center' respectively — close enough
+    // visually for spreadsheets. fill repeats the content to fill the cell
+    // in Excel; we approximate as text-align:start with a note (no reliable
+    // pure-CSS "repeat to fill" behaviour exists inside a table cell).
+    if (a.horizontal) {
+        switch (a.horizontal) {
+            case 'centerContinuous':
+                td.style.textAlign = 'center';
+                break;
+            case 'distributed':
+                td.style.textAlign = 'justify';
+                td.style.textAlignLast = 'justify';
+                break;
+            case 'fill':
+                // Pure CSS can't replicate Excel's "repeat content across
+                // cell width". Align to the start edge and document the gap.
+                td.style.textAlign = 'start';
+                break;
+            default:
+                td.style.textAlign = a.horizontal;
+        }
     }
+
+    // Vertical: middle / top / bottom map directly; justify + distributed
+    // don't exist as CSS vertical-align values, so we approximate as
+    // middle (the typical Excel use case is header rows where content is
+    // short and the distributed look is indistinguishable from middle).
+    if (a.vertical) {
+        if (a.vertical === 'middle' || a.vertical === 'justify' || a.vertical === 'distributed') {
+            td.style.verticalAlign = 'middle';
+        } else {
+            td.style.verticalAlign = a.vertical;
+        }
+    }
+
+    // wrapText: normal white-space so \n + long runs wrap; word-break so
+    // narrow cells still wrap very long unbroken strings.
+    if (a.wrapText) {
+        td.style.whiteSpace = 'normal';
+        td.style.wordBreak = 'break-word';
+    }
+
+    // readingOrder: 2 = RTL; 1 = LTR (explicit); 0 = context (no style).
+    if (a.readingOrder === 2) td.style.direction = 'rtl';
+    else if (a.readingOrder === 1) td.style.direction = 'ltr';
+
+    // indent: 1 unit ≈ 0.5em by Excel's convention. Apply to the leading
+    // side based on horizontal + readingOrder — right-aligned cells indent
+    // from the right, RTL flips both sides.
+    if (a.indent > 0) {
+        const em = `${(a.indent * 0.5).toFixed(2)}em`;
+        const rtl = a.readingOrder === 2;
+        // right-aligned or RTL + left-aligned → padding on the right.
+        const padRight = (a.horizontal === 'right' && !rtl) || (a.horizontal === 'left' && rtl);
+        if (padRight) td.style.paddingRight = em;
+        else td.style.paddingLeft = em;
+    }
+
+    // textRotation: 255 = stacked vertical (CJK convention); other values
+    // (1..180) are counter-clockwise rotation in degrees. Pure CSS rotation
+    // inside a table cell is imperfect — the cell's laid-out box doesn't
+    // grow to accommodate rotated content, so callers relying on exact
+    // header-height match with Excel may need extra padding. Documented
+    // compromise; the common case (small-angle header labels) renders
+    // legibly.
+    if (a.textRotation === 255) {
+        td.style.writingMode = 'vertical-lr';
+    } else if (a.textRotation != null && a.textRotation !== 0) {
+        // Excel rotates counter-clockwise for positive angles; CSS
+        // rotate uses clockwise-positive, so negate.
+        td.style.transform = `rotate(-${a.textRotation}deg)`;
+        td.style.transformOrigin = 'center center';
+        td.style.display = 'inline-block';
+    }
+
+    // shrinkToFit: we can't measure the rendered text at parse time and
+    // browsers have no pure-CSS "shrink font to fit container" rule.
+    // Tag the td so consumers can target it; the default CSS rule in
+    // renderStyle sets font-size via clamp() as a sensible floor. A
+    // JS-based auto-fit pass is left to downstream apps (it's cheap once
+    // the DOM is in-document, but out of scope for xlsxjs itself).
+    if (a.shrinkToFit) td.classList.add('xlsx-shrink-to-fit');
 }
 
 function applyGraphicalCf(td: HTMLTableCellElement, state: GraphicalCfState): void {
