@@ -57,6 +57,20 @@ export interface DataBar {
     minLength: number;      // 0..100 in %
     maxLength: number;      // 0..100 in %
     showValue: boolean;
+    // Post-2010 ext attributes (x14). All optional; default to Excel's pre-ext
+    // behaviour when the cfRule carries no <extLst>.
+    border: boolean;                                      // default false
+    borderColor: ColorRef | null;                         // default null → reuse fill colour
+    negativeFillColor: ColorRef | null;                   // default null → reuse main colour
+    negativeBorderColor: ColorRef | null;                 // default null
+    axisPosition: 'automatic' | 'middle' | 'none';        // default 'automatic'
+    axisColor: ColorRef | null;                           // default null
+    gradient: boolean;                                    // default true (Excel's default gradient look)
+    direction: 'leftToRight' | 'rightToLeft' | 'context'; // default 'context'
+    // The GUID that ties a dataBar rule to its <x14:cfRule> in the sheet-level
+    // <extLst>. Populated during parse so the ext-merger can find the entry;
+    // renderers never read it.
+    extId: string | null;
 }
 
 export interface IconSet {
@@ -111,7 +125,79 @@ export function parseConditionalFormatting(doc: Document): ConditionalFormatting
         }
         out.push({ ranges, rules });
     }
+    // Post-2010 ext attributes for dataBar rules live in a sheet-level
+    // <extLst><ext uri="…"><x14:conditionalFormatting><x14:cfRule id="{GUID}">.
+    // Walk those elements and splice matching attributes onto rules whose
+    // extId GUID matches. Older files with no ext block silently leave the
+    // dataBars at their classic defaults.
+    mergeDataBarExtAttrs(doc, out);
     return out;
+}
+
+// Walk sheet-level <x14:conditionalFormatting>/<x14:cfRule> entries and copy
+// their x14 attributes onto any dataBar rule whose extId matches. We select by
+// localName to stay namespace-agnostic — x14 is the common writer, but copies
+// have landed under other namespaces in the wild.
+function mergeDataBarExtAttrs(doc: Document, blocks: ConditionalFormatting[]): void {
+    const byExtId = new Map<string, DataBar>();
+    for (const block of blocks) {
+        for (const rule of block.rules) {
+            if (rule.type === 'dataBar' && rule.dataBar?.extId) {
+                byExtId.set(rule.dataBar.extId, rule.dataBar);
+            }
+        }
+    }
+    if (byExtId.size === 0) return;
+    // <x14:cfRule> elements, no matter where they live in the xml.
+    const all = doc.getElementsByTagName('*');
+    for (let i = 0; i < all.length; i++) {
+        const el = all[i];
+        if (el.localName !== 'cfRule') continue;
+        if (el.getAttribute('type') !== 'dataBar') continue;
+        const id = el.getAttribute('id');
+        if (!id) continue;
+        const target = byExtId.get(id);
+        if (!target) continue;
+        applyDataBarExt(el, target);
+    }
+}
+
+function applyDataBarExt(x14rule: Element, bar: DataBar): void {
+    const children = x14rule.getElementsByTagName('*');
+    let dataBarEl: Element | null = null;
+    for (let i = 0; i < children.length; i++) {
+        if (children[i].localName === 'dataBar') { dataBarEl = children[i]; break; }
+    }
+    if (!dataBarEl) return;
+
+    const minAttr = dataBarEl.getAttribute('minLength');
+    if (minAttr != null) {
+        const n = Number(minAttr);
+        if (Number.isFinite(n)) bar.minLength = n;
+    }
+    const maxAttr = dataBarEl.getAttribute('maxLength');
+    if (maxAttr != null) {
+        const n = Number(maxAttr);
+        if (Number.isFinite(n)) bar.maxLength = n;
+    }
+    if (dataBarEl.getAttribute('border') === '1') bar.border = true;
+    // gradient defaults to true; only flip to false when explicitly disabled.
+    if (dataBarEl.getAttribute('gradient') === '0') bar.gradient = false;
+    const axis = dataBarEl.getAttribute('axisPosition');
+    if (axis === 'middle' || axis === 'none' || axis === 'automatic') bar.axisPosition = axis;
+    const dir = dataBarEl.getAttribute('direction');
+    if (dir === 'leftToRight' || dir === 'rightToLeft' || dir === 'context') bar.direction = dir;
+
+    // Named colour children. Each is a standard <color rgb=…/theme=…/> element.
+    for (let i = 0; i < children.length; i++) {
+        const c = children[i];
+        switch (c.localName) {
+            case 'borderColor':         bar.borderColor = parseCfColor(c); break;
+            case 'negativeFillColor':   bar.negativeFillColor = parseCfColor(c); break;
+            case 'negativeBorderColor': bar.negativeBorderColor = parseCfColor(c); break;
+            case 'axisColor':           bar.axisColor = parseCfColor(c); break;
+        }
+    }
 }
 
 export function parseSqref(sqref: string): CellRange[] {
@@ -222,16 +308,46 @@ function parseColorScale(ruleEl: Element): ColorScale {
     return { cfvos, colors };
 }
 
-function parseDataBar(ruleEl: Element): DataBar {
-    const root = ruleEl.getElementsByTagNameNS(NS_MAIN, 'dataBar').item(0);
-    if (!root) return { cfvos: [], color: null, minLength: 10, maxLength: 90, showValue: true };
+function dataBarDefaults(): DataBar {
     return {
-        cfvos: parseCfvos(root),
-        color: parseCfColor(root.getElementsByTagNameNS(NS_MAIN, 'color').item(0)),
-        minLength: Number(root.getAttribute('minLength') ?? '10') || 10,
-        maxLength: Number(root.getAttribute('maxLength') ?? '90') || 90,
-        showValue: root.getAttribute('showValue') !== '0',
+        cfvos: [], color: null, minLength: 10, maxLength: 90, showValue: true,
+        border: false, borderColor: null,
+        negativeFillColor: null, negativeBorderColor: null,
+        axisPosition: 'automatic', axisColor: null,
+        gradient: true, direction: 'context',
+        extId: null,
     };
+}
+
+function parseDataBar(ruleEl: Element): DataBar {
+    const out = dataBarDefaults();
+    const root = ruleEl.getElementsByTagNameNS(NS_MAIN, 'dataBar').item(0);
+    if (!root) return { ...out, extId: parseCfRuleExtId(ruleEl) };
+    out.cfvos = parseCfvos(root);
+    out.color = parseCfColor(root.getElementsByTagNameNS(NS_MAIN, 'color').item(0));
+    out.minLength = Number(root.getAttribute('minLength') ?? '10') || 10;
+    out.maxLength = Number(root.getAttribute('maxLength') ?? '90') || 90;
+    out.showValue = root.getAttribute('showValue') !== '0';
+    out.extId = parseCfRuleExtId(ruleEl);
+    return out;
+}
+
+// Extract <extLst><ext uri="…"><x14:id>{GUID}</x14:id></ext> off a cfRule. The
+// GUID ties the main-ns dataBar rule to its post-2010 counterpart in the
+// sheet-level <extLst>, where the modern attributes (axisPosition,
+// negativeFillColor, etc.) live.
+function parseCfRuleExtId(ruleEl: Element): string | null {
+    // <extLst> / <ext> are in the main namespace; <x14:id> is in the x14 ns.
+    const extLst = ruleEl.getElementsByTagNameNS(NS_MAIN, 'extLst').item(0);
+    if (!extLst) return null;
+    const all = extLst.getElementsByTagName('*');
+    for (let i = 0; i < all.length; i++) {
+        const el = all[i];
+        if (el.localName !== 'id') continue;
+        const text = (el.textContent ?? '').trim();
+        if (text) return text;
+    }
+    return null;
 }
 
 function parseIconSet(ruleEl: Element): IconSet {

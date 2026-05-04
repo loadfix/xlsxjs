@@ -1314,6 +1314,114 @@ async function renderFixture(path, options) {
         `43f: A2 should NOT carry the validation class`);
 }
 
+// ── 50. cf-ext-databar: x14 ext attrs parsed onto the DataBar model ───────
+// The sheet-level <extLst> on the cf-ext-databar fixture carries post-2010
+// dataBar attributes (axisPosition, negativeFillColor, border, borderColor).
+// The parser should pick up the <x14:id> on the classic cfRule's <extLst>,
+// then splice the matching <x14:cfRule>'s attributes onto the DataBar.
+{
+    const { wb } = await renderFixture('cf-ext-databar');
+    const sheet = wb.parsed.sheets[0];
+    const allRules = sheet.conditionalFormatting.flatMap((b) => b.rules);
+    const bar = allRules.find((r) => r.type === 'dataBar');
+    assert(!!bar?.dataBar, '50a: dataBar rule should be parsed');
+    // Classic dataBar bits still honoured.
+    assert(bar.dataBar.color && bar.dataBar.color.kind === 'rgb', '50b: main fill colour survives ext merge');
+    // x14 ext attributes.
+    assert(bar.dataBar.axisPosition === 'middle',
+        `50c: axisPosition should be "middle" (got ${bar.dataBar.axisPosition})`);
+    assert(bar.dataBar.border === true, `50d: border flag should be true (got ${bar.dataBar.border})`);
+    assert(bar.dataBar.borderColor && bar.dataBar.borderColor.kind === 'rgb' && bar.dataBar.borderColor.value === '#0000ff',
+        `50e: borderColor should be rgb #0000ff (got ${JSON.stringify(bar.dataBar.borderColor)})`);
+    assert(bar.dataBar.negativeFillColor && bar.dataBar.negativeFillColor.kind === 'rgb' && bar.dataBar.negativeFillColor.value === '#ff0000',
+        `50f: negativeFillColor should be rgb #ff0000 (got ${JSON.stringify(bar.dataBar.negativeFillColor)})`);
+    assert(bar.dataBar.negativeBorderColor && bar.dataBar.negativeBorderColor.kind === 'rgb' && bar.dataBar.negativeBorderColor.value === '#ff0000',
+        `50g: negativeBorderColor should be rgb #ff0000 (got ${JSON.stringify(bar.dataBar.negativeBorderColor)})`);
+    assert(bar.dataBar.axisColor && bar.dataBar.axisColor.kind === 'rgb' && bar.dataBar.axisColor.value === '#000000',
+        `50h: axisColor should be rgb #000000 (got ${JSON.stringify(bar.dataBar.axisColor)})`);
+    // Defaults for fields the fixture didn't declare.
+    assert(bar.dataBar.gradient === true, `50i: gradient default true (got ${bar.dataBar.gradient})`);
+    assert(bar.dataBar.direction === 'context', `50j: direction default "context" (got ${bar.dataBar.direction})`);
+}
+
+// ── 51. cf-ext-databar: negative fill wins on A1; border applied ──────────
+// A1 holds -5 so the rendered bar on the td should land on the negative
+// fill colour (red), not the main fill (#638EC6). The td should also carry
+// the 1px border that the ext block declared, and the cell should be
+// tagged with axis data-attributes.
+{
+    const { container } = await renderFixture('cf-ext-databar');
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    const a1 = rows[0].querySelectorAll('td')[0];
+    assert(a1.classList.contains('xlsx-cf-databar'), '51a: A1 should carry .xlsx-cf-databar');
+    // Negative-value bar uses the red negativeFillColor. Read the style
+    // attribute directly (jsdom rolls style.background into multiple sub-
+    // properties, so the raw attribute is the reliable source).
+    const style = a1.getAttribute('style') ?? '';
+    assert(/linear-gradient\([^)]*(?:#ff0000|rgb\(255,\s*0,\s*0\))/i.test(style),
+        `51b: A1 gradient should use the red negativeFillColor (got "${style}")`);
+    // Border applied with the declared borderColor (blue).
+    assert(/1px solid/.test(style),
+        `51c: A1 should carry a 1px solid border (got "${style}")`);
+    assert(/#0000ff|rgb\(0,\s*0,\s*255\)/i.test(style),
+        `51d: A1 border colour should be blue (got "${style}")`);
+    // Axis-position data attribute.
+    assert(a1.getAttribute('data-cf-databar-axis') === 'middle',
+        `51e: A1 should carry data-cf-databar-axis="middle" (got "${a1.getAttribute('data-cf-databar-axis')}")`);
+
+    // A3 holds 3 (positive) — main fill colour, not the negative variant.
+    const a3 = rows[2].querySelectorAll('td')[0];
+    const a3Style = a3.getAttribute('style') ?? '';
+    assert(/#638ec6|rgb\(99,\s*142,\s*198\)/i.test(a3Style),
+        `51f: A3 positive bar should use the main blue fill (got "${a3Style}")`);
+}
+
+// ── 52. cf-ext-databar: dxf strike + numFmtCode "0.00" apply to matches ────
+// The containsText "flag" rule fires on B1 / B3 ("flag") with dxfId=0, which
+// carries <strike/> + numFmtCode "0.00". B2 / B4 don't match. A parallel
+// cellIs rule on C1..C4 fires the same dxf so the numFmt re-format path
+// runs against numeric values.
+{
+    const { wb, container } = await renderFixture('cf-ext-databar');
+    const styles = wb.parsed.styles;
+    assert(styles.dxfs.length === 1, `52a: expected 1 dxf (got ${styles.dxfs.length})`);
+    assert(styles.dxfs[0].font?.strike === true,
+        `52b: dxf[0] font.strike should be true (got ${styles.dxfs[0].font?.strike})`);
+    assert(styles.dxfs[0].numFmtCode === '0.00',
+        `52c: dxf[0] numFmtCode should be "0.00" (got ${JSON.stringify(styles.dxfs[0].numFmtCode)})`);
+
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    const tdAt = (r, c) => rows[r].querySelectorAll('td')[c];
+
+    // B1 / B3 match the containsText rule → line-through text decoration.
+    const b1 = tdAt(0, 1);
+    const b3 = tdAt(2, 1);
+    assert(/line-through/.test(b1.style.textDecoration),
+        `52d: B1 ("flag") should have line-through (got "${b1.style.textDecoration}")`);
+    assert(/line-through/.test(b3.style.textDecoration),
+        `52e: B3 ("flag") should have line-through (got "${b3.style.textDecoration}")`);
+    // B2 / B4 don't match → no dxf styling.
+    const b2 = tdAt(1, 1);
+    assert(!/line-through/.test(b2.style.textDecoration ?? ''),
+        `52f: B2 ("no") should NOT have line-through (got "${b2.style.textDecoration}")`);
+
+    // C1..C4 match cellIs >= 0 except C1 (-2). So C2..C4 should have the
+    // numFmt re-applied to show "4.00", "7.00", "9.00".
+    const c2 = tdAt(1, 2);
+    const c3 = tdAt(2, 2);
+    const c4 = tdAt(3, 2);
+    assert(c2.textContent === '4.00',
+        `52g: C2 should be re-formatted via dxf numFmt to "4.00" (got "${c2.textContent}")`);
+    assert(c3.textContent === '7.00',
+        `52h: C3 should be re-formatted via dxf numFmt to "7.00" (got "${c3.textContent}")`);
+    assert(c4.textContent === '9.00',
+        `52i: C4 should be re-formatted via dxf numFmt to "9.00" (got "${c4.textContent}")`);
+    // C1 doesn't match cellIs >= 0 (-2 < 0) → original text preserved.
+    const c1 = tdAt(0, 2);
+    assert(c1.textContent === '-2',
+        `52j: C1 (-2) should NOT be re-formatted (got "${c1.textContent}")`);
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

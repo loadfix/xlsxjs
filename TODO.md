@@ -6,6 +6,21 @@ plus pre-existing known gaps. Organised by effort tier, not by visibility.
 
 ## Resolved in fork
 
+- **Graphical-CF data-bar ext + dxf strike/numFmt** (`feat/cf-graphical-ext`) —
+  `DataBar` now carries the post-2010 ext attributes (`border`,
+  `borderColor`, `negativeFillColor`, `negativeBorderColor`,
+  `axisPosition`, `axisColor`, `gradient`, `direction`). The parser
+  walks the cfRule's `<extLst>/<ext>/<x14:id>` GUID, then splices in
+  the matching `<x14:cfRule>` from the sheet-level `<extLst>`. The
+  renderer honours the extra fields: negative values pick up the
+  negative fill colour, `border` draws a 1px edge in the declared
+  border colour, and `axisPosition="middle"` tags the td with
+  `data-cf-databar-axis` + an inset box-shadow. `applyDxf` now also
+  applies `dxf.font.strike` / `dxf.font.underline` alongside its font
+  and re-runs `formatNumber` against the cell when `dxf.numFmtCode`
+  is set (non-rich-text, numeric cells only). Covered by render-harness
+  scenarios 50–52; fixture at `tests/render-test/cf-ext-databar/`.
+
 - **Alignment flags on `xf/alignment/`**
   (`feat/alignment-flags`) — `wrapText`, `shrinkToFit`, `indent`,
   `textRotation` (including `255` = stacked vertical), widened
@@ -190,9 +205,7 @@ already tracked elsewhere in this file is excluded.*
 - **`containsErrors` / `notContainsErrors`** (`cfRule/@type`) — highlights `#DIV/0!`, `#N/A`, etc.; returns no-match today.
 - **`aboveAverage` / `belowAverage`** (`cfRule/@type` + `@aboveAverage`/`@equalAverage`/`@stdDev`) — statistical banding; common on scorecard sheets.
 - **`timePeriod`** (`cfRule/@type` + `@timePeriod`=`today`|`yesterday`|`thisWeek`|`lastMonth`|…) — schedule-colouring rules used heavily in project plans.
-- **Data-bar `<ext>` attributes** (`cfRule/extLst/ext` under the 2009/9/main URI) — post-2010 options (negative-value fill, axis position, solid vs gradient fill, border colour) silently dropped.
 - **Custom icon-set rule lists** (`iconSet/@custom='1'` + `cfIcon` children) — per-threshold icon overrides; xlsxjs uses the default palette for the set name only.
-- **Dxf strikethrough / underline / number-format** (`dxf/font/strike`, `dxf/font/u/@val`, `dxf/numFmt/@formatCode`) — the dxf parser accepts these but the renderer applies neither strike nor the dxf's numFmt code to the cell.
 
 ### Objects & drawings
 - **Shapes and connectors** (`xdr:sp`, `xdr:cxnSp` in `xl/drawings/drawingN.xml`) — callout arrows, rectangles, text boxes with cell-anchored position; currently only `<xdr:pic>` and `<xdr:graphicFrame>` (chart) are walked.
