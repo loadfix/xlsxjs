@@ -1156,7 +1156,7 @@
             const { date1904 } = parseWorkbookMeta(workbookXml);
             const sheets = [];
             for (let i = 0; i < sheetMeta.length; i++) {
-                const { name, rId } = sheetMeta[i];
+                const { name, rId, state } = sheetMeta[i];
                 let xmlPath = null;
                 const rel = rId ? rels.get(rId) : undefined;
                 if (rel) {
@@ -1173,7 +1173,7 @@
                 const pivots = resolvePivotsForSheet(xmlPath, parts);
                 const comments = resolveCommentsForSheet(xmlPath, parts);
                 const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
-                sheets.push(parseSheet(name, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments));
+                sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments));
             }
             return { sheets, styles, theme, persons, date1904 };
         }
@@ -1623,9 +1623,12 @@
         const out = [];
         for (let i = 0; i < nodes.length; i++) {
             const rId = nodes[i].getAttributeNS(NS.rel, 'id');
+            const stateAttr = nodes[i].getAttribute('state');
+            const state = stateAttr === 'hidden' || stateAttr === 'veryHidden' ? stateAttr : 'visible';
             out.push({
                 name: nodes[i].getAttribute('name') ?? `Sheet${i + 1}`,
                 rId: rId || null,
+                state,
             });
         }
         return out;
@@ -1719,7 +1722,7 @@
             name: firstAttr('rFont', 'val') ?? firstAttr('name', 'val'),
         };
     }
-    function parseSheet(name, xml, sharedStrings, tables = [], images = [], charts = [], pivots = [], comments = [], threadedComments = []) {
+    function parseSheet(name, state, xml, sharedStrings, tables = [], images = [], charts = [], pivots = [], comments = [], threadedComments = []) {
         const doc = parseXml(xml);
         const rowEls = doc.getElementsByTagNameNS(NS.main, 'row');
         const rows = [];
@@ -1776,11 +1779,44 @@
         const frozenPanes = parseFrozenPanes(doc);
         const autoFilter = parseAutoFilter(doc);
         const extensions = collectExtensionUris(doc);
+        const view = parseSheetView(doc);
         return {
-            name, rows, maxCol, maxRow, merges, columns, rowDimensions,
+            name, state, rows, maxCol, maxRow, merges, columns, rowDimensions,
             conditionalFormatting, frozenPanes, autoFilter, tables, images,
-            charts, pivots, extensions, comments, threadedComments,
+            charts, pivots, extensions, comments, threadedComments, view,
         };
+    }
+    function parseSheetView(doc) {
+        const defaults = {
+            rightToLeft: false,
+            showGridLines: true,
+            showRowColHeaders: true,
+            zoomScale: null,
+            tabColor: null,
+        };
+        const sv = doc.getElementsByTagNameNS(NS.main, 'sheetView').item(0);
+        if (sv) {
+            defaults.rightToLeft = sv.getAttribute('rightToLeft') === '1';
+            const sgl = sv.getAttribute('showGridLines');
+            if (sgl === '0')
+                defaults.showGridLines = false;
+            const sh = sv.getAttribute('showRowColHeaders');
+            if (sh === '0')
+                defaults.showRowColHeaders = false;
+            const zs = sv.getAttribute('zoomScale');
+            if (zs !== null) {
+                const n = Number(zs);
+                if (Number.isFinite(n) && n > 0)
+                    defaults.zoomScale = n;
+            }
+        }
+        const sheetPr = doc.getElementsByTagNameNS(NS.main, 'sheetPr').item(0);
+        if (sheetPr) {
+            const tc = sheetPr.getElementsByTagNameNS(NS.main, 'tabColor').item(0);
+            if (tc)
+                defaults.tabColor = parseColorElement(tc);
+        }
+        return defaults;
     }
     function collectExtensionUris(doc) {
         const counts = new Map();
@@ -2384,6 +2420,8 @@
             const nodes = [];
             nodes.push(renderStyle(options.className));
             for (const sheet of workbook.sheets) {
+                if (sheet.state !== 'visible')
+                    continue;
                 nodes.push(renderSheet(sheet, workbook.styles, workbook.theme, workbook.date1904, options));
             }
             return nodes;
@@ -2411,6 +2449,10 @@
 .${className} .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
 .${className} .xlsx-threaded { color: #0066cc; margin-left: 4px; cursor: help; }
 .${className} .xlsx-shrink-to-fit { font-size: clamp(0.55em, 0.95em, 1em); overflow: hidden; }
+.${className}.xlsx-no-gridlines th, .${className}.xlsx-no-gridlines td { border: none; }
+.${className}.xlsx-no-headers thead tr > th:first-child,
+.${className}.xlsx-no-headers tbody tr > th:first-child { display: none; }
+.${className}.xlsx-no-headers thead tr:first-child { display: none; }
     `.trim();
         return style;
     }
@@ -2596,6 +2638,7 @@
     }
     function renderSheet(sheet, styles, theme, date1904, options) {
         const section = h('section', { class: options.className, 'data-sheet-name': sheet.name });
+        applySheetView(section, sheet.view, theme);
         section.appendChild(h('div', { class: 'xlsx-sheet-name' }, [sheet.name]));
         const table = h('table');
         if (sheet.maxCol < 0) {
@@ -2812,6 +2855,22 @@
                     ordered.push(r);
         }
         return ordered.map((e) => `${e.author ?? 'Unknown'}: ${e.text}`).join('\n');
+    }
+    function applySheetView(section, view, theme) {
+        if (view.rightToLeft)
+            section.setAttribute('dir', 'rtl');
+        if (!view.showGridLines)
+            section.classList.add('xlsx-no-gridlines');
+        if (!view.showRowColHeaders)
+            section.classList.add('xlsx-no-headers');
+        if (view.zoomScale !== null && view.zoomScale !== 100) {
+            section.style.zoom = String(view.zoomScale / 100);
+        }
+        if (view.tabColor) {
+            const hex = resolveColor(view.tabColor, theme);
+            if (hex)
+                section.setAttribute('data-tab-color', hex);
+        }
     }
     function tagFrozen(td, row, col, panes) {
         const inX = panes.xSplit !== null && col < panes.xSplit;
