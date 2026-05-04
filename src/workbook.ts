@@ -137,6 +137,19 @@ export class Workbook {
             }
         }
 
+        // xl/ctrlProps/ctrlProp*.xml — form-control property parts. Each
+        // `<xdr:sp>` wrapped in `<mc:AlternateContent>` for a form control
+        // carries a `<xdr:clientData/>` and a rel (type .../ctrlProp) pointing
+        // at the matching xml under xl/ctrlProps/. xlsxjs surfaces these on
+        // the sheet model as `Sheet.formControls[]` but renders only an
+        // informational `<aside>` — no interactive widget is painted.
+        for (const p of Object.keys(zip.files)) {
+            if (/^xl\/ctrlProps\/.*\.xml$/i.test(p)) {
+                const xml = await readIfPresent(p);
+                if (xml) wb.parts[p] = xml;
+            }
+        }
+
         // xl/commentsN.xml — classic (non-threaded) comments. Bound to a
         // sheet via its rels; the parser resolves the mapping. Threaded
         // comments (xl/threadedComments/*) are a separate part type that

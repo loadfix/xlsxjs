@@ -36,6 +36,30 @@
     font-family: inherit; font-size: inherit;
     position: relative; z-index: 1;
 }
+.xlsx .xlsx-form-control {
+    position: absolute;
+    display: inline-flex; align-items: center; gap: 4px;
+    border: 1px dashed #bbb; border-radius: 2px;
+    padding: 2px 6px; margin: 0;
+    color: #333; background: rgba(255, 255, 255, 0.85);
+    font-size: 0.85em; pointer-events: auto;
+}
+.xlsx .xlsx-form-control[data-kind="button"] {
+    border-style: solid; background: #f3f3f3;
+}
+.xlsx .xlsx-form-control[data-kind="groupBox"] {
+    border-style: solid; background: transparent;
+}
+.xlsx .xlsx-form-control[data-kind="scrollbar"],
+.xlsx .xlsx-form-control[data-kind="spinner"] {
+    background: #eef2f7; color: #555;
+}
+.xlsx .xlsx-form-control > .xlsx-form-control-glyph {
+    font-size: 1em; line-height: 1; color: #333;
+}
+.xlsx .xlsx-form-control > legend {
+    font-size: 0.85em; color: #333; padding: 0 4px;
+}
 .xlsx .xlsx-spill-anchor { outline: 1px dashed #0066cc; outline-offset: -1px; }
 .xlsx .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
 .xlsx .xlsx-threaded { color: #0066cc; margin-left: 4px; cursor: help; }

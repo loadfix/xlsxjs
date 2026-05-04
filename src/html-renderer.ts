@@ -2,7 +2,7 @@
 // sheet, each containing an <h2> sheet name and a <table> of the cells.
 // Numeric cells get a numeric-aligned class; other kinds render as text.
 
-import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, SheetShape, SheetImage, RowDimension, ThreadedCommentEntry, Hyperlink, PhoneticRun } from './workbook-parser';
+import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, SheetShape, SheetImage, SheetFormControl, RowDimension, ThreadedCommentEntry, Hyperlink, PhoneticRun } from './workbook-parser';
 import { isSafeHyperlinkHref } from './workbook-parser';
 import { indexToColumnLetters, emuToPx } from './utils';
 import { h } from './html';
@@ -100,6 +100,30 @@ function renderStyle(className: string): HTMLStyleElement {
     margin: 0; white-space: pre-line;
     font-family: inherit; font-size: inherit;
     position: relative; z-index: 1;
+}
+.${className} .xlsx-form-control {
+    position: absolute;
+    display: inline-flex; align-items: center; gap: 4px;
+    border: 1px dashed #bbb; border-radius: 2px;
+    padding: 2px 6px; margin: 0;
+    color: #333; background: rgba(255, 255, 255, 0.85);
+    font-size: 0.85em; pointer-events: auto;
+}
+.${className} .xlsx-form-control[data-kind="button"] {
+    border-style: solid; background: #f3f3f3;
+}
+.${className} .xlsx-form-control[data-kind="groupBox"] {
+    border-style: solid; background: transparent;
+}
+.${className} .xlsx-form-control[data-kind="scrollbar"],
+.${className} .xlsx-form-control[data-kind="spinner"] {
+    background: #eef2f7; color: #555;
+}
+.${className} .xlsx-form-control > .xlsx-form-control-glyph {
+    font-size: 1em; line-height: 1; color: #333;
+}
+.${className} .xlsx-form-control > legend {
+    font-size: 0.85em; color: #333; padding: 0 4px;
 }
 .${className} .xlsx-spill-anchor { outline: 1px dashed #0066cc; outline-offset: -1px; }
 .${className} .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
@@ -611,15 +635,21 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
         section.appendChild(caption);
     }
 
-    // Images. Each image lives inside a zero-height <div class="xlsx-image-layer">
-    // that sits directly above the table; twoCell and oneCell anchors compute
-    // CSS top/left/width/height by summing column widths + row heights up to
-    // the anchor cell, so the figure lands on its anchor cell instead of
-    // trailing after the table. absoluteAnchor images keep their EMU-derived
-    // pixel offsets. The anchor coordinates + offsets are still surfaced as
-    // data-attributes so consumers who want a different overlay strategy can
-    // read them off the DOM.
-    if (sheet.images.length > 0) {
+    // Images + form-controls. Each lives inside a zero-height
+    // <div class="xlsx-image-layer"> that sits directly above the table;
+    // twoCell and oneCell anchors compute CSS top/left/width/height by
+    // summing column widths + row heights up to the anchor cell, so the
+    // figure lands on its anchor cell instead of trailing after the table.
+    // absoluteAnchor images keep their EMU-derived pixel offsets. The
+    // anchor coordinates + offsets are still surfaced as data-attributes
+    // so consumers who want a different overlay strategy can read them
+    // off the DOM.
+    //
+    // Form controls piggyback on this layer with the same anchor math —
+    // xlsxjs only surfaces detect-only metadata (kind + linkedCell /
+    // checked / min / max / etc.) as data attributes on an <aside>; no
+    // interactive widget is painted.
+    if (sheet.images.length > 0 || sheet.formControls.length > 0) {
         const imageLayer = document.createElement('div');
         imageLayer.className = 'xlsx-image-layer';
         // position:relative + height:0 so the layer establishes a positioning
@@ -631,6 +661,9 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
         imageLayer.style.pointerEvents = 'none';
         for (const img of sheet.images) {
             imageLayer.appendChild(renderImage(img, widthByCol, hiddenCols, rowDim));
+        }
+        for (const fc of sheet.formControls) {
+            imageLayer.appendChild(renderFormControl(fc, widthByCol, hiddenCols, rowDim));
         }
         // Insert the layer directly before the <table> so the anchor-cell
         // geometry in CSS lines up with the table's laid-out grid.
@@ -828,6 +861,92 @@ function renderShape(shape: SheetShape): HTMLElement {
         const pre = document.createElement('pre');
         pre.textContent = shape.text;
         aside.appendChild(pre);
+    }
+    return aside;
+}
+
+// Build an `<aside class="xlsx-form-control">` for one form-control entry.
+// xlsxjs deliberately does NOT paint an interactive widget — the aside only
+// captures the detected metadata (kind, linked cell, input range, min/max,
+// checked state) as data-attributes so consumers who want a real widget can
+// hydrate against it. Label text and alt text are attacker-controlled XLSX
+// strings: they reach the DOM via textContent / setAttribute only.
+//
+// For `checkbox` / `radio`, a small unicode glyph (☐/☑/○/●) leads the
+// label — a lightweight indicator that matches how the detected state
+// should render. The glyph lives in a `<span class="xlsx-form-control-glyph">`
+// so consumers can restyle / hide it via CSS.
+//
+// For `groupBox`, the aside wraps a <legend>-carrying <fieldset>-style box
+// containing the label. The DOM element is still an `<aside>` (not a real
+// <fieldset>) so screen readers don't infer a form grouping we didn't
+// intend — but we emit a nested <legend> child with the label text so
+// visual styling can mimic a group-box chrome.
+function renderFormControl(
+    fc: SheetFormControl,
+    widthByCol: Map<number, number>,
+    hiddenCols: Set<number>,
+    rowDim: Map<number, RowDimension>,
+): HTMLElement {
+    const aside = document.createElement('aside');
+    aside.className = 'xlsx-form-control';
+    aside.setAttribute('data-kind', fc.kind);
+    aside.setAttribute('data-anchor-col', String(fc.col));
+    aside.setAttribute('data-anchor-row', String(fc.row));
+    if (fc.endCol !== null) aside.setAttribute('data-anchor-end-col', String(fc.endCol));
+    if (fc.endRow !== null) aside.setAttribute('data-anchor-end-row', String(fc.endRow));
+    if (fc.linkedCell) aside.setAttribute('data-linked-cell', fc.linkedCell);
+    if (fc.inputRange) aside.setAttribute('data-input-range', fc.inputRange);
+    if (fc.checked !== null) aside.setAttribute('data-checked', String(fc.checked));
+    if (fc.min !== null) aside.setAttribute('data-min', String(fc.min));
+    if (fc.max !== null) aside.setAttribute('data-max', String(fc.max));
+    if (fc.inc !== null) aside.setAttribute('data-inc', String(fc.inc));
+    if (fc.page !== null) aside.setAttribute('data-page', String(fc.page));
+    if (fc.val !== null) aside.setAttribute('data-val', String(fc.val));
+    if (fc.dropLines !== null) aside.setAttribute('data-drop-lines', String(fc.dropLines));
+    if (fc.altText) aside.setAttribute('aria-label', fc.altText);
+
+    // Positioning uses the same anchor math as SheetImage (cell-anchor only;
+    // form controls always use twoCellAnchor in real producers). `left` and
+    // `top` resolve against the image-layer's origin (= table top-left);
+    // the GUTTER_WIDTH_PX offset accounts for the row-number <th>.
+    const left = GUTTER_WIDTH_PX + sumColsPx(fc.col, widthByCol, hiddenCols) + emuToPx(fc.colOff);
+    const top = sumRowsPx(fc.row, rowDim) + emuToPx(fc.rowOff);
+    aside.style.left = `${left}px`;
+    aside.style.top = `${top}px`;
+
+    // Glyph for the boolean controls — placed ahead of the label so the
+    // aside's flex layout lines it up. Consumers who want different
+    // glyphs can hide this span via CSS and inject their own.
+    if (fc.kind === 'checkbox' || fc.kind === 'radio') {
+        const glyph = document.createElement('span');
+        glyph.className = 'xlsx-form-control-glyph';
+        // The DOM text-content path is safe — we're writing a fixed
+        // unicode glyph from a literal, not attacker input.
+        if (fc.kind === 'checkbox') {
+            glyph.textContent = fc.checked ? '☑' : '☐'; // ☑ / ☐
+        } else {
+            glyph.textContent = fc.checked ? '●' : '○'; // ● / ○
+        }
+        aside.appendChild(glyph);
+    }
+
+    // groupBox: render a visible <legend> so consumer CSS can style the
+    // aside like a fieldset chrome. Label text goes inside the legend;
+    // any loose label text outside is suppressed so we don't duplicate.
+    if (fc.kind === 'groupBox') {
+        const legend = document.createElement('legend');
+        if (fc.label) legend.textContent = fc.label;
+        aside.appendChild(legend);
+        return aside;
+    }
+
+    // Everything else: plain label text after the optional glyph.
+    if (fc.label) {
+        const txt = document.createElement('span');
+        txt.className = 'xlsx-form-control-label';
+        txt.textContent = fc.label;
+        aside.appendChild(txt);
     }
     return aside;
 }

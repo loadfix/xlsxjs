@@ -82,10 +82,32 @@
     display: grid; grid-template-columns: 1fr 1fr 1fr;
     font-size: 0.85em; color: #666; margin: 0.5em 0;
 }</style>
-<section class="xlsx" data-sheet-name="Links">
-<div class="xlsx-sheet-name">Links</div>
+<section class="xlsx" data-sheet-name="Controls">
+<div class="xlsx-sheet-name">Controls</div>
+<div class="xlsx-image-layer" style="position: relative; height: 0px; pointer-events: none;">
+<aside class="xlsx-form-control" data-kind="checkbox" data-anchor-col="1" data-anchor-row="1" data-anchor-end-col="2" data-anchor-end-row="2" data-linked-cell="$A$1" data-checked="true" aria-label="Subscribe" style="left: 94px; top: 20px;">
+<span class="xlsx-form-control-glyph">☑</span>
+<span class="xlsx-form-control-label">Subscribe</span>
+</aside>
+<aside class="xlsx-form-control" data-kind="radio" data-anchor-col="1" data-anchor-row="3" data-anchor-end-col="2" data-anchor-end-row="4" data-linked-cell="$A$2" data-checked="false" style="left: 94px; top: 60px;">
+<span class="xlsx-form-control-glyph">○</span>
+<span class="xlsx-form-control-label">Option A</span>
+</aside>
+<aside class="xlsx-form-control" data-kind="combo" data-anchor-col="1" data-anchor-row="5" data-anchor-end-col="2" data-anchor-end-row="6" data-linked-cell="$A$3" data-input-range="$E$1:$E$4" data-val="0" data-drop-lines="4" style="left: 94px; top: 100px;">
+<span class="xlsx-form-control-label">Drop Down 1</span>
+</aside>
+<aside class="xlsx-form-control" data-kind="scrollbar" data-anchor-col="1" data-anchor-row="7" data-anchor-end-col="2" data-anchor-end-row="8" data-linked-cell="$A$4" data-min="0" data-max="100" data-inc="1" data-page="10" data-val="42" style="left: 94px; top: 140px;">
+<span class="xlsx-form-control-label">Scroll Bar 1</span>
+</aside>
+<aside class="xlsx-form-control" data-kind="button" data-anchor-col="3" data-anchor-row="1" data-anchor-end-col="4" data-anchor-end-row="2" style="left: 222px; top: 20px;">
+<span class="xlsx-form-control-label">Click me</span>
+</aside>
+</div>
 <table>
 <colgroup>
+<col>
+<col>
+<col>
 <col>
 <col>
 <col>
@@ -96,36 +118,58 @@
 </th>
 <th>A</th>
 <th>B</th>
+<th>C</th>
+<th>D</th>
+<th>E</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <th>1</th>
+<td>Form controls</td>
 <td>
 </td>
 <td>
 </td>
+<td>
+</td>
+<td>Red</td>
 </tr>
 <tr>
 <th>2</th>
 <td>
-<a class="xlsx-hyperlink" href="https://example.com" target="_blank" rel="noopener noreferrer" title="visit example">click me</a>
 </td>
-<td class="xlsx-validation-list" data-validation-options="Red|Green|Blue">
+<td>
 </td>
+<td>
+</td>
+<td>
+</td>
+<td>Green</td>
 </tr>
 <tr>
 <th>3</th>
-<td>danger</td>
-<td class="xlsx-validation-list" data-validation-options="Red|Green|Blue">
+<td>
 </td>
+<td>
+</td>
+<td>
+</td>
+<td>
+</td>
+<td>Blue</td>
 </tr>
 <tr>
 <th>4</th>
 <td>
 </td>
-<td class="xlsx-validation-list" data-validation-options="Red|Green|Blue">
+<td>
 </td>
+<td>
+</td>
+<td>
+</td>
+<td>Yellow</td>
 </tr>
 </tbody>
 </table>

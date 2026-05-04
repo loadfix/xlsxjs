@@ -30,6 +30,7 @@ const fixtures = [
     'drawing-anchors-plus',
     'fills-and-borders',
     'font-extras',
+    'form-controls',
     'formulas',
     'hyperlinks-and-validation',
     'image',
