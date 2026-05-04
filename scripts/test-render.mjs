@@ -3496,6 +3496,128 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 96. smartart parser: SheetSmartArt surfaces hierarchy tree ────────────
+// The smartart fixture carries a single hierarchy-style SmartArt diagram
+// anchored at B2:E8. The parser must lift:
+//   · sheet.smartArt.length === 1
+//   · model.rootNodes.length === 1 (root "Project")
+//   · root has 2 children (Backend, Frontend)
+//   · Backend has 2 grandchildren (API, Database)
+//   · Frontend has 1 grandchild (UI)
+//   · model.layout matches layout1.xml's uniqueId
+// The outer graphicFrame also lands on Sheet.shapes (detect-only); the
+// SmartArt surface is the parsed data model.
+{
+    const { wb } = await renderFixture('smartart');
+    const sheet = wb.parsed.sheets[0];
+    assert(Array.isArray(sheet.smartArt), '96a: Sheet.smartArt should be an array');
+    assert(sheet.smartArt.length === 1,
+        `96b: expected 1 SmartArt entry (got ${sheet.smartArt.length})`);
+    const art = sheet.smartArt[0];
+    if (art) {
+        assert(art.col === 1 && art.row === 1,
+            `96c: anchor should be (col=1, row=1) (got col=${art.col}, row=${art.row})`);
+        assert(art.endCol === 4 && art.endRow === 7,
+            `96d: end anchor should be (endCol=4, endRow=7) (got endCol=${art.endCol}, endRow=${art.endRow})`);
+        assert(art.model !== null, '96e: diagram model should parse (data1.xml present)');
+        if (art.model) {
+            assert(art.model.layout === 'urn:microsoft.com/office/officeart/2005/8/layout/hierarchy1',
+                `96f: layout uniqueId should surface (got ${JSON.stringify(art.model.layout)})`);
+            assert(art.model.rootNodes.length === 1,
+                `96g: expected 1 root node (got ${art.model.rootNodes.length})`);
+            const root = art.model.rootNodes[0];
+            if (root) {
+                assert(root.text === 'Project',
+                    `96h: root text should be "Project" (got ${JSON.stringify(root.text)})`);
+                assert(root.level === 0,
+                    `96i: root level should be 0 (got ${root.level})`);
+                assert(root.children.length === 2,
+                    `96j: root should have 2 children (got ${root.children.length})`);
+                const backend = root.children.find((c) => c.text === 'Backend');
+                const frontend = root.children.find((c) => c.text === 'Frontend');
+                assert(backend, '96k: Backend child should be present');
+                assert(frontend, '96l: Frontend child should be present');
+                if (backend) {
+                    assert(backend.level === 1,
+                        `96m: Backend level should be 1 (got ${backend.level})`);
+                    assert(backend.children.length === 2,
+                        `96n: Backend should have 2 grandchildren (got ${backend.children.length})`);
+                    const names = backend.children.map((c) => c.text).sort();
+                    assert(names[0] === 'API' && names[1] === 'Database',
+                        `96o: Backend grandchildren should be [API, Database] (got ${JSON.stringify(names)})`);
+                    for (const gc of backend.children) {
+                        assert(gc.level === 2,
+                            `96p: grandchild level should be 2 (got ${gc.level} for ${gc.text})`);
+                    }
+                }
+                if (frontend) {
+                    assert(frontend.children.length === 1,
+                        `96q: Frontend should have 1 grandchild (got ${frontend.children.length})`);
+                    assert(frontend.children[0]?.text === 'UI',
+                        `96r: Frontend grandchild should be "UI" (got ${JSON.stringify(frontend.children[0]?.text)})`);
+                }
+            }
+        }
+    }
+}
+
+// ── 97. smartart renderer: <aside class="xlsx-smartart"> + nested <ul> ────
+// The renderer emits one aside per SmartArt entry. Inside, a top-level <ul>
+// has 1 <li> (the root), that <li> contains a nested <ul> with 2 <li>s
+// (Backend + Frontend), each of which in turn contains nested children.
+// Every <li> carries a data-level attribute matching its depth (0, 1, 2).
+// Layout name lands on the aside's data-layout attribute. Text reaches the
+// DOM via textContent only (attacker-controlled XLSX strings).
+{
+    const { container } = await renderFixture('smartart');
+    const asides = container.querySelectorAll('section.xlsx aside.xlsx-smartart');
+    assert(asides.length === 1,
+        `97a: expected 1 <aside class="xlsx-smartart"> (got ${asides.length})`);
+    const aside = asides[0];
+    if (aside) {
+        assert(aside.getAttribute('data-layout') === 'urn:microsoft.com/office/officeart/2005/8/layout/hierarchy1',
+            `97b: data-layout should surface (got ${JSON.stringify(aside.getAttribute('data-layout'))})`);
+        assert(aside.getAttribute('data-anchor-col') === '1',
+            `97c: data-anchor-col should be "1" (got ${JSON.stringify(aside.getAttribute('data-anchor-col'))})`);
+        assert(aside.getAttribute('data-anchor-end-col') === '4',
+            `97d: data-anchor-end-col should be "4" (got ${JSON.stringify(aside.getAttribute('data-anchor-end-col'))})`);
+
+        // Top-level <ul> has 1 <li> (root "Project"). That <li> carries
+        // data-level="0" and contains a nested <ul> with 2 <li>s.
+        const topUl = aside.querySelector(':scope > ul');
+        assert(topUl, '97e: aside should contain a top-level <ul>');
+        const topLis = topUl ? topUl.querySelectorAll(':scope > li') : [];
+        assert(topLis.length === 1,
+            `97f: top-level <ul> should have 1 <li> (got ${topLis.length})`);
+        const rootLi = topLis[0];
+        if (rootLi) {
+            assert(rootLi.getAttribute('data-level') === '0',
+                `97g: root <li> data-level should be "0" (got ${JSON.stringify(rootLi.getAttribute('data-level'))})`);
+            const rootSpan = rootLi.querySelector(':scope > span.xlsx-smartart-node');
+            assert(rootSpan && rootSpan.textContent === 'Project',
+                `97h: root span should carry "Project" via textContent (got ${JSON.stringify(rootSpan?.textContent)})`);
+            const level1Ul = rootLi.querySelector(':scope > ul');
+            assert(level1Ul, '97i: root <li> should contain nested <ul>');
+            const level1Lis = level1Ul ? level1Ul.querySelectorAll(':scope > li') : [];
+            assert(level1Lis.length === 2,
+                `97j: level-1 <ul> should have 2 <li>s (got ${level1Lis.length})`);
+            for (const li of level1Lis) {
+                assert(li.getAttribute('data-level') === '1',
+                    `97k: level-1 <li> data-level should be "1" (got ${JSON.stringify(li.getAttribute('data-level'))})`);
+            }
+            // Walk level-2 (grandchildren). Backend has 2, Frontend has 1;
+            // all level-2 <li>s carry data-level="2".
+            const level2Lis = level1Ul ? level1Ul.querySelectorAll(':scope > li > ul > li') : [];
+            assert(level2Lis.length === 3,
+                `97l: level-2 <li>s total should be 3 (got ${level2Lis.length})`);
+            for (const li of level2Lis) {
+                assert(li.getAttribute('data-level') === '2',
+                    `97m: level-2 <li> data-level should be "2" (got ${JSON.stringify(li.getAttribute('data-level'))})`);
+            }
+        }
+    }
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
