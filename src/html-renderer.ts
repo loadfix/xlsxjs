@@ -716,6 +716,10 @@ function renderCellContent(td: HTMLTableCellElement, cell: Cell, styles: Styles 
     const xf = resolveXf(styles, cell.styleIndex);
     let text = cell.value;
     let numeric = cell.kind === 'number';
+    // Colour modifier from the number-format code (e.g. `[Red]0;[Blue]-0`).
+    // When non-null, the renderer applies it as td.style.color after the
+    // xf-level font colour lands, so the format-code colour wins.
+    let formatColor: string | null = null;
 
     // Numeric formatting: applies to numbers and to formula results stored
     // as numbers. Strings, inline strings, booleans, and errors display as-is.
@@ -725,6 +729,7 @@ function renderCellContent(td: HTMLTableCellElement, cell: Cell, styles: Styles 
             const res = formatNumber(cell.value, code, { date1904 });
             text = res.text;
             numeric = res.numeric;
+            formatColor = res.color;
         }
     }
 
@@ -758,6 +763,9 @@ function renderCellContent(td: HTMLTableCellElement, cell: Cell, styles: Styles 
     if (xf.applyFill || xf.fillId > 0) applyFill(td, styles!.fills[xf.fillId], theme);
     if (xf.applyBorder || xf.borderId > 0) applyBorder(td, styles!.borders[xf.borderId], theme);
     if (xf.applyAlignment) applyAlignment(td, xf);
+    // Format-code colour wins over xf font colour — apply last so it's the
+    // one that lands on the td.
+    if (formatColor) td.style.color = formatColor;
 }
 
 function appendRunSpan(td: HTMLTableCellElement, run: RichTextRun, theme: Theme | null): void {

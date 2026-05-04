@@ -2388,18 +2388,57 @@
         negative: 1,
         zero: 2,
     };
+    const NAMED_COLORS = {
+        black: '#000000',
+        blue: '#0000ff',
+        cyan: '#00ffff',
+        green: '#00ff00',
+        magenta: '#ff00ff',
+        red: '#ff0000',
+        white: '#ffffff',
+        yellow: '#ffff00',
+    };
     function formatNumber(value, formatCode, options) {
         if (formatCode === '' || formatCode.toLowerCase() === 'general') {
             return formatGeneral(value);
         }
         if (formatCode.trim() === '@') {
-            return { text: value, numeric: false };
+            return { text: value, numeric: false, color: null };
         }
         const num = Number(value);
         if (!Number.isFinite(num)) {
-            return { text: value, numeric: false };
+            return { text: value, numeric: false, color: null };
         }
         const sections = splitSections(formatCode);
+        const section = selectSection(sections, num);
+        const { code: sectionWithSymbol } = extractLocaleCurrency(section.code);
+        const color = extractColorModifier(sectionWithSymbol);
+        const cleaned = stripSquareBracketModifiers(sectionWithSymbol);
+        const magnitude = Math.abs(num);
+        const body = applyFormat(cleaned, magnitude, options);
+        const text = (num < 0 && section.prefixMinus) ? '-' + body : body;
+        return { text, numeric: true, color };
+    }
+    function selectSection(sections, num) {
+        const predicates = sections.map(parseSectionPredicate);
+        const anyConditional = predicates.some((p) => p.predicate !== null);
+        if (anyConditional) {
+            let fallback = null;
+            for (let i = 0; i < sections.length; i++) {
+                const p = predicates[i];
+                if (p.predicate === null) {
+                    if (fallback === null && !isTextSection(sections[i]))
+                        fallback = sections[i];
+                    continue;
+                }
+                if (evaluatePredicate(p.predicate, num)) {
+                    return { code: p.body, prefixMinus: false };
+                }
+            }
+            if (fallback !== null)
+                return { code: fallback, prefixMinus: false };
+            return { code: sections[0], prefixMinus: false };
+        }
         let sectionIndex;
         if (num > 0)
             sectionIndex = NUMERIC_SECTION_INDEX.positive;
@@ -2407,14 +2446,55 @@
             sectionIndex = sections[NUMERIC_SECTION_INDEX.negative] ? NUMERIC_SECTION_INDEX.negative : NUMERIC_SECTION_INDEX.positive;
         else
             sectionIndex = sections[NUMERIC_SECTION_INDEX.zero] ? NUMERIC_SECTION_INDEX.zero : NUMERIC_SECTION_INDEX.positive;
-        const section = sections[sectionIndex] ?? formatCode;
-        const { code: sectionWithSymbol } = extractLocaleCurrency(section);
-        const cleaned = stripSquareBracketModifiers(sectionWithSymbol);
-        let magnitude = Math.abs(num);
-        if (num < 0 && sectionIndex === NUMERIC_SECTION_INDEX.positive) {
-            return { text: '-' + applyFormat(cleaned, magnitude, options), numeric: true };
+        const code = sections[sectionIndex] ?? sections[0] ?? '';
+        const prefixMinus = num < 0 && sectionIndex === NUMERIC_SECTION_INDEX.positive;
+        return { code, prefixMinus };
+    }
+    function isTextSection(code) {
+        const stripped = stripQuotedLiterals(code);
+        return /@/.test(stripped) && !/[0#?]/.test(stripped);
+    }
+    function parseSectionPredicate(code) {
+        const m = /^\[([<>=]+)(-?\d+(?:\.\d+)?)\]/.exec(code);
+        if (!m)
+            return { predicate: null, body: code };
+        const op = m[1];
+        if (!['>', '<', '=', '>=', '<=', '<>'].includes(op)) {
+            return { predicate: null, body: code };
         }
-        return { text: applyFormat(cleaned, magnitude, options), numeric: true };
+        const value = Number(m[2]);
+        if (!Number.isFinite(value))
+            return { predicate: null, body: code };
+        return { predicate: { op, value }, body: code.slice(m[0].length) };
+    }
+    function evaluatePredicate(p, num) {
+        switch (p.op) {
+            case '>': return num > p.value;
+            case '<': return num < p.value;
+            case '=': return num === p.value;
+            case '>=': return num >= p.value;
+            case '<=': return num <= p.value;
+            case '<>': return num !== p.value;
+        }
+        return false;
+    }
+    function extractColorModifier(code) {
+        let match;
+        const re = /\[([^\]]*)\]/g;
+        while ((match = re.exec(code)) !== null) {
+            const inner = match[1].trim();
+            const named = NAMED_COLORS[inner.toLowerCase()];
+            if (named)
+                return named;
+            const colorM = /^color\s*(\d+)$/i.exec(inner);
+            if (colorM) {
+                const idx = Number(colorM[1]);
+                const hex = indexedColor(idx - 1);
+                if (hex)
+                    return hex;
+            }
+        }
+        return null;
     }
     function extractLocaleCurrency(code) {
         return {
@@ -2466,6 +2546,12 @@
         }
         if (/\[(hh?|mm?|ss?)\]/.test(code)) {
             return formatDateTime(code, value, options);
+        }
+        if (isFractionCode(code)) {
+            return formatFraction(code, value);
+        }
+        if (/[eE][+-]/.test(stripQuotedLiterals(code))) {
+            return formatScientific(code, value);
         }
         if (/[yMdhsmAP]/.test(stripQuotedLiterals(code))) {
             if (/[yMdAPhs]/.test(stripQuotedLiterals(code))) {
@@ -2527,6 +2613,7 @@
         return intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
     }
     function renderLiteralsAroundNumber(code, numberText) {
+        const hasPlaceholder = /[0#?]/.test(stripQuotedLiterals(code));
         let out = '';
         let inserted = false;
         let i = 0;
@@ -2574,18 +2661,193 @@
             out += c;
             i++;
         }
-        if (!inserted)
+        if (!inserted && hasPlaceholder)
             out = numberText + out;
         return out;
     }
     function formatGeneral(value) {
         const n = Number(value);
         if (!Number.isFinite(n))
-            return { text: value, numeric: false };
-        return { text: formatGeneralNumber(n), numeric: true };
+            return { text: value, numeric: false, color: null };
+        return { text: formatGeneralNumber(n), numeric: true, color: null };
     }
     function formatGeneralNumber(n) {
         return n.toString();
+    }
+    function isFractionCode(code) {
+        return /[0#]\s+\?+\/(\?+|\d+)/.test(code);
+    }
+    function formatFraction(code, value) {
+        const m = /(\?+)\/(\?+|\d+)/.exec(code);
+        if (!m)
+            return String(value);
+        const denomRaw = m[2];
+        const fixedDenom = /^\d+$/.test(denomRaw) ? Number(denomRaw) : null;
+        const denomPlaces = denomRaw.length;
+        const maxDenom = fixedDenom ?? Math.pow(10, denomPlaces);
+        const sign = value < 0 ? '-' : '';
+        const abs = Math.abs(value);
+        const whole = Math.floor(abs);
+        const frac = abs - whole;
+        let num, den;
+        if (fixedDenom !== null && fixedDenom > 0) {
+            den = fixedDenom;
+            num = Math.round(frac * fixedDenom);
+        }
+        else {
+            ({ num, den } = bestFraction(frac, maxDenom));
+        }
+        let outWhole = whole;
+        let outNum = num;
+        if (outNum === den && den !== 0) {
+            outWhole += 1;
+            outNum = 0;
+        }
+        if (outNum === 0) {
+            return sign + String(outWhole);
+        }
+        return `${sign}${outWhole} ${outNum}/${den}`;
+    }
+    function bestFraction(x, maxDenom) {
+        if (x === 0)
+            return { num: 0, den: 1 };
+        let h1 = 1, k1 = 0;
+        let h = Math.floor(x), k = 1;
+        let rem = x - h;
+        while (rem > 1e-12) {
+            const inv = 1 / rem;
+            const a = Math.floor(inv);
+            const newH = a * h + h1;
+            const newK = a * k + k1;
+            if (newK > maxDenom)
+                break;
+            h1 = h;
+            k1 = k;
+            h = newH;
+            k = newK;
+            rem = inv - a;
+        }
+        return { num: h, den: k };
+    }
+    function formatScientific(code, value) {
+        const split = findExponentSplit(code);
+        if (!split)
+            return formatNumeric(code, value);
+        const { mantissaCode, expSign, exponentCode, before, after } = split;
+        const intPlaceholders = countIntegerPlaceholders(mantissaCode);
+        const decimalPlaces = countDecimalPlaceholders(mantissaCode);
+        const engineering = intPlaceholders >= 3;
+        let mantissa;
+        let exponent;
+        if (value === 0) {
+            mantissa = 0;
+            exponent = 0;
+        }
+        else {
+            exponent = Math.floor(Math.log10(Math.abs(value)));
+            if (engineering) {
+                exponent = Math.floor(exponent / 3) * 3;
+            }
+            mantissa = value / Math.pow(10, exponent);
+            const rounded = Number(mantissa.toFixed(decimalPlaces));
+            const boundary = engineering ? Math.pow(10, intPlaceholders) : 10;
+            if (Math.abs(rounded) >= boundary) {
+                mantissa = rounded / 10;
+                exponent += 1;
+                if (engineering) {
+                    const misalign = exponent % 3;
+                    if (misalign !== 0) {
+                        mantissa *= Math.pow(10, misalign);
+                        exponent -= misalign;
+                    }
+                }
+            }
+        }
+        const mantissaText = formatNumeric(mantissaCode, mantissa);
+        const expAbs = Math.abs(exponent);
+        const expDigits = exponentCode.replace(/[^0#?]/g, '').length;
+        const expBody = String(expAbs).padStart(expDigits, '0');
+        const sign = exponent < 0 ? '-' : (expSign === '+' ? '+' : '');
+        const expText = sign + expBody;
+        return `${before}${mantissaText}E${expText}${after}`;
+    }
+    function findExponentSplit(code) {
+        let inQuote = false;
+        let inBracket = false;
+        let eIdx = -1;
+        let sign = '+';
+        for (let i = 0; i < code.length - 1; i++) {
+            const c = code[i];
+            if (c === '"') {
+                inQuote = !inQuote;
+                continue;
+            }
+            if (!inQuote && c === '[') {
+                inBracket = true;
+                continue;
+            }
+            if (!inQuote && c === ']') {
+                inBracket = false;
+                continue;
+            }
+            if (inQuote || inBracket)
+                continue;
+            if (c === '\\') {
+                i++;
+                continue;
+            }
+            if ((c === 'E' || c === 'e') && (code[i + 1] === '+' || code[i + 1] === '-')) {
+                eIdx = i;
+                sign = code[i + 1];
+                break;
+            }
+        }
+        if (eIdx < 0)
+            return null;
+        let mStart = eIdx;
+        while (mStart > 0) {
+            const c = code[mStart - 1];
+            if ('0#?.,'.includes(c)) {
+                mStart--;
+                continue;
+            }
+            break;
+        }
+        let eEnd = eIdx + 2;
+        while (eEnd < code.length) {
+            const c = code[eEnd];
+            if ('0#?'.includes(c)) {
+                eEnd++;
+                continue;
+            }
+            break;
+        }
+        return {
+            before: code.slice(0, mStart),
+            mantissaCode: code.slice(mStart, eIdx),
+            expSign: sign,
+            exponentCode: code.slice(eIdx + 2, eEnd),
+            after: code.slice(eEnd),
+        };
+    }
+    function countIntegerPlaceholders(code) {
+        const dotIdx = code.indexOf('.');
+        const slice = dotIdx < 0 ? code : code.slice(0, dotIdx);
+        return (slice.match(/[0#?]/g) ?? []).length;
+    }
+    function countDecimalPlaceholders(code) {
+        const dotIdx = code.indexOf('.');
+        if (dotIdx < 0)
+            return 0;
+        let n = 0;
+        for (let i = dotIdx + 1; i < code.length; i++) {
+            const c = code[i];
+            if (c === '0' || c === '#' || c === '?')
+                n++;
+            else
+                break;
+        }
+        return n;
     }
     const EPOCH_MS_1900 = Date.UTC(1899, 11, 30);
     const EPOCH_MS_1904 = Date.UTC(1904, 0, 1);
@@ -3391,12 +3653,14 @@
         const xf = resolveXf(styles, cell.styleIndex);
         let text = cell.value;
         let numeric = cell.kind === 'number';
+        let formatColor = null;
         if ((cell.kind === 'number' || cell.kind === 'empty') && xf) {
             const code = lookupNumberFormat(styles, xf.numFmtId);
             if (code && code !== 'General' && cell.value !== '') {
                 const res = formatNumber(cell.value, code, { date1904 });
                 text = res.text;
                 numeric = res.numeric;
+                formatColor = res.color;
             }
         }
         if (options.showFormulas && cell.formula != null) {
@@ -3427,6 +3691,8 @@
             applyBorder(td, styles.borders[xf.borderId], theme);
         if (xf.applyAlignment)
             applyAlignment(td, xf);
+        if (formatColor)
+            td.style.color = formatColor;
     }
     function appendRunSpan(td, run, theme) {
         const span = document.createElement('span');
