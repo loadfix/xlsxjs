@@ -56,7 +56,7 @@ geometry, text body, and anchor coordinates; the renderer emits an
 `<aside class="xlsx-shape">` per shape after the table.
 
 Deliberately deferred: chart rendering, SmartArt, form-control VML
-fallbacks, diagonal/double borders, in-flow image positioning, and full
+fallbacks, double borders, in-flow image positioning, and full
 expression-rule interpretation.
 
 ## Contributing

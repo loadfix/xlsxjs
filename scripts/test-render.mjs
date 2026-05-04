@@ -2040,6 +2040,106 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 68. fills-and-borders parser: diagonal borders + gradient + pattern ───
+// The fixture is hand-built (scripts/make-fills-and-borders-fixture.mjs).
+// Assertions target the typed styles model so we catch parser regressions
+// independent of the renderer.
+{
+    const { wb } = await renderFixture('fills-and-borders');
+    const styles = wb.parsed.styles;
+    assert(!!styles, '68a: styles should be present');
+
+    // borders[1] carries both diagonalUp + diagonalDown and a red diagonal.
+    // borders[0] is the empty default.
+    const b1 = styles.borders[1];
+    assert(!!b1, '68b: borders[1] should exist');
+    assert(b1.diagonalUp === true, `68c: borders[1].diagonalUp should be true (got ${b1.diagonalUp})`);
+    assert(b1.diagonalDown === true, `68d: borders[1].diagonalDown should be true (got ${b1.diagonalDown})`);
+    assert(b1.diagonal.style === 'thin', `68e: borders[1].diagonal.style should be "thin" (got ${JSON.stringify(b1.diagonal.style)})`);
+    const diagColor = b1.diagonal.color;
+    assert(diagColor && diagColor.kind === 'rgb' && /ff0000/i.test(diagColor.value),
+        `68f: borders[1].diagonal.color should be a red rgb ref (got ${JSON.stringify(diagColor)})`);
+
+    // fills[2] is a linear gradient fill. kind must discriminate; two stops
+    // must land with a red start and a green end.
+    const f2 = styles.fills[2];
+    assert(!!f2, '68g: fills[2] should exist');
+    assert(f2.kind === 'gradient', `68h: fills[2].kind should be "gradient" (got ${JSON.stringify(f2.kind)})`);
+    if (f2.kind === 'gradient') {
+        assert(f2.type === 'linear', `68i: fills[2].type should be "linear" (got ${f2.type})`);
+        assert(f2.stops.length === 2, `68j: fills[2] should have 2 stops (got ${f2.stops.length})`);
+        const start = f2.stops[0].color;
+        const end = f2.stops[1].color;
+        assert(start && start.kind === 'rgb' && /ff0000/i.test(start.value),
+            `68k: fills[2].stops[0].color should be red (got ${JSON.stringify(start)})`);
+        assert(end && end.kind === 'rgb' && /00ff00/i.test(end.value),
+            `68l: fills[2].stops[1].color should be green (got ${JSON.stringify(end)})`);
+    }
+
+    // fills[3] is a darkHorizontal pattern fill with fg+bg colours preserved.
+    const f3 = styles.fills[3];
+    assert(!!f3, '68m: fills[3] should exist');
+    assert(f3.kind === 'pattern', `68n: fills[3].kind should be "pattern" (got ${f3.kind})`);
+    if (f3.kind === 'pattern') {
+        assert(f3.patternType === 'darkHorizontal',
+            `68o: fills[3].patternType should be "darkHorizontal" (got ${f3.patternType})`);
+        assert(f3.fgColor && f3.fgColor.kind === 'rgb' && /ff0000/i.test(f3.fgColor.value),
+            `68p: fills[3].fgColor should be red rgb (got ${JSON.stringify(f3.fgColor)})`);
+        assert(f3.bgColor && f3.bgColor.kind === 'rgb' && /ffffff/i.test(f3.bgColor.value),
+            `68q: fills[3].bgColor should be white rgb (got ${JSON.stringify(f3.bgColor)})`);
+    }
+}
+
+// ── 69. fills-and-borders renderer: diagonal border → stacked gradients ───
+// A1 has no orthogonal border sides + diagonalUp + diagonalDown. The
+// renderer paints both diagonals as linear-gradient overlays on the td
+// background; the style attribute should contain two `linear-gradient(`
+// substrings so both diagonals land. Read via getAttribute('style') since
+// jsdom's CSSStyleDeclaration discards calc() expressions on round-trip,
+// but the style attribute preserves them verbatim (and real browsers
+// parse that form correctly).
+{
+    const { container } = await renderFixture('fills-and-borders');
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    const a1 = rows[0].querySelectorAll('td')[0];
+    const bg = a1.getAttribute('style') ?? '';
+    const matches = bg.match(/linear-gradient\(/g) ?? [];
+    assert(matches.length >= 2,
+        `69a: A1 should carry two stacked linear-gradients for the diagonals (got ${matches.length} in "${bg}")`);
+    // And the diagonal colour should appear in the overlay string.
+    assert(/(?:#ff0000|rgb\(255,\s*0,\s*0\))/i.test(bg),
+        `69b: A1 diagonal gradient should carry the red colour (got "${bg}")`);
+    // The CSS directions for the two Excel diagonals should both be present.
+    assert(/to bottom right/.test(bg), `69c: A1 should carry a "to bottom right" gradient for diagonalDown`);
+    assert(/to top right/.test(bg), `69d: A1 should carry a "to top right" gradient for diagonalUp`);
+}
+
+// ── 70. fills-and-borders renderer: gradient fill + non-solid pattern ─────
+// A2 (gradient fill) should carry a `linear-gradient` on its background(-
+// image). A3 (darkHorizontal) should carry a `repeating-linear-gradient`
+// since we approximate non-solid patterns as repeating stripes, plus the
+// bgColor as the backgroundColor.
+{
+    const { container } = await renderFixture('fills-and-borders');
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    const a2 = rows[1].querySelectorAll('td')[0];
+    const a2bg = `${a2.style.background} ${a2.style.backgroundImage}`;
+    assert(/linear-gradient\(/.test(a2bg),
+        `70a: A2 should carry a linear-gradient fill (got "${a2bg}")`);
+    assert(/(?:#ff0000|rgb\(255,\s*0,\s*0\))/i.test(a2bg),
+        `70b: A2 gradient should reference red (got "${a2bg}")`);
+    assert(/(?:#00ff00|rgb\(0,\s*255,\s*0\))/i.test(a2bg),
+        `70c: A2 gradient should reference green (got "${a2bg}")`);
+
+    const a3 = rows[2].querySelectorAll('td')[0];
+    const a3bg = `${a3.style.background} ${a3.style.backgroundImage}`;
+    assert(/repeating-linear-gradient\(/.test(a3bg),
+        `70d: A3 should carry a repeating-linear-gradient for darkHorizontal (got "${a3bg}")`);
+    // Pattern bg colour — white — rides on backgroundColor.
+    assert(/(?:#ffffff|rgb\(255,\s*255,\s*255\))/i.test(a3.style.backgroundColor),
+        `70e: A3 backgroundColor should be white (got "${a3.style.backgroundColor}")`);
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

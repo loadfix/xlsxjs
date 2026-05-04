@@ -1008,14 +1008,101 @@ function resolveSchemeFontFamily(scheme: 'major' | 'minor' | null, theme: Theme 
 }
 
 function applyFill(td: HTMLTableCellElement, fill: FillStyle | undefined, theme: Theme | null): void {
-    const color = resolveColor(fill?.fgColor ?? null, theme);
-    if (!color) return;
-    td.style.backgroundColor = color;
+    if (!fill) return;
+    if (fill.kind === 'none') return;
+    if (fill.kind === 'gradient') {
+        const gradCss = gradientFillToCss(fill, theme);
+        if (gradCss) td.style.backgroundImage = gradCss;
+        return;
+    }
+    // Pattern fill. Solid = plain backgroundColor (the fast path and by far
+    // the common case). The gridded / striped patterns ride on top of the
+    // bgColor via a `repeating-linear-gradient` approximation keyed by
+    // patternType; this is NOT a pixel-perfect match of Excel's bitmaps,
+    // but the visual indicator (direction + density) survives.
+    if (fill.patternType === 'none' || fill.patternType === 'gray125') return;
+    const fg = resolveColor(fill.fgColor, theme);
+    if (fill.patternType === 'solid') {
+        if (fg) td.style.backgroundColor = fg;
+        return;
+    }
+    // Non-solid pattern. Need at least the fg colour to paint marks; if it's
+    // missing, bail so the cell stays unfilled.
+    if (!fg) return;
+    const bg = resolveColor(fill.bgColor, theme) ?? '#ffffff';
+    td.style.backgroundColor = bg;
+    const pattern = patternFillToCss(fill.patternType, fg);
+    if (pattern) td.style.backgroundImage = pattern;
+}
+
+// Convert a <gradientFill> to a CSS `linear-gradient(...)`. Path gradients
+// (Excel's rectangular radial) don't map cleanly onto CSS radial-gradient
+// inside a table cell — we approximate them with a flat fill to the first
+// stop's colour so something visible still lands. Linear gradients use the
+// degree attribute (0..360) mapped straight to the CSS angle.
+function gradientFillToCss(fill: Extract<FillStyle, { kind: 'gradient' }>, theme: Theme | null): string | null {
+    // Build resolved stops first so we can bail early when none are usable.
+    const resolved: { position: number; hex: string }[] = [];
+    for (const stop of fill.stops) {
+        const hex = resolveColor(stop.color, theme);
+        if (!hex) continue;
+        resolved.push({ position: stop.position, hex });
+    }
+    if (resolved.length === 0) return null;
+    if (fill.type === 'path' || resolved.length === 1) {
+        // Path gradients fall back to the first stop — CSS radial-gradient in
+        // a td cell doesn't give a visually faithful match, so keep it simple.
+        // Same for degenerate single-stop linear gradients.
+        return `linear-gradient(${resolved[0].hex}, ${resolved[0].hex})`;
+    }
+    const stops = resolved
+        .map((s) => `${s.hex} ${(s.position * 100).toFixed(2)}%`)
+        .join(', ');
+    return `linear-gradient(${fill.degree}deg, ${stops})`;
+}
+
+// Map a non-solid Excel pattern type to a CSS background-image approximation.
+// Excel's real renderings are 8x8 bitmaps — we emit `repeating-linear-gradient`
+// stripes / crosshatches of 2px fg + 2px transparent (so bgColor shows
+// through). The visual density mirrors Excel's classification (dark* is
+// busier than light*) but the exact bitmap pattern is a deliberate
+// compromise documented here. `fg` is already a resolved #rrggbb colour.
+function patternFillToCss(patternType: string, fg: string): string | null {
+    const stripe = (angle: string, onPx: number, offPx: number) =>
+        `repeating-linear-gradient(${angle}, ${fg} 0 ${onPx}px, transparent ${onPx}px ${onPx + offPx}px)`;
+    switch (patternType) {
+        // Solid-percentage "gray" patterns. We approximate density by varying
+        // the stripe ratio; a 1px mark at 2px pitch reads as ~50% (dark),
+        // 2px pitch 3px gap reads as ~40% (medium), 4px pitch reads as light.
+        case 'darkGray':       return stripe('45deg', 2, 2);
+        case 'mediumGray':     return stripe('45deg', 1, 2);
+        case 'lightGray':      return stripe('45deg', 1, 4);
+        // Directional stripes. Dark variants use tighter spacing.
+        case 'darkHorizontal': return stripe('0deg',  2, 2);
+        case 'lightHorizontal':return stripe('0deg',  1, 4);
+        case 'darkVertical':   return stripe('90deg', 2, 2);
+        case 'lightVertical':  return stripe('90deg', 1, 4);
+        case 'darkDown':       return stripe('135deg', 2, 2);
+        case 'lightDown':      return stripe('135deg', 1, 4);
+        case 'darkUp':         return stripe('45deg',  2, 2);
+        case 'lightUp':        return stripe('45deg',  1, 4);
+        // Grid/trellis cross two stripe layers via the `,` multi-image syntax.
+        case 'darkGrid':
+            return `${stripe('0deg', 2, 2)}, ${stripe('90deg', 2, 2)}`;
+        case 'lightGrid':
+            return `${stripe('0deg', 1, 4)}, ${stripe('90deg', 1, 4)}`;
+        case 'darkTrellis':
+            return `${stripe('45deg', 2, 2)}, ${stripe('135deg', 2, 2)}`;
+        case 'lightTrellis':
+            return `${stripe('45deg', 1, 4)}, ${stripe('135deg', 1, 4)}`;
+        default:
+            return null;
+    }
 }
 
 function applyBorder(td: HTMLTableCellElement, border: BorderStyle | undefined, theme: Theme | null): void {
     if (!border) return;
-    const sides: [keyof BorderStyle, 'borderLeft' | 'borderRight' | 'borderTop' | 'borderBottom'][] = [
+    const sides: ['left' | 'right' | 'top' | 'bottom', 'borderLeft' | 'borderRight' | 'borderTop' | 'borderBottom'][] = [
         ['left', 'borderLeft'],
         ['right', 'borderRight'],
         ['top', 'borderTop'],
@@ -1029,6 +1116,68 @@ function applyBorder(td: HTMLTableCellElement, border: BorderStyle | undefined, 
         const color = resolveColor(s.color, theme) ?? '#000';
         td.style[cssSide] = `${width} ${style} ${color}`;
     }
+    // Diagonals. CSS has no border-diagonal; we paint a linear-gradient
+    // overlay on the cell background with a narrow band of the resolved
+    // colour along the diagonal axis. Stacked gradients for both diagonals.
+    // The overlay uses calc(50% ± Xpx) to keep the band width in pixels — a
+    // form real browsers accept but jsdom's CSS parser currently discards.
+    // Writing into the style attribute directly preserves the raw string
+    // (browsers still parse it normally) so the overlay survives round-trip
+    // in every environment.
+    if (border.diagonalUp || border.diagonalDown) {
+        const diagCss = diagonalBorderToCss(border, theme);
+        if (diagCss) appendBackgroundImage(td, diagCss);
+    }
+}
+
+// Append `value` to the element's CSS background-image property, preserving
+// any existing background-image. Written via the style *attribute* (not the
+// CSSStyleDeclaration) so value strings that contain calc()/modern colour
+// syntax survive jsdom's CSS parser unmangled. Browsers parse the raw
+// attribute string identically.
+function appendBackgroundImage(td: HTMLElement, value: string): void {
+    const existingStyle = td.getAttribute('style') ?? '';
+    // Pull an existing background-image declaration out of the attribute and
+    // merge with the new value. Simple regex — declarations in our output
+    // never contain semicolons inside their values.
+    const match = /(?:^|;)\s*background-image\s*:\s*([^;]+?)\s*(?=;|$)/i.exec(existingStyle);
+    if (match) {
+        const merged = `${match[1]}, ${value}`;
+        const replaced = existingStyle.slice(0, match.index) +
+            (match.index === 0 ? '' : ';') +
+            `background-image: ${merged}` +
+            existingStyle.slice(match.index + match[0].length);
+        td.setAttribute('style', replaced);
+        return;
+    }
+    const separator = existingStyle && !existingStyle.trim().endsWith(';') ? '; ' : '';
+    td.setAttribute('style', `${existingStyle}${separator}background-image: ${value};`);
+}
+
+// Build a multi-gradient string representing the active diagonal borders.
+// Each diagonal is a "thin band of colour" gradient: transparent up to the
+// diagonal line, the colour for ±half-width, then transparent again. The
+// band width comes from the diagonal BorderSide's style (same mapping as
+// the orthogonal sides). When both diagonals are active we stack two
+// gradients with a comma; CSS blends them onto the same element.
+function diagonalBorderToCss(border: BorderStyle, theme: Theme | null): string | null {
+    const styleName = border.diagonal.style ?? 'thin';
+    const widthPx = Math.max(1, parseInt(borderWidth(styleName), 10) || 1);
+    const half = widthPx / 2;
+    const color = resolveColor(border.diagonal.color, theme) ?? '#000';
+    const gradients: string[] = [];
+    const band = (direction: string) =>
+        `linear-gradient(${direction}, ` +
+            `transparent calc(50% - ${half}px), ` +
+            `${color} calc(50% - ${half}px), ` +
+            `${color} calc(50% + ${half}px), ` +
+            `transparent calc(50% + ${half}px))`;
+    // diagonalDown: top-left → bottom-right (CSS "to bottom right").
+    if (border.diagonalDown) gradients.push(band('to bottom right'));
+    // diagonalUp: bottom-left → top-right (CSS "to top right").
+    if (border.diagonalUp) gradients.push(band('to top right'));
+    if (gradients.length === 0) return null;
+    return gradients.join(', ');
 }
 
 function borderWidth(style: string): string {

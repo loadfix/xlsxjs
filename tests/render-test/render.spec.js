@@ -25,6 +25,7 @@ const fixtures = [
     'conditional-format',
     'dimensions',
     'drawing-anchors-plus',
+    'fills-and-borders',
     'font-extras',
     'formulas',
     'hyperlinks-and-validation',

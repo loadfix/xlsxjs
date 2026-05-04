@@ -6,13 +6,12 @@
 // Scope:
 //   - <numFmts>          custom number format strings (+ built-in lookup)
 //   - <fonts>            bold, italic, underline, size, colour, name
-//   - <fills>            patternFill solid fills (fgColor)
-//   - <borders>          per-side style + colour
+//   - <fills>            patternFill (solid + stripe patterns) + gradientFill
+//   - <borders>          per-side style + colour, including diagonal
 //   - <cellXfs>          the indexed array a cell's s= attribute points at
 //
-// Not yet: named styles, cellStyleXfs inheritance, tableStyles, dxfs,
-// gradient fills, double / diagonal borders beyond the style name,
-// indexed colours (the legacy 64-entry palette).
+// Not yet: named styles beyond single-step cellStyleXfs inheritance,
+// tableStyles, path-gradient fills (parsed but rendered as a flat fallback).
 
 import type { ColorRef } from './theme';
 
@@ -39,11 +38,51 @@ export interface FontStyle {
     scheme: 'major' | 'minor' | null;
 }
 
-export interface FillStyle {
-    // Only solid patternFill is rendered for now. Any other pattern type
-    // returns null from resolveFill so cells stay unfilled.
+// Discriminated union: pattern fills (solid + the stripe/grid patterns),
+// gradient fills (linear + path), and the explicit "none" variant which is
+// what `<patternFill patternType="none"/>` and `gray125` decompose to.
+//
+// The renderer switches on `kind` and applies the appropriate CSS. Pattern
+// preserves both fgColor and bgColor so non-solid stripe patterns can use
+// fgColor for the marks and bgColor behind them.
+export type PatternType =
+    | 'none' | 'solid' | 'gray125'
+    | 'darkGray' | 'mediumGray' | 'lightGray'
+    | 'darkHorizontal' | 'darkVertical' | 'darkDown' | 'darkUp'
+    | 'darkGrid' | 'darkTrellis'
+    | 'lightHorizontal' | 'lightVertical' | 'lightDown' | 'lightUp'
+    | 'lightGrid' | 'lightTrellis';
+
+export interface PatternFill {
+    kind: 'pattern';
+    patternType: PatternType;
+    // For solid fills fgColor is the canonical fill colour; for non-solid
+    // stripe/grid patterns, fgColor paints the marks and bgColor paints the
+    // background behind them.
     fgColor: ColorRef;
+    bgColor: ColorRef;
 }
+
+export interface GradientStop {
+    position: number;   // 0.0 .. 1.0
+    color: ColorRef;
+}
+
+export interface GradientFill {
+    kind: 'gradient';
+    // 'linear' = classic angled gradient; 'path' = radial from a rectangular
+    // region (left/right/top/bottom anchor attrs). We parse both but render
+    // path gradients as a flat fallback to the first stop's colour.
+    type: 'linear' | 'path';
+    degree: number;     // 0..360 rotation (linear only); 0 for path
+    stops: GradientStop[];
+}
+
+export interface NoFill {
+    kind: 'none';
+}
+
+export type FillStyle = PatternFill | GradientFill | NoFill;
 
 export interface BorderSide {
     style: string | null; // 'thin' | 'medium' | 'thick' | 'dashed' | ...
@@ -55,6 +94,12 @@ export interface BorderStyle {
     right: BorderSide;
     top: BorderSide;
     bottom: BorderSide;
+    // Diagonal line — only painted when diagonalUp or diagonalDown is true.
+    // CSS has no border-diagonal so the renderer paints this as an inline
+    // linear-gradient overlay (see html-renderer.ts applyBorder).
+    diagonal: BorderSide;
+    diagonalUp: boolean;    // <border diagonalUp="1"/> (bottom-left → top-right)
+    diagonalDown: boolean;  // <border diagonalDown="1"/> (top-left → bottom-right)
 }
 
 export interface Alignment {
@@ -346,23 +391,60 @@ function parseFills(doc: Document): FillStyle[] {
     return out;
 }
 
+// Valid patternType values per ECMA-376 §18.18.55. Anything unrecognised
+// (or missing) decays to 'none' so the renderer leaves the cell unfilled.
+const PATTERN_TYPES = new Set<string>([
+    'none', 'solid', 'gray125',
+    'darkGray', 'mediumGray', 'lightGray',
+    'darkHorizontal', 'darkVertical', 'darkDown', 'darkUp',
+    'darkGrid', 'darkTrellis',
+    'lightHorizontal', 'lightVertical', 'lightDown', 'lightUp',
+    'lightGrid', 'lightTrellis',
+]);
+
 function parseFill(el: Element, opts?: { allowBgFallback?: boolean }): FillStyle {
+    const gf = el.getElementsByTagNameNS(NS_MAIN, 'gradientFill').item(0);
+    if (gf) return parseGradientFill(gf);
     const pf = el.getElementsByTagNameNS(NS_MAIN, 'patternFill').item(0);
-    if (!pf) return { fgColor: null };
-    const patternType = pf.getAttribute('patternType');
-    // For solid fills, fgColor is the canonical fill colour. dxf fills, the
-    // legacy openpyxl convention, and some older Excel writers put the
-    // colour on bgColor instead — allow the caller to opt into that fallback.
-    const strictSolid = patternType === 'solid';
-    if (!strictSolid && !opts?.allowBgFallback) return { fgColor: null };
-    const fg = pf.getElementsByTagNameNS(NS_MAIN, 'fgColor').item(0);
-    const fgRef = parseColorElement(fg);
-    if (fgRef) return { fgColor: fgRef };
-    if (opts?.allowBgFallback) {
-        const bg = pf.getElementsByTagNameNS(NS_MAIN, 'bgColor').item(0);
-        return { fgColor: parseColorElement(bg) };
+    if (!pf) return { kind: 'none' };
+    const rawType = pf.getAttribute('patternType');
+    let patternType: PatternType = rawType && PATTERN_TYPES.has(rawType)
+        ? rawType as PatternType
+        : 'none';
+    const fgEl = pf.getElementsByTagNameNS(NS_MAIN, 'fgColor').item(0);
+    const bgEl = pf.getElementsByTagNameNS(NS_MAIN, 'bgColor').item(0);
+    let fgColor = parseColorElement(fgEl);
+    const bgColor = parseColorElement(bgEl);
+    // Legacy fallback: dxf fills and some older Excel writers omit the
+    // patternType and put the colour on bgColor instead of fgColor. When
+    // caller opts in and fgColor is missing, promote bgColor into fgColor
+    // and treat the fill as a solid (so the renderer lands a background
+    // colour rather than skipping the 'none' fill).
+    if (!fgColor && opts?.allowBgFallback && bgColor) {
+        fgColor = bgColor;
+        if (patternType === 'none') patternType = 'solid';
     }
-    return { fgColor: null };
+    return { kind: 'pattern', patternType, fgColor, bgColor };
+}
+
+function parseGradientFill(el: Element): GradientFill {
+    const typeAttr = el.getAttribute('type');
+    const type: GradientFill['type'] = typeAttr === 'path' ? 'path' : 'linear';
+    const degAttr = el.getAttribute('degree');
+    const degN = degAttr != null ? Number(degAttr) : 0;
+    const degree = Number.isFinite(degN) ? ((degN % 360) + 360) % 360 : 0;
+    const stops: GradientStop[] = [];
+    const stopEls = el.getElementsByTagNameNS(NS_MAIN, 'stop');
+    for (let i = 0; i < stopEls.length; i++) {
+        const s = stopEls[i];
+        const posAttr = s.getAttribute('position');
+        const posN = posAttr != null ? Number(posAttr) : NaN;
+        if (!Number.isFinite(posN)) continue;
+        const colorEl = s.getElementsByTagNameNS(NS_MAIN, 'color').item(0);
+        const color = parseColorElement(colorEl);
+        stops.push({ position: Math.max(0, Math.min(1, posN)), color });
+    }
+    return { kind: 'gradient', type, degree, stops };
 }
 
 function parseBorders(doc: Document): BorderStyle[] {
@@ -382,7 +464,15 @@ function parseBorder(el: Element): BorderStyle {
         const color = node.getElementsByTagNameNS(NS_MAIN, 'color').item(0);
         return { style, color: parseColorElement(color) };
     };
-    return { left: side('left'), right: side('right'), top: side('top'), bottom: side('bottom') };
+    return {
+        left: side('left'),
+        right: side('right'),
+        top: side('top'),
+        bottom: side('bottom'),
+        diagonal: side('diagonal'),
+        diagonalUp: el.getAttribute('diagonalUp') === '1',
+        diagonalDown: el.getAttribute('diagonalDown') === '1',
+    };
 }
 
 function parseCellXfs(doc: Document, tag: 'cellXfs' | 'cellStyleXfs'): CellXf[] {
