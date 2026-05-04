@@ -3307,6 +3307,195 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 93. charts parser: ChartModel surfaces kind + title + values ──────────
+// Fixture carries three classic c:chartSpace charts anchored on Sheet1:
+//   · chart1 — barChart with barDir=col  ("Revenue by Quarter")
+//              2 series × 4 categories (Q1-Q4)
+//   · chart2 — lineChart                  ("Website Traffic")
+//              1 series × 6 categories (Jan-Jun)
+//   · chart3 — pieChart                   ("Market Share")
+//              1 series × 4 slices
+// parseChart() should dispatch each to the right ChartModel.kind and
+// round-trip categories + series names + numeric values.
+{
+    const { wb } = await renderFixture('charts');
+    const sheet = wb.parsed.sheets[0];
+    assert(Array.isArray(sheet.charts), '93a: Sheet.charts should be an array');
+    assert(sheet.charts.length === 3,
+        `93b: expected 3 charts (got ${sheet.charts.length})`);
+    const byType = new Map();
+    for (const ch of sheet.charts) {
+        if (ch.model) byType.set(ch.model.kind, ch);
+    }
+    const barChart = byType.get('column');
+    const lineChart = byType.get('line');
+    const pieChart = byType.get('pie');
+    assert(barChart, '93c: a column-kind chart should be present (barDir=col)');
+    assert(lineChart, '93d: a line-kind chart should be present');
+    assert(pieChart, '93e: a pie-kind chart should be present');
+
+    if (barChart?.model) {
+        assert(barChart.model.title === 'Revenue by Quarter',
+            `93f: bar chart title should be "Revenue by Quarter" (got ${JSON.stringify(barChart.model.title)})`);
+        assert(JSON.stringify(barChart.model.categories) === JSON.stringify(['Q1', 'Q2', 'Q3', 'Q4']),
+            `93g: bar chart categories should be Q1-Q4 (got ${JSON.stringify(barChart.model.categories)})`);
+        assert(barChart.model.series.length === 2,
+            `93h: bar chart should have 2 series (got ${barChart.model.series.length})`);
+        const s1 = barChart.model.series[0];
+        const s2 = barChart.model.series[1];
+        assert(s1?.name === '2023', `93i: series-1 name should be "2023" (got ${s1?.name})`);
+        assert(s2?.name === '2024', `93j: series-2 name should be "2024" (got ${s2?.name})`);
+        assert(JSON.stringify(s1?.values) === JSON.stringify([120, 150, 180, 210]),
+            `93k: series-1 values should round-trip (got ${JSON.stringify(s1?.values)})`);
+        assert(JSON.stringify(s2?.values) === JSON.stringify([140, 170, 200, 260]),
+            `93l: series-2 values should round-trip (got ${JSON.stringify(s2?.values)})`);
+    }
+
+    if (lineChart?.model) {
+        assert(lineChart.model.title === 'Website Traffic',
+            `93m: line chart title should be "Website Traffic" (got ${JSON.stringify(lineChart.model.title)})`);
+        assert(lineChart.model.categories.length === 6,
+            `93n: line chart should have 6 categories (got ${lineChart.model.categories.length})`);
+        assert(lineChart.model.series.length === 1,
+            `93o: line chart should have 1 series (got ${lineChart.model.series.length})`);
+        assert(JSON.stringify(lineChart.model.series[0]?.values) === JSON.stringify([1200, 1450, 1610, 1580, 1900, 2300]),
+            `93p: line chart values should round-trip (got ${JSON.stringify(lineChart.model.series[0]?.values)})`);
+    }
+
+    if (pieChart?.model) {
+        assert(pieChart.model.title === 'Market Share',
+            `93q: pie chart title should be "Market Share" (got ${JSON.stringify(pieChart.model.title)})`);
+        assert(pieChart.model.categories.length === 4,
+            `93r: pie chart should have 4 categories (got ${pieChart.model.categories.length})`);
+        assert(pieChart.model.series.length === 1,
+            `93s: pie chart should have 1 series (got ${pieChart.model.series.length})`);
+        assert(JSON.stringify(pieChart.model.series[0]?.values) === JSON.stringify([40, 30, 20, 10]),
+            `93t: pie chart values should round-trip (got ${JSON.stringify(pieChart.model.series[0]?.values)})`);
+    }
+}
+
+// ── 94. charts renderer: <figure class="xlsx-chart"> with SVG children ────
+// Each chart becomes a <figure class="xlsx-chart"> carrying an <svg>
+// (not the dashed placeholder). Rect / polyline / path counts match the
+// fixture's series × category shape.
+{
+    const { container } = await renderFixture('charts');
+    const figures = container.querySelectorAll('section.xlsx figure.xlsx-chart');
+    assert(figures.length === 3,
+        `94a: expected 3 chart figures (got ${figures.length})`);
+    // No dashed placeholder should remain when every chart model was
+    // recognised.
+    const placeholders = container.querySelectorAll('section.xlsx .xlsx-chart-placeholder');
+    assert(placeholders.length === 0,
+        `94b: no dashed chart placeholder should remain (got ${placeholders.length})`);
+
+    const byPlot = new Map();
+    for (const f of figures) {
+        byPlot.set(f.getAttribute('data-chart-plot'), f);
+    }
+
+    const colFig = byPlot.get('column');
+    if (colFig) {
+        const svg = colFig.querySelector('svg');
+        assert(!!svg, '94c: column-chart figure should contain an <svg>');
+        const serGroups = colFig.querySelectorAll('g.xlsx-chart-series');
+        assert(serGroups.length === 2,
+            `94d: column chart should emit 2 series groups (got ${serGroups.length})`);
+        if (serGroups.length >= 2) {
+            const s1Rects = serGroups[0].querySelectorAll('rect');
+            const s2Rects = serGroups[1].querySelectorAll('rect');
+            assert(s1Rects.length === 4,
+                `94e: series-1 should have 4 <rect>s (got ${s1Rects.length})`);
+            assert(s2Rects.length === 4,
+                `94f: series-2 should have 4 <rect>s (got ${s2Rects.length})`);
+        }
+    } else {
+        assert(false, '94c.pre: no figure with data-chart-plot=column found');
+    }
+
+    const lineFig = byPlot.get('line');
+    if (lineFig) {
+        const polylines = lineFig.querySelectorAll('polyline');
+        assert(polylines.length === 1,
+            `94g: line chart should emit 1 <polyline> (got ${polylines.length})`);
+        if (polylines.length) {
+            const pts = (polylines[0].getAttribute('points') || '').trim().split(/\s+/).filter(Boolean);
+            assert(pts.length === 6,
+                `94h: line chart polyline should have 6 point pairs (got ${pts.length})`);
+        }
+    } else {
+        assert(false, '94g.pre: no figure with data-chart-plot=line found');
+    }
+
+    const pieFig = byPlot.get('pie');
+    if (pieFig) {
+        const paths = pieFig.querySelectorAll('path');
+        assert(paths.length === 4,
+            `94i: pie chart should emit 4 <path> slices (got ${paths.length})`);
+    } else {
+        assert(false, '94i.pre: no figure with data-chart-plot=pie found');
+    }
+}
+
+// ── 95. charts renderer: title + legend text reach the DOM via textContent ─
+// Title <text> carries the chart title unchanged; legend swatches pair
+// with a series-name <text>. The exported renderChart helper is invoked
+// directly with a synthetic model carrying a "<script>" literal to
+// confirm textContent never expands to a child element.
+{
+    const { container, wb } = await renderFixture('charts');
+    const figures = container.querySelectorAll('section.xlsx figure.xlsx-chart');
+    const colFig = Array.from(figures).find((f) => f.getAttribute('data-chart-plot') === 'column');
+    assert(!!colFig, '95a: column-chart figure should exist');
+    if (colFig) {
+        const title = colFig.querySelector('text.xlsx-chart-title');
+        assert(!!title, '95b: column-chart figure should carry a <text class="xlsx-chart-title">');
+        assert(title?.textContent === 'Revenue by Quarter',
+            `95c: title textContent should be "Revenue by Quarter" (got ${JSON.stringify(title?.textContent)})`);
+        const legendEntries = colFig.querySelectorAll('g.xlsx-chart-legend-entry');
+        assert(legendEntries.length === 2,
+            `95d: column-chart legend should have 2 entries (got ${legendEntries.length})`);
+        const legendText = Array.from(legendEntries)
+            .map((e) => e.querySelector('text')?.textContent)
+            .filter(Boolean);
+        assert(legendText.includes('2023') && legendText.includes('2024'),
+            `95e: legend entries should include "2023" and "2024" (got ${JSON.stringify(legendText)})`);
+        void wb;
+    }
+
+    // Textual escape: feed a synthetic title containing a literal <script>
+    // through renderChart and assert no script element appears in the DOM.
+    const { renderChart } = globalThis.xlsx;
+    assert(typeof renderChart === 'function',
+        '95f: renderChart should be exported on the library surface');
+    if (typeof renderChart === 'function') {
+        const evilModel = {
+            kind: 'column',
+            title: '<script>alert(1)</script>',
+            categories: ['A'],
+            series: [{ name: 'evil', values: [1], color: null }],
+            legend: 'none',
+        };
+        const svg = renderChart(evilModel);
+        assert(!!svg, '95g: renderChart should return an SVG for a column model');
+        if (svg) {
+            const host = document.createElement('div');
+            host.appendChild(svg);
+            // innerHTML serialises the raw markup. If textContent escaping
+            // worked, the angle brackets should be entity-encoded.
+            const html = host.innerHTML;
+            assert(!/<script[>\s]/i.test(html),
+                `95h: serialised SVG must not contain a literal <script> tag (got ${html.slice(0, 200)}…)`);
+            // The title <text> should still carry the raw string as
+            // textContent — proving the renderer honours it without
+            // interpreting it as markup.
+            const title = svg.querySelector('text.xlsx-chart-title');
+            assert(title?.textContent === '<script>alert(1)</script>',
+                `95i: title textContent should round-trip the hostile string verbatim (got ${JSON.stringify(title?.textContent)})`);
+        }
+    }
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
