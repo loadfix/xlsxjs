@@ -1,42 +1,226 @@
 <!DOCTYPE html>
 <html>
+
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, viewport-fit=cover" />
     <title>xlsxjs demo</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet"
+        integrity="sha384-1BmE4kWBq78iYhFldvKuhfTAU6auU8tT94WrHftjDbrCEXSU1oBoqyl2QvZ6jIW3" crossorigin="anonymous">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-ka7Sk0Gln4gmtz2MlQnikT1wXgYsOg+OMhuP+IlRH9sENBO0LRn5q+8nbTov4+1p"
+        crossorigin="anonymous"></script>
+    <!-- dependencies -->
     <script crossorigin src="https://unpkg.com/jszip/dist/jszip.min.js"></script>
+    <!-- library -->
     <script src="dist/xlsx-preview.js"></script>
+
+    <!-- Open-source metric-compatible fallback for Office's default "Calibri".
+         The local() entries match on systems that ship the real fonts;
+         otherwise Carlito (Calibri clone) is downloaded from Google Fonts. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
+
     <style>
-        body { margin: 0; font-family: system-ui, sans-serif; }
-        .toolbar { display: flex; gap: 0.5rem; padding: 0.5rem; background: #f5f5f5; border-bottom: 1px solid #ddd; }
-        #container { padding: 1rem; }
-    </style>
-</head>
-<body>
-    <div class="toolbar">
-        <input id="files" type="file" accept=".xlsx" />
-    </div>
-    <div id="container"></div>
-
-    <script>
-        let currentWorkbook = null;
-        const xlsxOptions = Object.assign({}, xlsx.defaultOptions);
-        const container = document.querySelector('#container');
-        const fileInput = document.querySelector('#files');
-
-        async function renderXlsx(file) {
-            currentWorkbook = file;
-            if (!file) return;
-            const res = await xlsx.renderAsync(file, container, null, xlsxOptions);
-            console.log(res);
+        /* Make runs that specify font-family: "Calibri" fall through to a
+           real metric-compatible family when Calibri isn't installed. */
+        @font-face {
+            font-family: "Calibri";
+            src: local("Calibri"), local("Carlito");
+            font-weight: 400;
+            font-style: normal;
+        }
+        @font-face {
+            font-family: "Calibri";
+            src: local("Calibri Bold"), local("Carlito Bold");
+            font-weight: 700;
+            font-style: normal;
+        }
+        @font-face {
+            font-family: "Calibri";
+            src: local("Calibri Italic"), local("Carlito Italic");
+            font-weight: 400;
+            font-style: italic;
+        }
+        @font-face {
+            font-family: "Calibri";
+            src: local("Calibri Bold Italic"), local("Carlito Bold Italic");
+            font-weight: 700;
+            font-style: italic;
         }
 
-        fileInput.addEventListener('change', () => renderXlsx(fileInput.files[0]));
-        container.addEventListener('dragover', (ev) => ev.preventDefault());
-        container.addEventListener('drop', (ev) => {
+        body {
+            background: #e9ecef;
+        }
+        #document-container {
+            padding: 1rem;
+        }
+        .drop-hint {
+            color: #6c757d;
+            text-align: center;
+            padding: 3rem;
+            border: 2px dashed #adb5bd;
+            border-radius: 8px;
+            margin: 2rem auto;
+            max-width: 600px;
+        }
+        /* Demo-side: if the user picks a single sheet from the dropdown,
+           hide the others. Toggled by JS based on data-active-sheet. */
+        #document-container[data-active-sheet] section.xlsx { display: none; }
+        #document-container[data-active-sheet] section.xlsx.active { display: block; }
+    </style>
+</head>
+
+<body class="vh-100 d-flex flex-column">
+    <div class="hstack p-2 gap-2 bg-light border-bottom no-print">
+        <strong>xlsxjs demo</strong>
+        <input id="files" type="file" class="form-control" style="width: 50ch;" accept=".xlsx,.xlsm" />
+        <button id="loadButton" class="btn btn-primary px-4">Reload</button>
+        <div class="dropdown">
+            <button class="btn btn-secondary dropdown-toggle" type="button" id="optionsMenuButton"
+                data-bs-toggle="dropdown" aria-expanded="false">
+                Options
+            </button>
+            <ul id="optionsMenu" class="dropdown-menu" aria-labelledby="optionsMenuButton">
+                <li>
+                    <div class="dropdown-item">
+                        <div class="form-check">
+                            <label class="form-check-label">
+                                <input id="formulasToggle" type="checkbox" class="form-check-input">
+                                Show formulas
+                            </label>
+                        </div>
+                    </div>
+                </li>
+                <li>
+                    <div class="dropdown-item">
+                        <div>Notation</div>
+                        <div class="form-check form-check-inline">
+                            <label><input type="radio" name="notation" value="a1" checked> A1</label>
+                        </div>
+                        <div class="form-check form-check-inline">
+                            <label><input type="radio" name="notation" value="r1c1"> R1C1</label>
+                        </div>
+                    </div>
+                </li>
+            </ul>
+        </div>
+        <div class="btn-group" role="group" id="sheetSwitcher" aria-label="Sheet switcher" hidden>
+            <!-- Populated after each render: one <button> per sheet, plus "All". -->
+        </div>
+        <div class="ms-auto text-muted small">Drag &amp; drop an <code>.xlsx</code> anywhere to load</div>
+    </div>
+
+    <div id="document-container" class="overflow-auto flex-grow-1">
+        <div class="drop-hint" id="dropHint">
+            Choose a <code>.xlsx</code> file above, or drag one into this window.
+        </div>
+    </div>
+
+    <script>
+        let currentDocument = null;
+        const xlsxOptions = Object.assign({}, xlsx.defaultOptions ?? {});
+
+        const container = document.querySelector("#document-container");
+        const fileInput = document.querySelector("#files");
+        const loadButton = document.querySelector("#loadButton");
+        const formulasToggle = document.querySelector("#formulasToggle");
+        const sheetSwitcher = document.querySelector("#sheetSwitcher");
+
+        async function renderXlsx(file) {
+            currentDocument = file;
+            if (!currentDocument) return;
+            try {
+                const res = await xlsx.renderAsync(currentDocument, container, null, xlsxOptions);
+                console.log("xlsx: finished", res);
+                buildSheetSwitcher(container);
+            } catch (err) {
+                console.error("xlsx: failed to render", err);
+                container.innerHTML = '';
+                const msg = document.createElement('div');
+                msg.className = 'alert alert-danger m-3';
+                msg.textContent = 'Failed to render: ' + (err?.message ?? err);
+                container.appendChild(msg);
+                sheetSwitcher.hidden = true;
+            }
+        }
+
+        function buildSheetSwitcher(root) {
+            const sections = [...root.querySelectorAll('section.xlsx')];
+            sheetSwitcher.innerHTML = '';
+            if (sections.length <= 1) {
+                sheetSwitcher.hidden = true;
+                root.removeAttribute('data-active-sheet');
+                return;
+            }
+            sheetSwitcher.hidden = false;
+
+            function setActive(name) {
+                if (name === '__all__') {
+                    root.removeAttribute('data-active-sheet');
+                } else {
+                    root.setAttribute('data-active-sheet', name);
+                    for (const s of sections) {
+                        s.classList.toggle('active', s.getAttribute('data-sheet-name') === name);
+                    }
+                }
+                for (const b of sheetSwitcher.querySelectorAll('button')) {
+                    b.classList.toggle('active', b.dataset.sheetName === name);
+                }
+            }
+
+            const allBtn = document.createElement('button');
+            allBtn.type = 'button';
+            allBtn.className = 'btn btn-sm btn-outline-secondary active';
+            allBtn.textContent = 'All';
+            allBtn.dataset.sheetName = '__all__';
+            allBtn.addEventListener('click', () => setActive('__all__'));
+            sheetSwitcher.appendChild(allBtn);
+
+            for (const s of sections) {
+                const name = s.getAttribute('data-sheet-name') ?? 'Sheet';
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'btn btn-sm btn-outline-secondary';
+                btn.textContent = name;
+                btn.dataset.sheetName = name;
+                btn.addEventListener('click', () => setActive(name));
+                sheetSwitcher.appendChild(btn);
+            }
+        }
+
+        fileInput.addEventListener("change", () => renderXlsx(fileInput.files[0]));
+        loadButton.addEventListener("click", () => renderXlsx(fileInput.files[0]));
+
+        formulasToggle.addEventListener("change", () => {
+            xlsxOptions.showFormulas = formulasToggle.checked;
+            renderXlsx(currentDocument);
+        });
+
+        for (const radio of document.querySelectorAll('input[name="notation"]')) {
+            radio.addEventListener('change', () => {
+                if (radio.checked) {
+                    xlsxOptions.formulaNotation = radio.value;
+                    renderXlsx(currentDocument);
+                }
+            });
+        }
+
+        container.addEventListener("dragover", (ev) => ev.preventDefault());
+        container.addEventListener("drop", (ev) => {
             ev.preventDefault();
-            renderXlsx(ev.dataTransfer.files[0]);
+            const file = ev.dataTransfer.files[0];
+            if (file) {
+                try {
+                    const dt = new DataTransfer();
+                    dt.items.add(file);
+                    fileInput.files = dt.files;
+                } catch (_) { /* Safari-old: ignore */ }
+                renderXlsx(file);
+            }
         });
     </script>
 </body>
+
 </html>

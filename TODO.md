@@ -105,3 +105,79 @@ plus pre-existing known gaps. Organised by effort tier, not by visibility.
   if/when we render hyperlinks, `<img src>` with arbitrary MIME types
   from inline media, CSS identifier validation on any class we
   interpolate from XLSX-derived strings.
+
+## Read-only feature gaps vs Microsoft Excel
+
+*Added 2026-05-04. Items that xlsxjs doesn't render or parse,
+ordered by how noticeable their absence is when viewing a real workbook. Anything
+already tracked elsewhere in this file is excluded.*
+
+### Cell content
+- **Hyperlinks** (`worksheet/hyperlinks/hyperlink` + sheet rels of type `/hyperlink`) — cell-anchored links (web, bookmark, email); today the formatted text renders but never becomes clickable.
+- **Data validation dropdowns** (`worksheet/dataValidations/dataValidation[@type='list']`) — list-source values pinned to a cell; Excel paints a ▾ affordance even in read-only view.
+- **Cell metadata / dynamic-array spill** (`xl/metadata.xml` + `c/@cm`/`@vm`) — marks cells that carry rich data types or are part of a spilled array; without it linked data types render as plain strings.
+
+### Cell formatting
+- **Wrap text** (`xf/alignment/@wrapText`) — multi-line content in a single cell; without it long strings spill into empty neighbours.
+- **Shrink to fit** (`xf/alignment/@shrinkToFit`) — auto-reduces font size so content fits the column width.
+- **Indent levels** (`xf/alignment/@indent`) — left/right indent in character widths, commonly used for grouped row labels.
+- **Text rotation / vertical text** (`xf/alignment/@textRotation`) — 0..180 degrees, 255 = stacked vertically; ubiquitous in header rows.
+- **Justify and distributed alignment** (`xf/alignment/@horizontal='justify'|'distributed'|'centerContinuous'|'fill'`, `@vertical='justify'|'distributed'`) — only `left/right/center/justify` horizontal and `top/middle/bottom` vertical are surfaced today.
+- **Reading order** (`xf/alignment/@readingOrder`) — 1 = LTR, 2 = RTL context for bi-di text inside cells.
+- **Strikethrough** (`font/strike`) — struck-out text; common in change tracking and finished-task lists.
+- **Subscript / superscript** (`font/vertAlign` = `subscript`|`superscript`) — scientific and chemistry sheets rely on this for legibility.
+- **Underline variants** (`font/u/@val` = `double`|`singleAccounting`|`doubleAccounting`) — accounting totals use the double accounting underline by convention; today every `<u>` renders as a single underline.
+- **Font family / face** (`font/name/@val`) — deliberately dropped over CSS-injection concerns; the sheet loses its chosen face (e.g. monospace code fonts, Cambria headings).
+- **Non-solid pattern fills** (`fill/patternFill/@patternType` = `darkGray`/`lightGray`/`darkHorizontal`/`lightVertical`/`darkGrid`/`darkTrellis`/…) — only `solid` and `gray125` are recognised; every other pattern drops the fill entirely.
+- **Diagonal borders** (`border/diagonal` + `@diagonalUp`/`@diagonalDown`) — the crossed-out-cell convention; parser reads only the four orthogonal sides.
+
+### Number formats
+- **Accounting formats** (numFmt codes with `_(` / `_)` padding) — the `_` pad-to-width operator is stripped as a literal today, collapsing accounting columns' trailing-paren alignment.
+- **Fill character** (`*` in a format code, e.g. `"$"* #,##0`) — repeats the next char to fill column width; common on accounting formats, currently rendered as a literal `*`.
+- **Fraction formats** (`# ?/?`, `# ??/??` — numFmt IDs 12/13 and custom) — displayed via the generic numeric path today, so "0.25" shows as `0.25` instead of `1/4`.
+- **Elapsed-time markers** (`[h]`/`[m]`/`[s]` inside format codes) — bracketed elapsed units are stripped without adding the accumulated elapsed value, so durations > 24h render wrong.
+- **Conditional section formats** (`[>100]#,##0;[Red]-#,##0`) — the bracketed conditional predicate is stripped and the first section is always used regardless of value.
+- **Colour modifiers in format codes** (`[Red]`, `[Blue]`, `[Color 14]`) — parsed as brackets and dropped; the intended per-section colour never reaches the td.
+- **Scientific notation** (numFmt IDs 11/48 and custom `0.00E+00`) — the E+NN exponent syntax is not expanded; numbers render via the generic numeric path.
+- **Locale currency symbols** (`[$€-2]`, `[$¥-411]`, `[$-409]`) — the locale-tagged currency/calendar prefix is stripped with the rest of the brackets, dropping the symbol.
+- **1904 date system** (`workbook/workbookPr/@date1904`) — the 1904 epoch flag is ignored; files authored on Mac Office pre-2011 render every date four years and one day off.
+
+### Display & layout
+- **Sheet visibility state** (`workbook/sheets/sheet/@state` = `hidden`|`veryHidden`) — hidden and very-hidden sheets render as regular visible sheets; Excel's viewer omits them by default.
+- **Sheet tab colour** (`worksheet/sheetPr/tabColor`) — colored tab strip; shown as a DOM hook for consumers rendering a sheet-tab bar.
+- **Right-to-left sheet direction** (`worksheet/sheetViews/sheetView/@rightToLeft`) — swaps column A to the right edge and reverses row/column headers for Hebrew/Arabic sheets.
+- **Gridline / heading visibility toggles** (`sheetView/@showGridLines`, `@showRowColHeaders`) — sheets authored with gridlines off still render with them on in xlsxjs.
+- **Zoom level** (`sheetView/@zoomScale`, `@zoomScaleNormal`) — author-stored zoom; a 150% view on the source sheet renders at 100% here.
+- **Page breaks and print area** (`worksheet/rowBreaks`, `colBreaks`, `definedName@name='_xlnm.Print_Area'`) — the dashed break markers and print-preview shading Excel draws in Page Break Preview aren't surfaced at all.
+- **Header / footer text** (`worksheet/headerFooter/oddHeader`, `oddFooter`) — three-zone (&L/&C/&R) header/footer strings that show in Page Layout view.
+- **Split panes without freeze** (`pane/@state='split'`) — currently ignored; splits without freeze render as a single scrolling pane.
+
+### Conditional formatting
+- **`containsBlanks` / `notContainsBlanks`** (`cfRule/@type`) — highlights blank or non-blank cells in a range; returns no-match today.
+- **`containsErrors` / `notContainsErrors`** (`cfRule/@type`) — highlights `#DIV/0!`, `#N/A`, etc.; returns no-match today.
+- **`aboveAverage` / `belowAverage`** (`cfRule/@type` + `@aboveAverage`/`@equalAverage`/`@stdDev`) — statistical banding; common on scorecard sheets.
+- **`timePeriod`** (`cfRule/@type` + `@timePeriod`=`today`|`yesterday`|`thisWeek`|`lastMonth`|…) — schedule-colouring rules used heavily in project plans.
+- **Data-bar `<ext>` attributes** (`cfRule/extLst/ext` under the 2009/9/main URI) — post-2010 options (negative-value fill, axis position, solid vs gradient fill, border colour) silently dropped.
+- **Custom icon-set rule lists** (`iconSet/@custom='1'` + `cfIcon` children) — per-threshold icon overrides; xlsxjs uses the default palette for the set name only.
+- **Dxf strikethrough / underline / number-format** (`dxf/font/strike`, `dxf/font/u/@val`, `dxf/numFmt/@formatCode`) — the dxf parser accepts these but the renderer applies neither strike nor the dxf's numFmt code to the cell.
+
+### Objects & drawings
+- **Shapes and connectors** (`xdr:sp`, `xdr:cxnSp` in `xl/drawings/drawingN.xml`) — callout arrows, rectangles, text boxes with cell-anchored position; currently only `<xdr:pic>` and `<xdr:graphicFrame>` (chart) are walked.
+- **WordArt and SmartArt** (`xdr:sp` with `a:txBody`/`dgm:relIds`) — decorative text and hierarchy/process diagrams embedded as drawings.
+- **Text boxes** (`xdr:sp/xdr:txBody`) — free-floating annotations, used heavily for dashboards.
+- **Form controls** (`xl/ctrlProps/*.xml` + VML / `xdr:sp` buttons, checkboxes, list boxes) — checked/unchecked state and labels aren't rendered even as static values.
+- **Slicers and timelines** (`xl/slicers/slicer*.xml`, `xl/timelines/timeline*.xml`) — the pivot/table filter chips that show current selection state.
+- **OLE objects and embedded files** (`xl/embeddings/*.bin` + `xdr:sp`) — embedded PDFs, Word docs, equations render as missing content today.
+
+### Structural
+- **Row and column outlines** (`row/@outlineLevel`, `col/@outlineLevel`, `sheetFormatPr/@outlineLevelRow`, `@outlineLevelCol`) — the grouping gutter with +/- handles beside row/column headers; outline level is dropped.
+- **Summary row / column position** (`sheetPr/outlinePr/@summaryBelow`, `@summaryRight`) — controls which side the group-summary row sits on for outline rendering.
+- **Defined names** (`workbook/definedNames/definedName`) — named ranges surface as cell refs in formulas and inside dropdown sources; not exposed on the Workbook model.
+- **Sheet protection state** (`worksheet/sheetProtection`) — read-only status in the sheet tab and locked-cell indicators; not surfaced for consumers.
+
+### Internationalisation & accessibility
+- **Phonetic ruby (furigana)** (`si/rPh`, `worksheet/phoneticPr`) — ruby text above Japanese characters; the `<rPh>` runs are dropped when we flatten an `<si>`.
+- **East-Asian vertical text** (`xf/alignment/@textRotation='255'`) — the stacked-vertical convention distinct from rotation degrees; same gap as text rotation.
+- **Alt text on images** (`xdr:pic/xdr:nvPicPr/xdr:cNvPr/@descr`) — parsed today but also emitted as the `<img alt>` only when `descr` is present; the newer `a:extLst` "decorative" marker is not honoured.
+- **Alt text on tables / charts** (`table/@altText`, `table/@altTextSummary`) — accessibility label on defined tables; not exposed on `TableDef`.
+- **Major/minor font scheme resolution** (`xl/theme/theme1.xml` `a:fontScheme/a:majorFont`/`a:minorFont`) — styles referencing `@scheme='major'|'minor'` on a font fall back to the default family because we don't read the theme's font pair.
