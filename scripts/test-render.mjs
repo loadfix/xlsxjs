@@ -2754,6 +2754,130 @@ async function renderFixture(path, options) {
         '84u: unsupported formula shape returns false without throwing');
 }
 
+// ── 85. Security sanitiser surface: hostile URL / font / colour inputs ────
+// Direct unit-tests against the three sanitiser exports on the UMD. The
+// fixture-driven scenarios above cover the integrated "DOM after rendering"
+// side — this one is a belt-and-braces pass on the helpers themselves so a
+// regression that bypasses the integration tests (an attacker finds an
+// encoding the fixtures don't cover) still trips a failure here.
+{
+    const { isSafeHyperlinkHref, sanitizeFontFamily, sanitizeHexColor } = globalThis.xlsx;
+
+    // All three helpers must be exported from the UMD — the consumer of
+    // the library may want to plug them into their own pipeline.
+    assert(typeof isSafeHyperlinkHref === 'function', '85a: isSafeHyperlinkHref exported');
+    assert(typeof sanitizeFontFamily === 'function',  '85b: sanitizeFontFamily exported');
+    assert(typeof sanitizeHexColor === 'function',    '85c: sanitizeHexColor exported');
+
+    // ── hostile URL list: hyperlink href allowlist ───────────────────────
+    // Every entry here MUST be rejected. Historical bypasses for
+    // javascript:-allowlist regexes live in this list: case variants,
+    // surrounding whitespace, control chars, tab/newline splits, URL-encoded
+    // schemes, data: with HTML, blob:, file:, vbscript:, ms-its:, etc.
+    const hostileHrefs = [
+        'javascript:alert(1)',
+        'JAVASCRIPT:alert(1)',
+        'Java\tScript:alert(1)',           // tab in scheme — URL() strips it
+        'Java\nScript:alert(1)',           // newline in scheme
+        'Java\rScript:alert(1)',           // carriage return in scheme
+        'java\x00script:alert(1)',         // null byte
+        ' javascript:alert(1)',            // leading whitespace
+        '\tjavascript:alert(1)',           // leading tab
+        '\njavascript:alert(1)',           // leading newline
+        ' \t\n javascript:alert(1)',       // mixed leading whitespace
+        'vbscript:msgbox(1)',
+        'VbScript:msgbox(1)',
+        'data:text/html,<script>alert(1)</script>',
+        'data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+',
+        'file:///etc/passwd',
+        'blob:https://evil.example/abc',
+        'ms-its:mhtml:file://C:\\foo.mht!x',
+        'livescript:alert(1)',             // legacy Netscape
+        'mocha:alert(1)',                  // legacy
+        'view-source:https://evil.example',
+        'jar:file:///etc/passwd!/',
+        'about:blank',
+        'chrome://settings',
+    ];
+    for (const hostile of hostileHrefs) {
+        assert(isSafeHyperlinkHref(hostile) === false,
+            `85d: hostile URL ${JSON.stringify(hostile)} must be rejected`);
+    }
+
+    // Safe inputs still pass (regression guard — over-strict sanitiser is
+    // just as bad as under-strict).
+    for (const safe of [
+        'https://example.com',
+        'http://example.com',
+        'HTTPS://EXAMPLE.COM',
+        'https://example.com/path?q=1&r=2#frag',
+        'mailto:a@b.example',
+        'tel:+1-555-0100',
+        '#anchor',
+        '',
+        '  ',
+        'foo/bar.html',
+        './relative',
+    ]) {
+        assert(isSafeHyperlinkHref(safe) === true,
+            `85e: safe URL ${JSON.stringify(safe)} should be accepted`);
+    }
+    // null / undefined are idempotent (treated as "no href" = safe).
+    assert(isSafeHyperlinkHref(null) === true, '85f: null treated as safe (no href emitted)');
+    assert(isSafeHyperlinkHref(undefined) === true, '85g: undefined treated as safe');
+    // Wrong type: must be rejected, not silently coerced.
+    assert(isSafeHyperlinkHref(123) === false, '85h: non-string hostile input rejected');
+
+    // ── sanitizeFontFamily: injection attempts ──────────────────────────
+    const hostileFonts = [
+        null, undefined, '', '   ',
+        'Arial;display:none',
+        'Arial; display: block',
+        '"><script>alert(1)</script>',
+        'Arial\n{display:none}',
+        '}body{display:none;',
+        'Arial,sans-serif',              // commas — fallback injection risk
+        'Arial\\20',                     // backslash escape attempt
+        'url(x)',                        // url() in a font-family slot
+        'Arial;/*',                      // CSS comment open
+        '@import url(evil)',             // @import
+        'expression(alert(1))',          // IE-era but defensive
+        'Arial!important',               // "!" disallowed
+    ];
+    for (const v of hostileFonts) {
+        assert(sanitizeFontFamily(v) === null,
+            `85i: hostile font name ${JSON.stringify(v)} must return null (got ${JSON.stringify(sanitizeFontFamily(v))})`);
+    }
+    assert(sanitizeFontFamily('Calibri') === '"Calibri"', '85j: "Calibri" quoted');
+    assert(sanitizeFontFamily('Times New Roman') === '"Times New Roman"', '85k: spaces allowed');
+    assert(sanitizeFontFamily('Helvetica-Bold') === '"Helvetica-Bold"', '85l: hyphens allowed');
+
+    // ── sanitizeHexColor: malformed / injected input ─────────────────────
+    const hostileColors = [
+        null, undefined, '', '   ',
+        'red',                           // named colour (not hex)
+        '#ff0000',                       // with leading # (we strip on write — expect rejection)
+        'zzzzzz',                        // not hex
+        'ff00',                          // wrong length
+        'ff00000',                       // 7 chars
+        '12345678901',                   // too long
+        'ff0000;background:red',         // injection
+        'ff0000 ;{}',                    // CSS break-out
+        'ff0000/*',                      // CSS comment
+        'ff0000<script>',                // HTML injection
+        'ff0000 red',                    // trailing garbage
+    ];
+    for (const v of hostileColors) {
+        assert(sanitizeHexColor(v) === null,
+            `85m: hostile hex ${JSON.stringify(v)} must return null (got ${JSON.stringify(sanitizeHexColor(v))})`);
+    }
+    // Accepted: 6-hex and 8-hex (ARGB → stripped alpha). Output lowercased.
+    assert(sanitizeHexColor('FF0000') === '#ff0000', '85n: 6-hex round-trips lower-cased');
+    assert(sanitizeHexColor('ff0000') === '#ff0000', '85o: 6-hex already-lower');
+    assert(sanitizeHexColor('ffFF0000') === '#ff0000', '85p: 8-hex (ARGB) strips alpha');
+    assert(sanitizeHexColor('00ffffff') === '#ffffff', '85q: ARGB with alpha=00');
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

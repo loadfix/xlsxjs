@@ -18,6 +18,15 @@ export class XlsxEncryptedError extends Error {
 
 const OLE_CFB_MAGIC = [0xd0, 0xcf, 0x11, 0xe0];
 
+// DoS guardrail: cap a single inlined media file at 32 MiB. Anything larger
+// is skipped (not inlined, not surfaced on `wb.media`). A normal embedded
+// image in an .xlsx is well under a megabyte; the cap is generous enough to
+// cover legitimate photography but stops a crafted 1 GiB "image" from
+// exhausting the tab via base64 expansion (+33 % overhead) and DOM allocation.
+// The chosen sinks are `<img src=data:…>` so the decoded bytes land in the
+// renderer process too.
+const MAX_MEDIA_BYTES = 32 * 1024 * 1024;
+
 async function bytesOf(data: Blob | ArrayBuffer | Uint8Array): Promise<Uint8Array | null> {
     if (data instanceof Uint8Array) return data;
     if (data instanceof ArrayBuffer) return new Uint8Array(data);
@@ -191,12 +200,22 @@ export class Workbook {
 
         // Media binaries — embed as data: URLs so the renderer can use them
         // without any runtime fetch. Kept separate from `parts` (strings).
+        // Oversized media (>MAX_MEDIA_BYTES) is skipped rather than inlined;
+        // drawings that reference it will fail to resolve a dataUrl and the
+        // image entry is quietly dropped. This caps attacker-controlled
+        // memory pressure at the load boundary.
         for (const p of Object.keys(zip.files)) {
             if (/^xl\/media\/[^/]+$/i.test(p)) {
                 const bin = zip.file(p);
                 if (!bin) continue;
-                const base64 = await bin.async('base64');
-                const mime = guessMime(p);
+                // Size-check before base64 expansion. The base64 projection
+                // is ~1.33x the raw byte length, so capping on raw size keeps
+                // the resulting data URL bounded. Oversized media is skipped
+                // rather than truncated so a half-image doesn't render.
+                const buf = await bin.async('uint8array');
+                if (buf.byteLength > MAX_MEDIA_BYTES) continue;
+                const base64 = bytesToBase64(buf);
+                const mime = sanitizeMediaMime(guessMime(p));
                 wb.media[p] = `data:${mime};base64,${base64}`;
             }
         }
@@ -220,4 +239,40 @@ function guessMime(path: string): string {
         case 'tiff': return 'image/tiff';
         default: return 'application/octet-stream';
     }
+}
+
+// Strict allowlist of MIME types we'll emit on a `data:` URL. The `<img>`
+// element treats SVG as a passive image (no scripts, no external refs), so
+// the whole allowlist is safe for that sink — but any MIME outside the list
+// decays to `application/octet-stream`, which renders as a broken image
+// rather than a potentially active resource. Belt-and-braces: guessMime()
+// already produces these strings, but a future refactor that forwards a
+// path-derived MIME must stay within the set.
+const MEDIA_MIME_ALLOWLIST = new Set<string>([
+    'image/png',
+    'image/jpeg',
+    'image/gif',
+    'image/svg+xml',
+    'image/webp',
+    'image/bmp',
+    'image/tiff',
+]);
+
+function sanitizeMediaMime(mime: string): string {
+    return MEDIA_MIME_ALLOWLIST.has(mime) ? mime : 'application/octet-stream';
+}
+
+// Convert a Uint8Array to base64. We can't rely on Buffer (Node-only) or
+// FileReader (browser-only) and need a single path that works in both jsdom
+// and real browsers. `btoa` is on both; we feed it a binary-string chunked
+// so we don't hit the V8 argument-count limit on very large inputs.
+function bytesToBase64(bytes: Uint8Array): string {
+    // atob/btoa round-trip through the "binary string" representation.
+    const CHUNK = 0x8000;
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+        const slice = bytes.subarray(i, Math.min(i + CHUNK, bytes.length));
+        binary += String.fromCharCode.apply(null, slice as unknown as number[]);
+    }
+    return btoa(binary);
 }
