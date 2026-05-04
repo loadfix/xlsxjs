@@ -75,6 +75,7 @@ function renderStyle(className: string): HTMLStyleElement {
     margin: 0; white-space: pre-line;
     font-family: inherit; font-size: inherit;
 }
+.${className} .xlsx-spill-anchor { outline: 1px dashed #0066cc; outline-offset: -1px; }
 .${className} .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
 .${className} .xlsx-threaded { color: #0066cc; margin-left: 4px; cursor: help; }
 .${className} .xlsx-shrink-to-fit { font-size: clamp(0.55em, 0.95em, 1em); overflow: hidden; }
@@ -514,6 +515,9 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
             const cell = byCol[c];
             const td = document.createElement('td');
             if (cell) renderCellContent(td, cell, styles, theme, date1904, options);
+            // Dynamic-array spill anchors get a subtle dashed outline. The
+            // flag is resolved at parse time from xl/metadata.xml + c/@cm.
+            if (cell?.isSpillAnchor) td.classList.add('xlsx-spill-anchor');
             // Hyperlink wrap: runs first so the anchor hugs the rendered
             // content (textContent / per-run <span>s). The URL is held to the
             // allowlist in isSafeHyperlinkHref; rejected URLs leave the cell

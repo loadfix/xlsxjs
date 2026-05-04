@@ -2080,6 +2080,50 @@ async function renderFixture(path, options) {
         `72e: caption aria-label should be "Q4 stock" (got ${JSON.stringify(caption?.getAttribute('aria-label'))})`);
 }
 
+// ── 73. cell-metadata: xl/metadata.xml parses into Workbook.metadata ──────
+{
+    const { wb } = await renderFixture('cell-metadata');
+    const md = wb.parsed.metadata;
+    assert(md !== null, '73a: Workbook.metadata should be non-null when xl/metadata.xml is present');
+    assert(Array.isArray(md?.cellMetadata), '73b: metadata.cellMetadata should be an array');
+    assert(md?.cellMetadata.length === 1,
+        `73c: one cellMetadata block expected (got ${md?.cellMetadata.length})`);
+    assert(md?.cellMetadata[0].dynamicArray === true,
+        `73d: cellMetadata[0] should resolve to dynamicArray=true (got ${md?.cellMetadata[0].dynamicArray})`);
+    // The type index should be 0 (XLDAPR is the only metadataType → 1-based 1 → 0-based 0).
+    assert(md?.cellMetadata[0].typeIndex === 0,
+        `73e: cellMetadata[0].typeIndex should be 0 (got ${md?.cellMetadata[0].typeIndex})`);
+    // Sheet A1 references cm=1 → cellMetadataIndex=0 + isSpillAnchor=true.
+    const sheet = wb.parsed.sheets[0];
+    const row1 = sheet.rows[0];
+    const a1 = row1[0];
+    const b1 = row1[1];
+    assert(a1.cellMetadataIndex === 0,
+        `73f: A1.cellMetadataIndex should be 0 (got ${a1.cellMetadataIndex})`);
+    assert(a1.isSpillAnchor === true, `73g: A1.isSpillAnchor should be true (got ${a1.isSpillAnchor})`);
+    assert(a1.valueMetadataIndex === null,
+        `73h: A1.valueMetadataIndex should be null (got ${a1.valueMetadataIndex})`);
+    assert(b1.cellMetadataIndex === null,
+        `73i: B1.cellMetadataIndex should be null (got ${b1.cellMetadataIndex})`);
+    assert(b1.isSpillAnchor === false,
+        `73j: B1.isSpillAnchor should be false (got ${b1.isSpillAnchor})`);
+}
+
+// ── 74. cell-metadata renderer: .xlsx-spill-anchor tags the A1 td ─────────
+{
+    const { container } = await renderFixture('cell-metadata');
+    const tds = container.querySelectorAll('section.xlsx tbody tr:first-child td');
+    // First tbody row: [A1, B1]. A1 carries the spill-anchor class; B1 doesn't.
+    assert(tds.length >= 2, `74a: first row should have at least two tds (got ${tds.length})`);
+    assert(tds[0].classList.contains('xlsx-spill-anchor'),
+        `74b: A1 td should carry .xlsx-spill-anchor (classList=${tds[0].className})`);
+    assert(!tds[1].classList.contains('xlsx-spill-anchor'),
+        `74c: B1 td should NOT carry .xlsx-spill-anchor (classList=${tds[1].className})`);
+    // Text content sanity: "anchor" / "plain".
+    assert(tds[0].textContent === 'anchor', `74d: A1 should render "anchor" (got ${tds[0].textContent})`);
+    assert(tds[1].textContent === 'plain', `74e: B1 should render "plain" (got ${tds[1].textContent})`);
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

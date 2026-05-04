@@ -60,6 +60,9 @@
             const styles = await readIfPresent('xl/styles.xml');
             if (styles)
                 wb.parts['xl/styles.xml'] = styles;
+            const metadata = await readIfPresent('xl/metadata.xml');
+            if (metadata)
+                wb.parts['xl/metadata.xml'] = metadata;
             for (const p of Object.keys(zip.files)) {
                 if (/^xl\/theme\/theme\d+\.xml$/i.test(p)) {
                     const xml = await readIfPresent(p);
@@ -1420,6 +1423,7 @@
         c: 'http://schemas.openxmlformats.org/drawingml/2006/chart',
         cx: 'http://schemas.microsoft.com/office/drawing/2014/chartex',
         tc: 'http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments',
+        xda: 'http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray',
     };
     class WorkbookParser {
         constructor(_options) {
@@ -1441,6 +1445,9 @@
             const persons = resolvePersons(rels, parts);
             const sheetMeta = parseSheetList(workbookXml);
             const { date1904, definedNames } = parseWorkbookMeta(workbookXml);
+            const metadata = parts['xl/metadata.xml']
+                ? parseWorkbookMetadata(parts['xl/metadata.xml'])
+                : null;
             const sheets = [];
             for (let i = 0; i < sheetMeta.length; i++) {
                 const { name, rId, state } = sheetMeta[i];
@@ -1461,10 +1468,68 @@
                 const comments = resolveCommentsForSheet(xmlPath, parts);
                 const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
                 const hyperlinkTargets = resolveHyperlinkTargets(xmlPath, parts);
-                sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, shapes, pivots, comments, threadedComments, hyperlinkTargets, i, definedNames));
+                sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, shapes, pivots, comments, threadedComments, hyperlinkTargets, i, definedNames, metadata));
             }
-            return { sheets, styles, theme, persons, date1904, definedNames };
+            return { sheets, styles, theme, persons, date1904, definedNames, metadata };
         }
+    }
+    function parseWorkbookMetadata(xml) {
+        const doc = parseXml(xml);
+        const typeNames = [];
+        const typeEls = doc.getElementsByTagNameNS(NS.main, 'metadataType');
+        for (let i = 0; i < typeEls.length; i++) {
+            typeNames.push(typeEls[i].getAttribute('name') ?? '');
+        }
+        const futureFlagsByType = new Map();
+        const fmEls = doc.getElementsByTagNameNS(NS.main, 'futureMetadata');
+        for (let i = 0; i < fmEls.length; i++) {
+            const fm = fmEls[i];
+            const name = fm.getAttribute('name') ?? '';
+            const bkEls = fm.getElementsByTagNameNS(NS.main, 'bk');
+            const flags = [];
+            for (let j = 0; j < bkEls.length; j++) {
+                const bk = bkEls[j];
+                let dynamic = false;
+                const daProps = bk.getElementsByTagNameNS(NS.xda, 'dynamicArrayProperties').item(0);
+                if (daProps) {
+                    const attr = daProps.getAttribute('fDynamic');
+                    dynamic = attr === '1' || attr === 'true';
+                }
+                flags.push(dynamic);
+            }
+            futureFlagsByType.set(name, flags);
+        }
+        const resolveBlock = (bk) => {
+            const rc = bk.getElementsByTagNameNS(NS.main, 'rc').item(0);
+            const t = rc ? Number(rc.getAttribute('t')) : NaN;
+            const v = rc ? Number(rc.getAttribute('v')) : NaN;
+            const typeIndex = Number.isFinite(t) && t >= 1 ? t - 1 : -1;
+            const typeName = typeIndex >= 0 && typeIndex < typeNames.length
+                ? typeNames[typeIndex]
+                : '';
+            let dynamicArray = false;
+            if (typeName === 'XLDAPR') {
+                const flags = futureFlagsByType.get('XLDAPR');
+                if (flags && Number.isFinite(v) && v >= 0 && v < flags.length) {
+                    dynamicArray = flags[v];
+                }
+            }
+            return { typeIndex, dynamicArray };
+        };
+        const readList = (listTag) => {
+            const out = [];
+            const wrap = doc.getElementsByTagNameNS(NS.main, listTag).item(0);
+            if (!wrap)
+                return out;
+            const bks = wrap.getElementsByTagNameNS(NS.main, 'bk');
+            for (let i = 0; i < bks.length; i++)
+                out.push(resolveBlock(bks[i]));
+            return out;
+        };
+        return {
+            cellMetadata: readList('cellMetadata'),
+            valueMetadata: readList('valueMetadata'),
+        };
     }
     function parseWorkbookMeta(workbookXml) {
         const doc = parseXml(workbookXml);
@@ -2181,7 +2246,7 @@
             name: firstAttr('rFont', 'val') ?? firstAttr('name', 'val'),
         };
     }
-    function parseSheet(name, state, xml, sharedStrings, tables = [], images = [], charts = [], shapes = [], pivots = [], comments = [], threadedComments = [], hyperlinkTargets = new Map(), sheetIndex = 0, definedNames = []) {
+    function parseSheet(name, state, xml, sharedStrings, tables = [], images = [], charts = [], shapes = [], pivots = [], comments = [], threadedComments = [], hyperlinkTargets = new Map(), sheetIndex = 0, definedNames = [], metadata = null) {
         const doc = parseXml(xml);
         const rowEls = doc.getElementsByTagNameNS(NS.main, 'row');
         const rows = [];
@@ -2215,7 +2280,7 @@
             const cellEls = rowEl.getElementsByTagNameNS(NS.main, 'c');
             const cells = [];
             for (let j = 0; j < cellEls.length; j++) {
-                const cell = parseCell(cellEls[j], rowIndex, sharedStrings);
+                const cell = parseCell(cellEls[j], rowIndex, sharedStrings, metadata);
                 if (!cell)
                     continue;
                 cells.push(cell);
@@ -2707,7 +2772,7 @@
         }
         return out;
     }
-    function parseCell(c, fallbackRow, sharedStrings) {
+    function parseCell(c, fallbackRow, sharedStrings, metadata = null) {
         const ref = c.getAttribute('r');
         let col = 0, row = fallbackRow;
         if (ref) {
@@ -2724,7 +2789,30 @@
         const formula = fEl ? (fEl.textContent ?? '') : null;
         const styleAttr = c.getAttribute('s');
         const styleIndex = styleAttr != null && Number.isFinite(Number(styleAttr)) ? Number(styleAttr) : -1;
-        const base = { col, row, styleIndex, formula };
+        const resolveMetaIdx = (attr, list) => {
+            const raw = c.getAttribute(attr);
+            if (raw == null || raw === '')
+                return null;
+            const n = Number(raw);
+            if (!Number.isFinite(n) || n <= 0)
+                return null;
+            const zero = Math.floor(n) - 1;
+            if (!list)
+                return zero;
+            return zero;
+        };
+        const cellMetadataIndex = resolveMetaIdx('cm', metadata?.cellMetadata);
+        const valueMetadataIndex = resolveMetaIdx('vm', metadata?.valueMetadata);
+        let isSpillAnchor = false;
+        if (cellMetadataIndex !== null && metadata) {
+            const block = metadata.cellMetadata[cellMetadataIndex];
+            if (block && block.dynamicArray)
+                isSpillAnchor = true;
+        }
+        const base = {
+            col, row, styleIndex, formula,
+            cellMetadataIndex, valueMetadataIndex, isSpillAnchor,
+        };
         switch (type) {
             case 's': {
                 const idx = Number(raw);
@@ -3513,6 +3601,7 @@
     margin: 0; white-space: pre-line;
     font-family: inherit; font-size: inherit;
 }
+.${className} .xlsx-spill-anchor { outline: 1px dashed #0066cc; outline-offset: -1px; }
 .${className} .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
 .${className} .xlsx-threaded { color: #0066cc; margin-left: 4px; cursor: help; }
 .${className} .xlsx-shrink-to-fit { font-size: clamp(0.55em, 0.95em, 1em); overflow: hidden; }
@@ -3874,6 +3963,8 @@
                 const td = document.createElement('td');
                 if (cell)
                     renderCellContent(td, cell, styles, theme, date1904, options);
+                if (cell?.isSpillAnchor)
+                    td.classList.add('xlsx-spill-anchor');
                 const hlink = hyperlinkByCell.get(`${r},${c}`);
                 if (hlink)
                     wrapCellWithHyperlink(td, hlink);

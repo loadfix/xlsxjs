@@ -69,6 +69,13 @@ export class Workbook {
         const styles = await readIfPresent('xl/styles.xml');
         if (styles) wb.parts['xl/styles.xml'] = styles;
 
+        // xl/metadata.xml — Excel 365 cell metadata. Describes dynamic-array
+        // spill anchors (via XLDAPR type + fDynamic flag) and rich data types;
+        // individual cells point into the <cellMetadata>/<valueMetadata>
+        // blocks via their c/@cm and c/@vm attributes.
+        const metadata = await readIfPresent('xl/metadata.xml');
+        if (metadata) wb.parts['xl/metadata.xml'] = metadata;
+
         // Theme. Excel / LibreOffice / python-xlsx all write xl/theme/theme1.xml,
         // but the spec allows multiple theme parts — keep whatever we find.
         for (const p of Object.keys(zip.files)) {
