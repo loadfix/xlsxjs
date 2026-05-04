@@ -2,16 +2,8 @@
 
 What's still open. The "Resolved in fork" block at the bottom tracks
 features that have shipped on `master` and live in the harness / fixtures.
-Cleaned up 2026-05-04 to reflect reality after Waves 1–5; 2026-05-02 sync
-added multi-step cellStyle chain + custom iconSet lists.
-
-## Open — small items (one file each)
-
-- [ ] **Sheet protection state** (`<sheetProtection>`) — surface the locked /
-  password-protected flag on `Sheet.protection` for consumers who want a
-  read-only indicator. No rendering side effect (cells are already read-only).
-- [ ] **Alt text on tables** (`table/@altText`, `table/@altTextSummary`) —
-  accessibility label on defined tables; extend `TableDef`.
+Last reconciled 2026-05-04 after Wave 6 (fills+borders, sheet metadata,
+cell metadata, cellStyle chain + custom icons).
 
 ## Open — medium items (one slice each)
 
@@ -64,19 +56,73 @@ added multi-step cellStyle chain + custom iconSet lists.
 
 ## Resolved in fork
 
-- ✅ **Cell metadata / dynamic-array spill** (`xl/metadata.xml` + `c/@cm`,
-  `c/@vm`) — `Workbook.metadata` exposes resolved `cellMetadata` /
-  `valueMetadata` blocks; `Cell.cellMetadataIndex` / `valueMetadataIndex` /
-  `isSpillAnchor` carry per-cell wiring; the renderer tags spill-anchor
+Most recent first (Wave 6 landed 2026-05-04). Earlier groupings blurred
+together in the interest of a readable tail.
+
+### Wave 6 (small items, 2026-05-04)
+- ✅ **Diagonal borders** — `BorderStyle.diagonal` + `diagonalUp` /
+  `diagonalDown`; renderer paints stacked `linear-gradient` overlays
+  (`to bottom right` / `to top right`) on the cell's `background-image`.
+- ✅ **Gradient fills** — `FillStyle` is a discriminated union
+  (`pattern` / `gradient` / `none`); `<gradientFill>` parses into
+  `{ kind: 'gradient', type, degree, stops: [{position, color}] }` and
+  renders as `linear-gradient(<degree>deg, …)`. Path gradients parse
+  but render as a flat fallback to the first stop's colour.
+- ✅ **Non-solid pattern fills** — `darkGray` / `mediumGray` / `lightGray` /
+  `dark*` / `light*` directional stripes + `*Grid` / `*Trellis` render
+  as `repeating-linear-gradient` approximations on top of `bgColor`.
+  `gray125` is still intentionally ignored (Excel's default).
+- ✅ **Sheet protection state** — `Sheet.protection` (SheetProtection)
+  exposes enabled + passwordHashed + per-operation toggles; the
+  renderer sets `data-sheet-protected="true"` on the section.
+- ✅ **Alt text on tables** — `TableDef.altText` +
+  `TableDef.altTextSummary`; the caption's `aria-label` picks up
+  altText (summary falls back to `title`).
+- ✅ **Cell metadata / dynamic-array spill** — `xl/metadata.xml` parses
+  into `Workbook.metadata`; `Cell.cellMetadataIndex`, `valueMetadataIndex`,
+  `isSpillAnchor` carry the resolved wiring; renderer tags spill-anchor
   cells with `.xlsx-spill-anchor`.
-- ✅ **Tiny wins** (encrypted file detection, `gray125` filter,
-  `calcChain`/`printerSettings` filtered from dropped-parts tally).
-- ✅ **Classic comments** (`xl/comments*.xml`) — `Sheet.comments`, inline
-  `●` marker.
-- ✅ **Threaded comments** (`xl/threadedComments/` + `xl/persons/`) —
-  `Sheet.threadedComments`, `Workbook.persons`, inline `💬` marker.
-- ✅ **Charts + pivots detection** — `Sheet.charts` / `Sheet.pivots` /
-  `Sheet.extensions` (URI roll-up); charts render as a placeholder.
+- ✅ **Multi-step cellStyle inheritance** — `resolveEffectiveXf` walks
+  up to 8 hops with a cycle guard when a named style references another
+  named style. One-hop callers unaffected.
+- ✅ **Custom icon-set rule lists** — `iconSet/@custom='1'` + `cfIcon`
+  children parsed onto `IconSet.customIcons`; renderer swaps in the
+  per-position override (each position can pull from a different set).
+
+### Wave 5 (drawings / theme / i18n)
+- ✅ **Shapes / connectors / text boxes** — `Sheet.shapes`, `<aside
+  class="xlsx-shape">` with `data-kind` / `data-preset`.
+- ✅ **Drawing anchors** — proper `oneCellAnchor` / `absoluteAnchor` +
+  decorative flag (alt="" + aria-hidden), `emuToPx` helper.
+- ✅ **Theme font scheme + phonetics** — `Theme.majorFont` /
+  `Theme.minorFont`, `FontStyle.scheme`, `<rPh>` → HTML `<ruby><rt>`.
+
+### Wave 4 (number formats r2 + page layout)
+- ✅ **Number formats round 2** — colour modifiers (`[Red]` etc.),
+  conditional section predicates (`[>100]…`), fractions (`# ?/?`,
+  `# ??/??`), scientific + engineering notation.
+- ✅ **Page layout** — row/column manual page breaks, print area
+  (from `_xlnm.Print_Area`), header/footer zones with `&D`/`&P`/`&A`
+  substitution, `FrozenPanes.kind: 'frozen' | 'split'`.
+
+### Wave 3 (conditional formatting expansion)
+- ✅ **CF new rule types** — `containsBlanks` / `notContainsBlanks`,
+  `containsErrors` / `notContainsErrors`, `aboveAverage` / `belowAverage`
+  (with `stdDev` + `equalAverage`), `timePeriod`.
+- ✅ **CF graphical ext attrs** — dataBar `negativeFillColor`,
+  `axisPosition`, `border`, `borderColor`; dxf `strike` + `numFmtCode`
+  application.
+
+### Wave 2 (view / content / structure)
+- ✅ **Sheet view state** — hidden / veryHidden suppression, tab colour,
+  RTL direction, gridline / header toggles, zoom.
+- ✅ **Hyperlinks + data validation** — URL-scheme allowlist via
+  `isSafeHyperlinkHref`; `<dataValidation type="list">` surfaces ▾ with
+  pinned options.
+- ✅ **Outlines + defined names** — row/column `outlineLevel`,
+  `SheetOutline`, `Workbook.definedNames` (incl. `_xlnm.*`).
+
+### Wave 1 (formatting correctness)
 - ✅ **Alignment flags** — `wrapText`, `shrinkToFit`, `indent`,
   `textRotation` (incl. 255 stacked), `readingOrder`, widened
   horizontal / vertical enums.
@@ -86,62 +132,34 @@ added multi-step cellStyle chain + custom iconSet lists.
 - ✅ **Number formats round 1** — elapsed time (`[h]` / `[mm]` / `[ss]`),
   accounting padding (`_<char>`), fill character (`*<char>` stripped),
   locale currency (`[$€-2]` etc.), 1904 date system.
-- ✅ **Number formats round 2** — colour modifiers (`[Red]` etc.),
-  conditional section predicates (`[>100]…`), fractions (`# ?/?`,
-  `# ??/??`), scientific + engineering notation.
-- ✅ **Sheet view state** — hidden / veryHidden suppression, tab colour,
-  RTL direction, gridline / header toggles, zoom.
-- ✅ **Hyperlinks + data validation** — URL-scheme allowlist via
-  `isSafeHyperlinkHref`; `<dataValidation type="list">` surfaces ▾ with
-  pinned options.
-- ✅ **Outlines + defined names** — row/column `outlineLevel`,
-  `SheetOutline`, `Workbook.definedNames` (incl. `_xlnm.*`).
-- ✅ **CF new rule types** — `containsBlanks` / `notContainsBlanks`,
-  `containsErrors` / `notContainsErrors`, `aboveAverage` / `belowAverage`
-  (with `stdDev` + `equalAverage`), `timePeriod`.
-- ✅ **CF graphical ext attrs** — dataBar `negativeFillColor`,
-  `axisPosition`, `border`, `borderColor`; dxf `strike` + `numFmtCode`
-  application.
-- ✅ **Page layout** — row/column manual page breaks, print area
-  (from `_xlnm.Print_Area`), header/footer zones with `&D`/`&P`/`&A`
-  substitution, `FrozenPanes.kind: 'frozen' | 'split'`.
-- ✅ **Shapes / connectors / text boxes** — `Sheet.shapes`, `<aside
-  class="xlsx-shape">` with `data-kind` / `data-preset`.
-- ✅ **Drawing anchors** — proper `oneCellAnchor` / `absoluteAnchor` +
-  decorative flag (alt="" + aria-hidden), `emuToPx` helper.
-- ✅ **Diagonal borders** — `BorderStyle.diagonal` + `diagonalUp` /
-  `diagonalDown`; renderer paints stacked `linear-gradient` overlays
-  (`to bottom right` / `to top right`) on the cell's `background-image`.
-- ✅ **Gradient fills** — `FillStyle` is now a discriminated union
-  (`pattern` / `gradient` / `none`); `<gradientFill>` parses into
-  `{ kind: 'gradient', type, degree, stops: [{position, color}] }` and
-  renders as a CSS `linear-gradient(<degree>deg, …)`. Path gradients
-  parse but render as a flat fallback to the first stop's colour.
-- ✅ **Non-solid pattern fills** — `darkGray` / `mediumGray` / `lightGray` /
-  `dark*` / `light*` directional stripes + `*Grid` / `*Trellis` render
-  as `repeating-linear-gradient` approximations on top of `bgColor`.
-  `gray125` is still intentionally ignored (Excel's default).
-- ✅ **Theme font scheme + phonetics** — `Theme.majorFont` /
-  `Theme.minorFont`, `FontStyle.scheme`, `<rPh>` → HTML `<ruby><rt>`.
+
+### Earlier (session 1 / baseline)
+- ✅ **Tiny wins** — encrypted-file detection, `gray125` filter,
+  `calcChain`/`printerSettings` filtered from the dropped-parts tally.
+- ✅ **Classic comments** (`xl/comments*.xml`) — `Sheet.comments`,
+  inline `●` marker.
+- ✅ **Threaded comments** (`xl/threadedComments/` + `xl/persons/`) —
+  `Sheet.threadedComments`, `Workbook.persons`, inline `💬` marker.
+- ✅ **Charts + pivots detection** — `Sheet.charts` / `Sheet.pivots` /
+  `Sheet.extensions` (URI roll-up); charts render as a placeholder.
 - ✅ **Indexed colours** — ECMA-376 64-entry palette via
   `indexedColor(i)`; `ColorRef` gained an `indexed` variant.
 - ✅ **Multi-sheet + workbook rels** — `<sheet r:id>` resolution via
   `xl/_rels/workbook.xml.rels`.
-- ✅ **Named styles inheritance** — `cellXf.xfId` →
-  `cellStyleXfs[j]` via `resolveEffectiveXf`. Chain-walk (up to 8 hops,
-  cycle-safe) added so a named style referencing another named style
-  resolves end-to-end.
-- ✅ **Custom icon-set rule lists** — `iconSet/@custom='1'` + `cfIcon`
-  children parsed onto `IconSet.customIcons`; renderer swaps in the
-  per-position override.
+- ✅ **Named styles inheritance** (single hop) — `cellXf.xfId` →
+  `cellStyleXfs[j]` via `resolveEffectiveXf`. Extended to a cycle-safe
+  chain walk in Wave 6.
 - ✅ **Row heights + hidden rows/columns** — `RowDimension`,
-  `ColumnWidth.hidden`, rendered via `tr.style.height` + `display: none`.
+  `ColumnWidth.hidden`, `tr.style.height` + `display: none`.
 - ✅ **Graphical CF rules** — colourScale (2/3-stop interpolation),
-  dataBar (gradient), iconSet (4 built-in sets).
+  dataBar (gradient), iconSet (4 built-in sets; custom overrides
+  added in Wave 6).
 - ✅ **Cached formula values** — `<f>` surfaces on `Cell.formula`;
   cached `<v>` is the displayed value.
-- ✅ **Merged cells + column widths + frozen panes + autoFilter + tables
-  + images + styles.xml fonts/fills/borders + rich text + dxf-driven cf
-  + R1C1 notation + iconSet SVGs + classic + threaded comments**
-  — baseline work from session 1.
-- ✅ **Playwright browser harness** — 31 tests, real Chrome on :3002.
+- ✅ **Baseline render surface** — merged cells, column widths, frozen
+  panes, autoFilter, tables, images, styles.xml fonts / fills / borders,
+  rich text, dxf-driven CF, R1C1 notation, iconSet SVGs.
+
+### Tooling
+- ✅ **Playwright browser harness** — 35 tests, real Chrome on :3002,
+  one render spec per fixture plus a library-surface smoke.
