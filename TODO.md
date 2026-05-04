@@ -6,6 +6,21 @@ plus pre-existing known gaps. Organised by effort tier, not by visibility.
 
 ## Resolved in fork
 
+- **Shapes, connectors, text boxes** (`feat/shapes-textboxes`) — the drawing
+  parser now walks `<xdr:sp>` and `<xdr:cxnSp>` siblings of `<xdr:pic>` /
+  `<xdr:graphicFrame>`. Each one lands on `Sheet.shapes: SheetShape[]`
+  with `kind: 'shape' | 'connector'`, the `<a:prstGeom prst=…>` preset
+  (`rect`, `line`, `ellipse`, `flowChartProcess`, …), a flattened text
+  body (`<a:p>` paragraphs joined with `\n`, `<a:t>` concatenated
+  within a paragraph), and the `<xdr:cNvPr>` name / descr (alt falls
+  back to title). The renderer emits one `<aside class="xlsx-shape">`
+  per shape after the `<figure class="xlsx-image">` blocks, with
+  `data-kind` / `data-preset` / `data-name` / anchor data-attrs and a
+  `<pre>` for the text body when present; form-control `<xdr:sp>`
+  wrapped in `<mc:AlternateContent>` still surface through the outer
+  shape (VML layout is intentionally skipped). Harness scenarios 61–62;
+  fixture at `tests/render-test/shapes-and-textboxes/`.
+
 - **Page layout metadata** (`feat/page-layout`) — manual row/column page
   breaks (`<rowBreaks>`/`<colBreaks>` with `man="1"`) land on
   `Sheet.pageBreaks = { rows, cols }` (0-based indices, automatic breaks
@@ -225,10 +240,9 @@ already tracked elsewhere in this file is excluded.*
 - **Custom icon-set rule lists** (`iconSet/@custom='1'` + `cfIcon` children) — per-threshold icon overrides; xlsxjs uses the default palette for the set name only.
 
 ### Objects & drawings
-- **Shapes and connectors** (`xdr:sp`, `xdr:cxnSp` in `xl/drawings/drawingN.xml`) — callout arrows, rectangles, text boxes with cell-anchored position; currently only `<xdr:pic>` and `<xdr:graphicFrame>` (chart) are walked.
-- **WordArt and SmartArt** (`xdr:sp` with `a:txBody`/`dgm:relIds`) — decorative text and hierarchy/process diagrams embedded as drawings.
-- **Text boxes** (`xdr:sp/xdr:txBody`) — free-floating annotations, used heavily for dashboards.
-- **Form controls** (`xl/ctrlProps/*.xml` + VML / `xdr:sp` buttons, checkboxes, list boxes) — checked/unchecked state and labels aren't rendered even as static values.
+- **Shape geometry rendering** — `xdr:sp` / `xdr:cxnSp` land on `Sheet.shapes` as of `feat/shapes-textboxes` (preset + text + anchor), but the renderer emits a plain `<aside>` rather than the actual preset geometry (rect outline, line stroke, callout tail, flow-chart symbol).
+- **SmartArt** (`xdr:sp` with `dgm:relIds`) — hierarchy/process diagrams embedded as drawings. The container surfaces as a `SheetShape` via the outer `<xdr:sp>`, but `xl/diagrams/*.xml` is not parsed.
+- **Form controls** (`xl/ctrlProps/*.xml` + VML / `xdr:sp` buttons, checkboxes, list boxes) — the wrapping `<xdr:sp>` surfaces as a `SheetShape`, but `<mc:AlternateContent>` VML fallback (checked/unchecked state, label macros) isn't decoded.
 - **Slicers and timelines** (`xl/slicers/slicer*.xml`, `xl/timelines/timeline*.xml`) — the pivot/table filter chips that show current selection state.
 - **OLE objects and embedded files** (`xl/embeddings/*.bin` + `xdr:sp`) — embedded PDFs, Word docs, equations render as missing content today.
 

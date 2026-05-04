@@ -264,6 +264,34 @@ export interface SheetExtensionUri {
     count: number;
 }
 
+// A drawing shape or connector anchored inside a sheet. Covers `<xdr:sp>`
+// (rectangles, callouts, text boxes, WordArt, form-control surfaces) and
+// `<xdr:cxnSp>` (connectors: straight, elbow, curved lines between two
+// anchors). xlsxjs does NOT render the shape geometry — the model carries
+// the anchor, the preset name, and any text body so consumers can emit
+// their own placeholder; the built-in renderer emits an `<aside>` per
+// shape with the text, marked with the preset for consumer styling.
+//
+// Form controls (xl/ctrlProps/*.xml) embed as an `<xdr:sp>` wrapped in
+// `<mc:AlternateContent>`. We don't decode the VML fallback here — the
+// shape surfaces with `kind='shape'`, the preset+alt+name from the
+// `<xdr:cNvPr>`, and the text body if any. `kind='unknown'` is reserved
+// for future drawing subtypes we haven't special-cased.
+export interface SheetShape {
+    kind: 'shape' | 'connector' | 'unknown';
+    name: string | null;     // <xdr:cNvPr>/@name
+    alt: string | null;      // <xdr:cNvPr>/@descr  ||  @title  (descr wins)
+    preset: string | null;   // <a:prstGeom>/@prst — e.g. 'rect', 'ellipse',
+                             // 'line', 'flowChartProcess', 'cloud'.
+    text: string | null;     // flattened <xdr:txBody> text; paragraphs (<a:p>)
+                             // joined with '\n', <a:t> within a paragraph
+                             // concatenated without separators. null when
+                             // the shape carries no text body.
+    col: number; row: number;
+    endCol: number | null;
+    endRow: number | null;
+}
+
 // A rendered image anchored inside a sheet. Coordinates are 0-based.
 // xlsxjs ships only the "twoCellAnchor" and "oneCellAnchor" positioning
 // — absolute pixel anchors are rare and reported with `col=0, row=0`.
@@ -382,6 +410,7 @@ export interface Sheet {
     tables: TableDef[];
     images: SheetImage[];
     charts: SheetChart[];
+    shapes: SheetShape[];
     pivots: SheetPivot[];
     extensions: SheetExtensionUri[];
     comments: SheetComment[];
@@ -485,12 +514,12 @@ export class WorkbookParser {
             const xml = parts[xmlPath];
             if (!xml) continue;
             const tables = resolveTablesForSheet(xmlPath, parts);
-            const { images, charts } = resolveDrawingsForSheet(xmlPath, parts, media);
+            const { images, charts, shapes } = resolveDrawingsForSheet(xmlPath, parts, media);
             const pivots = resolvePivotsForSheet(xmlPath, parts);
             const comments = resolveCommentsForSheet(xmlPath, parts);
             const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
             const hyperlinkTargets = resolveHyperlinkTargets(xmlPath, parts);
-            sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments, hyperlinkTargets, i, definedNames));
+            sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, shapes, pivots, comments, threadedComments, hyperlinkTargets, i, definedNames));
         }
 
         return { sheets, styles, theme, persons, date1904, definedNames };
@@ -692,14 +721,15 @@ function resolveDrawingsForSheet(
     sheetPath: string,
     parts: Record<string, string>,
     media: Record<string, string>,
-): { images: SheetImage[]; charts: SheetChart[] } {
+): { images: SheetImage[]; charts: SheetChart[]; shapes: SheetShape[] } {
     const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
     const relsXml = parts[relsPath];
-    if (!relsXml) return { images: [], charts: [] };
+    if (!relsXml) return { images: [], charts: [], shapes: [] };
     const rels = parseRelationships(relsXml);
     const dir = sheetPath.replace(/\/[^/]+$/, '');
     const images: SheetImage[] = [];
     const charts: SheetChart[] = [];
+    const shapes: SheetShape[] = [];
     for (const [, rel] of rels) {
         if (!rel.type.endsWith('/drawing')) continue;
         const drawingPath = rel.target.startsWith('/')
@@ -707,18 +737,22 @@ function resolveDrawingsForSheet(
             : normaliseRelPath(`${dir}/${rel.target}`);
         const drawingXml = parts[drawingPath];
         if (!drawingXml) continue;
-        // The drawing has its own rels part binding rIds to media files
-        // and to chart parts.
+        // The drawing may have its own rels part binding rIds to media
+        // files and chart parts. Shape-only drawings (text boxes /
+        // connectors) can legitimately ship without a rels file, so a
+        // missing rels part no longer aborts the walk.
         const drawingRelsPath = drawingPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
         const drawingRelsXml = parts[drawingRelsPath];
-        if (!drawingRelsXml) continue;
-        const drawingRels = parseRelationships(drawingRelsXml);
+        const drawingRels = drawingRelsXml
+            ? parseRelationships(drawingRelsXml)
+            : new Map<string, { target: string; type: string }>();
         const drawingDir = drawingPath.replace(/\/[^/]+$/, '');
         const parsed = parseDrawing(drawingXml, drawingRels, drawingDir, parts, media);
         images.push(...parsed.images);
         charts.push(...parsed.charts);
+        shapes.push(...parsed.shapes);
     }
-    return { images, charts };
+    return { images, charts, shapes };
 }
 
 function resolvePivotsForSheet(
@@ -855,12 +889,13 @@ function parseDrawing(
     drawingDir: string,
     parts: Record<string, string>,
     media: Record<string, string>,
-): { images: SheetImage[]; charts: SheetChart[] } {
+): { images: SheetImage[]; charts: SheetChart[]; shapes: SheetShape[] } {
     const doc = parseXml(xml);
     const images: SheetImage[] = [];
     const charts: SheetChart[] = [];
+    const shapes: SheetShape[] = [];
     // Both twoCellAnchor and oneCellAnchor carry child <pic> / <graphicFrame>
-    // elements. We walk each anchor in order, checking both.
+    // / <sp> / <cxnSp> elements. We walk each anchor in order, checking all.
     const anchors = [
         ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'twoCellAnchor')),
         ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'oneCellAnchor')),
@@ -941,8 +976,87 @@ function parseDrawing(
                 endRow,
             });
         }
+
+        // Shapes (xdr:sp) + connectors (xdr:cxnSp). Form controls wrap their
+        // shape in <mc:AlternateContent>; getElementsByTagNameNS still finds
+        // the inner <xdr:sp> so the form control surfaces with the same
+        // preset/name/alt tuple as a plain shape.
+        //
+        // We deliberately scope the search to direct-ish descendants of the
+        // anchor rather than the whole document, and skip shapes whose
+        // ancestry chain includes a <xdr:grpSp> so a group's container
+        // shape doesn't duplicate with its children. (Top-level groups are
+        // still surfaced via their child <xdr:sp> entries.)
+        const spEls = [
+            ...Array.from(anchor.getElementsByTagNameNS(NS.xdr, 'sp')),
+            ...Array.from(anchor.getElementsByTagNameNS(NS.xdr, 'cxnSp')),
+        ];
+        for (const el of spEls) {
+            const kind: 'shape' | 'connector' = el.localName === 'cxnSp' ? 'connector' : 'shape';
+            const shape = parseShape(el, kind, col, row, endCol, endRow);
+            if (shape) shapes.push(shape);
+        }
     }
-    return { images, charts };
+    return { images, charts, shapes };
+}
+
+// Build a SheetShape from a single <xdr:sp> or <xdr:cxnSp>. The anchor
+// coordinates are passed through from the surrounding <xdr:twoCellAnchor>
+// / <xdr:oneCellAnchor>; the shape only contributes preset, text, name,
+// and alt text.
+function parseShape(
+    el: Element,
+    kind: 'shape' | 'connector',
+    col: number | null,
+    row: number | null,
+    endCol: number | null,
+    endRow: number | null,
+): SheetShape | null {
+    // cNvPr is normally at sp/nvSpPr/cNvPr (or cxnSp/nvCxnSpPr/cNvPr); we
+    // search the subtree so either shape comes out the same.
+    const cNvPr = el.getElementsByTagNameNS(NS.xdr, 'cNvPr').item(0);
+    const name = cNvPr?.getAttribute('name') || null;
+    const alt = cNvPr?.getAttribute('descr') || cNvPr?.getAttribute('title') || null;
+
+    // Preset geometry sits under spPr/prstGeom. <a:custGeom> (custom
+    // freeform) has no preset — we leave preset=null there.
+    const spPr = el.getElementsByTagNameNS(NS.xdr, 'spPr').item(0);
+    let preset: string | null = null;
+    if (spPr) {
+        const prst = spPr.getElementsByTagNameNS(NS.a, 'prstGeom').item(0);
+        preset = prst?.getAttribute('prst') || null;
+    }
+
+    // Flatten <xdr:txBody>. Each <a:p> is a paragraph; paragraphs join
+    // with '\n'. Inside a paragraph, every <a:t> descendant joins without
+    // a separator so runs within a paragraph read as one string.
+    let text: string | null = null;
+    const txBody = el.getElementsByTagNameNS(NS.xdr, 'txBody').item(0);
+    if (txBody) {
+        const paragraphs: string[] = [];
+        const pEls = txBody.getElementsByTagNameNS(NS.a, 'p');
+        for (let i = 0; i < pEls.length; i++) {
+            const p = pEls[i];
+            const tEls = p.getElementsByTagNameNS(NS.a, 't');
+            let line = '';
+            for (let j = 0; j < tEls.length; j++) line += tEls[j].textContent ?? '';
+            paragraphs.push(line);
+        }
+        const joined = paragraphs.join('\n');
+        if (joined.length > 0) text = joined;
+    }
+
+    return {
+        kind,
+        name,
+        alt,
+        preset,
+        text,
+        col: col ?? 0,
+        row: row ?? 0,
+        endCol,
+        endRow,
+    };
 }
 
 // Peek at a chart part and pull a chart-type name. For classic charts this is
@@ -1186,6 +1300,7 @@ function parseSheet(
     tables: TableDef[] = [],
     images: SheetImage[] = [],
     charts: SheetChart[] = [],
+    shapes: SheetShape[] = [],
     pivots: SheetPivot[] = [],
     comments: SheetComment[] = [],
     threadedComments: ThreadedCommentEntry[] = [],
@@ -1277,7 +1392,7 @@ function parseSheet(
     return {
         name, state, rows, maxCol, maxRow, merges, columns, rowDimensions,
         conditionalFormatting, frozenPanes, autoFilter, tables, images,
-        charts, pivots, extensions, comments, threadedComments, view, outline,
+        charts, shapes, pivots, extensions, comments, threadedComments, view, outline,
         hyperlinks, dataValidationLists, pageBreaks, printArea, headerFooter,
     };
 }

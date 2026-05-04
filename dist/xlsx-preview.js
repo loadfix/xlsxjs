@@ -1451,12 +1451,12 @@
                 if (!xml)
                     continue;
                 const tables = resolveTablesForSheet(xmlPath, parts);
-                const { images, charts } = resolveDrawingsForSheet(xmlPath, parts, media);
+                const { images, charts, shapes } = resolveDrawingsForSheet(xmlPath, parts, media);
                 const pivots = resolvePivotsForSheet(xmlPath, parts);
                 const comments = resolveCommentsForSheet(xmlPath, parts);
                 const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
                 const hyperlinkTargets = resolveHyperlinkTargets(xmlPath, parts);
-                sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments, hyperlinkTargets, i, definedNames));
+                sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, shapes, pivots, comments, threadedComments, hyperlinkTargets, i, definedNames));
             }
             return { sheets, styles, theme, persons, date1904, definedNames };
         }
@@ -1629,11 +1629,12 @@
         const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
         const relsXml = parts[relsPath];
         if (!relsXml)
-            return { images: [], charts: [] };
+            return { images: [], charts: [], shapes: [] };
         const rels = parseRelationships(relsXml);
         const dir = sheetPath.replace(/\/[^/]+$/, '');
         const images = [];
         const charts = [];
+        const shapes = [];
         for (const [, rel] of rels) {
             if (!rel.type.endsWith('/drawing'))
                 continue;
@@ -1645,15 +1646,16 @@
                 continue;
             const drawingRelsPath = drawingPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
             const drawingRelsXml = parts[drawingRelsPath];
-            if (!drawingRelsXml)
-                continue;
-            const drawingRels = parseRelationships(drawingRelsXml);
+            const drawingRels = drawingRelsXml
+                ? parseRelationships(drawingRelsXml)
+                : new Map();
             const drawingDir = drawingPath.replace(/\/[^/]+$/, '');
             const parsed = parseDrawing(drawingXml, drawingRels, drawingDir, parts, media);
             images.push(...parsed.images);
             charts.push(...parsed.charts);
+            shapes.push(...parsed.shapes);
         }
-        return { images, charts };
+        return { images, charts, shapes };
     }
     function resolvePivotsForSheet(sheetPath, parts) {
         const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
@@ -1776,6 +1778,7 @@
         const doc = parseXml(xml);
         const images = [];
         const charts = [];
+        const shapes = [];
         const anchors = [
             ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'twoCellAnchor')),
             ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'oneCellAnchor')),
@@ -1846,8 +1849,57 @@
                     endRow,
                 });
             }
+            const spEls = [
+                ...Array.from(anchor.getElementsByTagNameNS(NS.xdr, 'sp')),
+                ...Array.from(anchor.getElementsByTagNameNS(NS.xdr, 'cxnSp')),
+            ];
+            for (const el of spEls) {
+                const kind = el.localName === 'cxnSp' ? 'connector' : 'shape';
+                const shape = parseShape(el, kind, col, row, endCol, endRow);
+                if (shape)
+                    shapes.push(shape);
+            }
         }
-        return { images, charts };
+        return { images, charts, shapes };
+    }
+    function parseShape(el, kind, col, row, endCol, endRow) {
+        const cNvPr = el.getElementsByTagNameNS(NS.xdr, 'cNvPr').item(0);
+        const name = cNvPr?.getAttribute('name') || null;
+        const alt = cNvPr?.getAttribute('descr') || cNvPr?.getAttribute('title') || null;
+        const spPr = el.getElementsByTagNameNS(NS.xdr, 'spPr').item(0);
+        let preset = null;
+        if (spPr) {
+            const prst = spPr.getElementsByTagNameNS(NS.a, 'prstGeom').item(0);
+            preset = prst?.getAttribute('prst') || null;
+        }
+        let text = null;
+        const txBody = el.getElementsByTagNameNS(NS.xdr, 'txBody').item(0);
+        if (txBody) {
+            const paragraphs = [];
+            const pEls = txBody.getElementsByTagNameNS(NS.a, 'p');
+            for (let i = 0; i < pEls.length; i++) {
+                const p = pEls[i];
+                const tEls = p.getElementsByTagNameNS(NS.a, 't');
+                let line = '';
+                for (let j = 0; j < tEls.length; j++)
+                    line += tEls[j].textContent ?? '';
+                paragraphs.push(line);
+            }
+            const joined = paragraphs.join('\n');
+            if (joined.length > 0)
+                text = joined;
+        }
+        return {
+            kind,
+            name,
+            alt,
+            preset,
+            text,
+            col: col ?? 0,
+            row: row ?? 0,
+            endCol,
+            endRow,
+        };
     }
     function peekChartType(xml, kind) {
         const doc = parseXml(xml);
@@ -2069,7 +2121,7 @@
             name: firstAttr('rFont', 'val') ?? firstAttr('name', 'val'),
         };
     }
-    function parseSheet(name, state, xml, sharedStrings, tables = [], images = [], charts = [], pivots = [], comments = [], threadedComments = [], hyperlinkTargets = new Map(), sheetIndex = 0, definedNames = []) {
+    function parseSheet(name, state, xml, sharedStrings, tables = [], images = [], charts = [], shapes = [], pivots = [], comments = [], threadedComments = [], hyperlinkTargets = new Map(), sheetIndex = 0, definedNames = []) {
         const doc = parseXml(xml);
         const rowEls = doc.getElementsByTagNameNS(NS.main, 'row');
         const rows = [];
@@ -2152,7 +2204,7 @@
         return {
             name, state, rows, maxCol, maxRow, merges, columns, rowDimensions,
             conditionalFormatting, frozenPanes, autoFilter, tables, images,
-            charts, pivots, extensions, comments, threadedComments, view, outline,
+            charts, shapes, pivots, extensions, comments, threadedComments, view, outline,
             hyperlinks, dataValidationLists, pageBreaks, printArea, headerFooter,
         };
     }
@@ -3360,6 +3412,18 @@
     border: 1px dashed #999; padding: 1em; margin: 0.5em 0;
     color: #666; font-size: 0.9em; text-align: center;
 }
+.${className} .xlsx-shape {
+    border: 1px solid #e0e0e0; border-radius: 2px;
+    padding: 0.5em; margin: 0.5em 0;
+    color: #555; font-size: 0.9em;
+}
+.${className} .xlsx-shape[data-kind="connector"] {
+    border-style: dashed; color: #888;
+}
+.${className} .xlsx-shape pre {
+    margin: 0; white-space: pre-line;
+    font-family: inherit; font-size: inherit;
+}
 .${className} .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
 .${className} .xlsx-threaded { color: #0066cc; margin-left: 4px; cursor: help; }
 .${className} .xlsx-shrink-to-fit { font-size: clamp(0.55em, 0.95em, 1em); overflow: hidden; }
@@ -3806,6 +3870,9 @@
             ph.textContent = `[chart: ${chart.chartType ?? chart.kind}]`;
             section.appendChild(ph);
         }
+        for (const shape of sheet.shapes) {
+            section.appendChild(renderShape(shape));
+        }
         if (sheet.headerFooter?.oddHeader) {
             section.appendChild(renderHeaderFooter('xlsx-header', sheet.headerFooter.oddHeader));
         }
@@ -3813,6 +3880,29 @@
             section.appendChild(renderHeaderFooter('xlsx-footer', sheet.headerFooter.oddFooter));
         }
         return section;
+    }
+    function renderShape(shape) {
+        const aside = document.createElement('aside');
+        aside.className = 'xlsx-shape';
+        aside.setAttribute('data-kind', shape.kind);
+        if (shape.preset)
+            aside.setAttribute('data-preset', shape.preset);
+        if (shape.name)
+            aside.setAttribute('data-name', shape.name);
+        if (shape.alt)
+            aside.setAttribute('aria-label', shape.alt);
+        aside.setAttribute('data-anchor-col', String(shape.col));
+        aside.setAttribute('data-anchor-row', String(shape.row));
+        if (shape.endCol !== null)
+            aside.setAttribute('data-anchor-end-col', String(shape.endCol));
+        if (shape.endRow !== null)
+            aside.setAttribute('data-anchor-end-row', String(shape.endRow));
+        if (shape.text && shape.text.length > 0) {
+            const pre = document.createElement('pre');
+            pre.textContent = shape.text;
+            aside.appendChild(pre);
+        }
+        return aside;
     }
     function renderHeaderFooter(className, zones) {
         const div = document.createElement('div');

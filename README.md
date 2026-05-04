@@ -50,8 +50,13 @@ stable enough for downstream use, but the model emitted by `parseAsync` is
 still evolving as new XLSX features come online (see `TODO.md`). Pin a
 specific version if you rely on the shape of the workbook model.
 
-Deliberately deferred: chart rendering, drawings beyond raster images,
-diagonal/double borders, in-flow image positioning, and full
+Drawings beyond raster images (`xdr:sp` text boxes / WordArt and
+`xdr:cxnSp` connectors) surface on `Sheet.shapes` with their preset
+geometry, text body, and anchor coordinates; the renderer emits an
+`<aside class="xlsx-shape">` per shape after the table.
+
+Deliberately deferred: chart rendering, SmartArt, form-control VML
+fallbacks, diagonal/double borders, in-flow image positioning, and full
 expression-rule interpretation.
 
 ## Contributing

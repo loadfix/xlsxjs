@@ -2,7 +2,7 @@
 // sheet, each containing an <h2> sheet name and a <table> of the cells.
 // Numeric cells get a numeric-aligned class; other kinds render as text.
 
-import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, ThreadedCommentEntry, Hyperlink, PhoneticRun } from './workbook-parser';
+import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, SheetShape, ThreadedCommentEntry, Hyperlink, PhoneticRun } from './workbook-parser';
 import { isSafeHyperlinkHref } from './workbook-parser';
 import { indexToColumnLetters } from './utils';
 import { h } from './html';
@@ -62,6 +62,18 @@ function renderStyle(className: string): HTMLStyleElement {
 .${className} .xlsx-chart-placeholder {
     border: 1px dashed #999; padding: 1em; margin: 0.5em 0;
     color: #666; font-size: 0.9em; text-align: center;
+}
+.${className} .xlsx-shape {
+    border: 1px solid #e0e0e0; border-radius: 2px;
+    padding: 0.5em; margin: 0.5em 0;
+    color: #555; font-size: 0.9em;
+}
+.${className} .xlsx-shape[data-kind="connector"] {
+    border-style: dashed; color: #888;
+}
+.${className} .xlsx-shape pre {
+    margin: 0; white-space: pre-line;
+    font-family: inherit; font-size: inherit;
 }
 .${className} .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
 .${className} .xlsx-threaded { color: #0066cc; margin-left: 4px; cursor: help; }
@@ -589,6 +601,17 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
         section.appendChild(ph);
     }
 
+    // Shapes and connectors. xlsxjs does NOT render the preset geometry
+    // itself (a text box, ellipse, callout, connector arrow, etc.) but we
+    // surface an <aside> per shape so the DOM stays in lockstep with the
+    // XLSX's drawing layer. Text bodies render through a <pre> with
+    // white-space:pre-line so paragraph breaks survive without collapsing
+    // ordinary whitespace. All attacker-controlled strings reach the DOM
+    // via textContent / setAttribute only.
+    for (const shape of sheet.shapes) {
+        section.appendChild(renderShape(shape));
+    }
+
     // Header / footer — rendered as 3-column grids after the table. Zone
     // strings come pre-substituted (dates / sheet name / literal markers);
     // they're attacker-controlled so they reach the DOM only via textContent.
@@ -599,6 +622,32 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
         section.appendChild(renderHeaderFooter('xlsx-footer', sheet.headerFooter.oddFooter));
     }
     return section;
+}
+
+// Build an <aside class="xlsx-shape"> for a drawing shape or connector.
+// Same anchor data-attrs as the <figure class="xlsx-image"> / chart
+// placeholder so consumers that want in-flow positioning can overlay.
+// Name / alt / preset / text are all attacker-controlled XLSX strings:
+// they reach the DOM only via setAttribute (HTML-encoded) or textContent.
+// Paragraph breaks in the text body are preserved by emitting a <pre>
+// with CSS white-space: pre-line (see renderStyle).
+function renderShape(shape: SheetShape): HTMLElement {
+    const aside = document.createElement('aside');
+    aside.className = 'xlsx-shape';
+    aside.setAttribute('data-kind', shape.kind);
+    if (shape.preset) aside.setAttribute('data-preset', shape.preset);
+    if (shape.name) aside.setAttribute('data-name', shape.name);
+    if (shape.alt) aside.setAttribute('aria-label', shape.alt);
+    aside.setAttribute('data-anchor-col', String(shape.col));
+    aside.setAttribute('data-anchor-row', String(shape.row));
+    if (shape.endCol !== null) aside.setAttribute('data-anchor-end-col', String(shape.endCol));
+    if (shape.endRow !== null) aside.setAttribute('data-anchor-end-row', String(shape.endRow));
+    if (shape.text && shape.text.length > 0) {
+        const pre = document.createElement('pre');
+        pre.textContent = shape.text;
+        aside.appendChild(pre);
+    }
+    return aside;
 }
 
 // Build a <div class="xlsx-header|xlsx-footer"> containing three
