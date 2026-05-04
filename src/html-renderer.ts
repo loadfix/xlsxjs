@@ -2,7 +2,7 @@
 // sheet, each containing an <h2> sheet name and a <table> of the cells.
 // Numeric cells get a numeric-aligned class; other kinds render as text.
 
-import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, SheetShape, ThreadedCommentEntry, Hyperlink, PhoneticRun } from './workbook-parser';
+import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, SheetShape, SheetImage, RowDimension, ThreadedCommentEntry, Hyperlink, PhoneticRun } from './workbook-parser';
 import { isSafeHyperlinkHref } from './workbook-parser';
 import { indexToColumnLetters, emuToPx } from './utils';
 import { h } from './html';
@@ -26,6 +26,22 @@ const PADDING_PX = 5;
 function charWidthToPx(width: number): number {
     return Math.round(width * PX_PER_CHAR + PADDING_PX);
 }
+
+// Excel's default column width is 8.43 characters; the renderer resolves
+// that to ~64px (8.43 * 7 + 5 ≈ 64). Rows default to 15pt (20px at 96 DPI).
+// These constants feed the image-overlay offset arithmetic when a column or
+// row has no declared dimension.
+const DEFAULT_COL_WIDTH_CHARS = 8.43;
+const DEFAULT_COL_WIDTH_PX = charWidthToPx(DEFAULT_COL_WIDTH_CHARS);
+const DEFAULT_ROW_HEIGHT_PT = 15;
+const DEFAULT_ROW_HEIGHT_PX = Math.round(DEFAULT_ROW_HEIGHT_PT * 4 / 3); // 20px
+
+// Gutter column (row-number <th>) width estimate. We don't measure the
+// rendered box — the image-layer sits before the table in DOM order, so
+// measurement isn't available at render time. A <th> with padding 2px 6px
+// + 1px borders around a 1-2 digit row number reads at roughly 30px across
+// common Excel files. Callers can align tighter via consumer CSS if needed.
+const GUTTER_WIDTH_PX = 30;
 
 export class HtmlRenderer {
     async render(workbook: Workbook, options: Options): Promise<Node[]> {
@@ -585,45 +601,30 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
         section.appendChild(caption);
     }
 
-    // Images. Each gets its own <figure> with an <img> whose size is derived
-    // from the image's extent (EMUs). We don't attempt to place it inside the
-    // table — positioning images against a browser table layout is fragile —
-    // but we do annotate the anchor on the DOM so consumers who want to
-    // overlay can read off the coordinates. absoluteAnchor images get a
-    // position:absolute + left/top in CSS pixels so a caller who gives the
-    // section a position:relative ancestor gets free pixel-absolute layout.
-    for (const img of sheet.images) {
-        const fig = document.createElement('figure');
-        fig.className = 'xlsx-image';
-        fig.setAttribute('data-anchor-mode', img.anchorMode);
-        fig.setAttribute('data-anchor-col', String(img.col));
-        fig.setAttribute('data-anchor-row', String(img.row));
-        if (img.endCol !== null) fig.setAttribute('data-anchor-end-col', String(img.endCol));
-        if (img.endRow !== null) fig.setAttribute('data-anchor-end-row', String(img.endRow));
-        fig.style.margin = '0.5rem 0';
-        if (img.anchorMode === 'absolute') {
-            fig.style.position = 'absolute';
-            if (img.absoluteX !== null) fig.style.left = `${emuToPx(img.absoluteX)}px`;
-            if (img.absoluteY !== null) fig.style.top = `${emuToPx(img.absoluteY)}px`;
+    // Images. Each image lives inside a zero-height <div class="xlsx-image-layer">
+    // that sits directly above the table; twoCell and oneCell anchors compute
+    // CSS top/left/width/height by summing column widths + row heights up to
+    // the anchor cell, so the figure lands on its anchor cell instead of
+    // trailing after the table. absoluteAnchor images keep their EMU-derived
+    // pixel offsets. The anchor coordinates + offsets are still surfaced as
+    // data-attributes so consumers who want a different overlay strategy can
+    // read them off the DOM.
+    if (sheet.images.length > 0) {
+        const imageLayer = document.createElement('div');
+        imageLayer.className = 'xlsx-image-layer';
+        // position:relative + height:0 so the layer establishes a positioning
+        // context without pushing the table down; pointer-events:none lets
+        // clicks fall through to the table except on the image figures
+        // themselves (which re-enable pointer-events).
+        imageLayer.style.position = 'relative';
+        imageLayer.style.height = '0';
+        imageLayer.style.pointerEvents = 'none';
+        for (const img of sheet.images) {
+            imageLayer.appendChild(renderImage(img, widthByCol, hiddenCols, rowDim));
         }
-        const el = document.createElement('img');
-        el.src = img.dataUrl;
-        // Accessibility. A decorative image gets an explicit empty alt +
-        // aria-hidden so screen readers skip it entirely; otherwise we pass
-        // through the producer's descr/title when present.
-        if (img.decorative) {
-            el.alt = '';
-            el.setAttribute('aria-hidden', 'true');
-        } else if (img.alt) {
-            el.alt = img.alt;
-        }
-        if (img.widthEmu && img.heightEmu) {
-            el.width = emuToPx(img.widthEmu);
-            el.height = emuToPx(img.heightEmu);
-        }
-        el.style.maxWidth = '100%';
-        fig.appendChild(el);
-        section.appendChild(fig);
+        // Insert the layer directly before the <table> so the anchor-cell
+        // geometry in CSS lines up with the table's laid-out grid.
+        section.insertBefore(imageLayer, table);
     }
 
     // Chart placeholders. We don't render chart content (the chart XML
@@ -664,6 +665,121 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
         section.appendChild(renderHeaderFooter('xlsx-footer', sheet.headerFooter.oddFooter));
     }
     return section;
+}
+
+// Pixel width of a single column, honouring the sheet's <col> entries when
+// declared and falling back to Excel's 8.43-char default otherwise. Hidden
+// columns contribute 0 so images anchored past them stack tight against the
+// visible grid.
+function columnPx(col: number, widthByCol: Map<number, number>, hiddenCols: Set<number>): number {
+    if (hiddenCols.has(col)) return 0;
+    const w = widthByCol.get(col);
+    return w !== undefined ? charWidthToPx(w) : DEFAULT_COL_WIDTH_PX;
+}
+
+// Pixel height of a single row, honouring <row ht>/<row hidden> when
+// declared and falling back to Excel's 15pt default otherwise. Hidden rows
+// contribute 0 so images stack tight against the visible grid.
+function rowPx(row: number, rowDim: Map<number, RowDimension>): number {
+    const d = rowDim.get(row);
+    if (d?.hidden) return 0;
+    if (d?.height != null) return Math.round(d.height * 4 / 3);
+    return DEFAULT_ROW_HEIGHT_PX;
+}
+
+// Sum pixel widths for columns 0..col-1, matching the semantics Excel uses
+// for anchoring a drawing at column `col`.
+function sumColsPx(col: number, widthByCol: Map<number, number>, hiddenCols: Set<number>): number {
+    let total = 0;
+    for (let c = 0; c < col; c++) total += columnPx(c, widthByCol, hiddenCols);
+    return total;
+}
+
+function sumRowsPx(row: number, rowDim: Map<number, RowDimension>): number {
+    let total = 0;
+    for (let r = 0; r < row; r++) total += rowPx(r, rowDim);
+    return total;
+}
+
+// Build a <figure class="xlsx-image"> for one parsed image. twoCell + oneCell
+// anchors get CSS top/left computed from the anchor cell coordinates + any
+// row-height / column-width entries on the sheet; absolute anchors keep
+// their EMU-derived left/top. The figure is always position:absolute inside
+// the .xlsx-image-layer so it overlays the table without displacing cells.
+// Attacker-controlled strings (alt text) reach the DOM only via `img.alt` /
+// setAttribute — src is an embedded data: URL built by the parser.
+function renderImage(
+    img: SheetImage,
+    widthByCol: Map<number, number>,
+    hiddenCols: Set<number>,
+    rowDim: Map<number, RowDimension>,
+): HTMLElement {
+    const fig = document.createElement('figure');
+    fig.className = 'xlsx-image';
+    fig.setAttribute('data-anchor-mode', img.anchorMode);
+    fig.setAttribute('data-anchor-col', String(img.col));
+    fig.setAttribute('data-anchor-row', String(img.row));
+    if (img.endCol !== null) fig.setAttribute('data-anchor-end-col', String(img.endCol));
+    if (img.endRow !== null) fig.setAttribute('data-anchor-end-row', String(img.endRow));
+    fig.style.margin = '0';
+    fig.style.position = 'absolute';
+    // Re-enable pointer events on the figure itself (the layer turned them
+    // off so clicks fall through to the underlying table cells).
+    fig.style.pointerEvents = 'auto';
+
+    if (img.anchorMode === 'absolute') {
+        // Absolute anchors carry pixel positions in EMU — no grid math.
+        if (img.absoluteX !== null) fig.style.left = `${emuToPx(img.absoluteX)}px`;
+        if (img.absoluteY !== null) fig.style.top = `${emuToPx(img.absoluteY)}px`;
+    } else {
+        // Cell-anchored: left = gutter + sum of column widths for columns
+        // before the anchor + EMU colOff; top = sum of row heights for rows
+        // before the anchor + EMU rowOff.
+        const left = GUTTER_WIDTH_PX + sumColsPx(img.col, widthByCol, hiddenCols) + emuToPx(img.colOff);
+        const top = sumRowsPx(img.row, rowDim) + emuToPx(img.rowOff);
+        fig.style.left = `${left}px`;
+        fig.style.top = `${top}px`;
+    }
+
+    const el = document.createElement('img');
+    el.src = img.dataUrl;
+    // Accessibility. A decorative image gets an explicit empty alt +
+    // aria-hidden so screen readers skip it entirely; otherwise we pass
+    // through the producer's descr/title when present.
+    if (img.decorative) {
+        el.alt = '';
+        el.setAttribute('aria-hidden', 'true');
+    } else if (img.alt) {
+        el.alt = img.alt;
+    }
+
+    // Pick a rendered width/height: twoCellAnchor spans the range between
+    // `from` and `to` (xdr:to gives the exclusive lower-right corner, so the
+    // width is the gap between their summed coordinates). oneCellAnchor and
+    // absoluteAnchor carry their own widthEmu/heightEmu. The SheetImage
+    // model doesn't surface the end-cell fractional offsets (toColOff /
+    // toRowOff) — if the producer set them non-zero our twoCell size may be
+    // off by a few px; documented compromise. The width/height land on both
+    // the <img> intrinsic attrs (keeps scenario 23/63 size assertions green)
+    // and are implicit on the <figure>'s content box.
+    let widthPx: number | null = null;
+    let heightPx: number | null = null;
+    if (img.anchorMode === 'twoCell' && img.endCol !== null && img.endRow !== null) {
+        const spanW = sumColsPx(img.endCol, widthByCol, hiddenCols) - sumColsPx(img.col, widthByCol, hiddenCols) - emuToPx(img.colOff);
+        widthPx = spanW > 0 ? spanW : (img.widthEmu ? emuToPx(img.widthEmu) : null);
+        const spanH = sumRowsPx(img.endRow, rowDim) - sumRowsPx(img.row, rowDim) - emuToPx(img.rowOff);
+        heightPx = spanH > 0 ? spanH : (img.heightEmu ? emuToPx(img.heightEmu) : null);
+    } else if (img.widthEmu && img.heightEmu) {
+        widthPx = emuToPx(img.widthEmu);
+        heightPx = emuToPx(img.heightEmu);
+    }
+    if (widthPx !== null && heightPx !== null) {
+        el.width = widthPx;
+        el.height = heightPx;
+    }
+    el.style.maxWidth = '100%';
+    fig.appendChild(el);
+    return fig;
 }
 
 // Build an <aside class="xlsx-shape"> for a drawing shape or connector.

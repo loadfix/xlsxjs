@@ -2322,6 +2322,75 @@ async function renderFixture(path, options) {
         '76l: value 90 should NOT contain a <circle> (confirming the traffic-light default was overridden)');
 }
 
+// ── 77. Image overlay layer: image fixture renders above the table ──────
+// The original image fixture anchors a 32×32 PNG at B3. With the new overlay
+// the figure should land in a .xlsx-image-layer that sits directly before
+// the <table> inside the section, with position:absolute + non-zero left/top
+// (left ≈ gutter + col A, top ≈ 2 row heights).
+{
+    const { container } = await renderFixture('image');
+    const section = container.querySelector('section.xlsx');
+    assert(!!section, '77a: section rendered');
+    const layer = section.querySelector('.xlsx-image-layer');
+    assert(!!layer, '77b: .xlsx-image-layer should be present');
+    const table = section.querySelector('table');
+    assert(!!table, '77c: table should be present');
+    // DOM order: layer precedes table within the section's children.
+    const children = [...section.children];
+    assert(children.indexOf(layer) < children.indexOf(table),
+        `77d: image layer should precede the table (got indices ${children.indexOf(layer)}/${children.indexOf(table)})`);
+    // Layer is zero-height + relative so it doesn't displace the table.
+    assert(layer.style.position === 'relative', `77e: layer position should be relative (got "${layer.style.position}")`);
+    assert(layer.style.height === '0' || layer.style.height === '0px',
+        `77f: layer height should be zero (got "${layer.style.height}")`);
+    // Single figure inside the layer, position:absolute, non-zero left/top.
+    const figs = [...layer.querySelectorAll('figure.xlsx-image')];
+    assert(figs.length === 1, `77g: one figure in the layer (got ${figs.length})`);
+    const fig = figs[0];
+    assert(fig.style.position === 'absolute', `77h: figure should be absolute (got "${fig.style.position}")`);
+    const leftPx = parseFloat(fig.style.left);
+    const topPx = parseFloat(fig.style.top);
+    assert(leftPx > 0, `77i: figure left should be > 0 (got "${fig.style.left}")`);
+    assert(topPx > 0, `77j: figure top should be > 0 (got "${fig.style.top}")`);
+    // Anchored at B3 (col=1, row=2); no explicit row heights → 2 rows × 20px
+    // default = 40px top offset. Left is gutter (~30) + col A default (~64).
+    assert(Math.abs(topPx - 40) <= 2, `77k: figure top ≈ 40px for B3 anchor (got ${topPx})`);
+    assert(Math.abs(leftPx - (30 + 64)) <= 2,
+        `77l: figure left ≈ gutter+colA (~94px) for B3 anchor (got ${leftPx})`);
+}
+
+// ── 78. in-flow-image-position fixture: known col/row widths land tight ─
+// Hand-built fixture (scripts/make-in-flow-image-position-fixture.mjs) with
+// col B = 14 char units (~103px), row 2 height 30pt (40px), twoCellAnchor
+// image at C1. left offset must therefore equal gutter + col A default
+// (~64px) + col B (~103px) — we allow ±2px for rounding.
+{
+    const { wb, container } = await renderFixture('in-flow-image-position');
+    const sheet = wb.parsed.sheets[0];
+    assert(sheet.images.length === 1, `78a: one image (got ${sheet.images.length})`);
+    const img = sheet.images[0];
+    assert(img.anchorMode === 'twoCell', `78b: twoCell anchor (got ${img.anchorMode})`);
+    assert(img.col === 2 && img.row === 0, `78c: anchor at C1 → col=2 row=0 (got ${img.col},${img.row})`);
+    // Column B explicit width: 14 char-units.
+    const colB = sheet.columns.find((cw) => cw.min <= 1 && cw.max >= 1);
+    assert(colB && colB.width === 14, `78d: col B width should be 14 (got ${JSON.stringify(colB)})`);
+    // Row 2 custom height 30pt.
+    const row2 = sheet.rowDimensions.find((rd) => rd.row === 1);
+    assert(row2 && row2.height === 30, `78e: row 2 height should be 30pt (got ${JSON.stringify(row2)})`);
+
+    const fig = container.querySelector('figure.xlsx-image');
+    assert(!!fig, '78f: figure rendered');
+    assert(fig.style.position === 'absolute', `78g: figure position absolute (got "${fig.style.position}")`);
+    const leftPx = parseFloat(fig.style.left);
+    // Expected: gutter(30) + colA default(64) + colB custom(7*14 + 5 = 103) = 197.
+    const expected = 30 + 64 + 103;
+    assert(Math.abs(leftPx - expected) <= 2,
+        `78h: figure left ≈ gutter + colA + colB = ${expected}px (got ${leftPx})`);
+    // Top: anchored at row 0 → 0.
+    const topPx = parseFloat(fig.style.top);
+    assert(topPx === 0, `78i: figure top === 0 at row 0 anchor (got "${fig.style.top}")`);
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
