@@ -52,14 +52,23 @@ function readToolVersion(): string {
     }
 }
 
+import { expandManifest, type Manifest as RawManifest } from './expand-manifest';
+
 interface Manifest {
     id: string;
     format: string;
     fixtures: { machine: string; office?: string };
     render_assertions?: RenderAssertion[];
+    kind?: 'literal' | 'parameterised';
 }
 
 function loadManifests(): { manifest: Manifest; path: string }[] {
+    // Expand every manifest file through expandManifest() before
+    // filtering. Parameterised manifests (kind=parameterised) yield N
+    // literal cases; literal manifests pass through unchanged. The
+    // render_assertions check runs against the expanded case rather
+    // than the raw file, because parameterised manifests carry only
+    // render_assertions_template pre-expansion.
     const dir = resolve(corpus, 'features/xlsx');
     if (!existsSync(dir)) return [];
     const entries = readdirSync(dir).filter((f) => f.endsWith('.json'));
@@ -67,10 +76,13 @@ function loadManifests(): { manifest: Manifest; path: string }[] {
     for (const f of entries) {
         const p = resolve(dir, f);
         const raw = readFileSync(p, 'utf8');
-        const m = JSON.parse(raw) as Manifest;
-        if (!m.render_assertions || m.render_assertions.length === 0) continue;
+        const m = JSON.parse(raw) as RawManifest;
         if (m.format !== 'xlsx') continue;
-        out.push({ manifest: m, path: p });
+        const cases = expandManifest(m) as unknown as Manifest[];
+        for (const c of cases) {
+            if (!c.render_assertions || c.render_assertions.length === 0) continue;
+            out.push({ manifest: c, path: p });
+        }
     }
     return out;
 }
