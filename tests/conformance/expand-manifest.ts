@@ -139,7 +139,10 @@ function substitute(
     obj: unknown,
     bindings: Record<string, Record<string, unknown>>,
 ): unknown {
-    const placeholder = /\{([a-z][a-z0-9_]*)\.([a-z][a-z0-9_]*)\}/g;
+    // Field portion accepts [A-Za-z][A-Za-z0-9_]* to handle camelCase
+    // OOXML attribute names (e.g. `themeTint`, `numFmtId`). Must match
+    // the Python reference in ooxml-validate's conformance.py.
+    const placeholder = /\{([a-z][a-z0-9_]*)\.([A-Za-z][A-Za-z0-9_]*)\}/g;
     const apply = (text: string): string =>
         text.replace(placeholder, (full, axis: string, field: string) => {
             const record = bindings[axis];
