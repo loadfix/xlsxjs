@@ -56,15 +56,14 @@ geometry, text body, and anchor coordinates; the renderer emits an
 `<aside class="xlsx-shape">` per shape after the table.
 
 Deliberately deferred: chart rendering, SmartArt, form-control VML
-fallbacks, double borders, in-flow image positioning, and full
-expression-rule interpretation.
+fallbacks, double borders, and full expression-rule interpretation.
 
 ## Contributing
 
 ```bash
 npm install
 npm run build
-npm run test:render   # jsdom depth harness (76 scenarios)
+npm run test:render   # jsdom depth harness (78 scenarios)
 npm test              # Playwright browser smoke (real Chrome, port :3002)
 npm run dev           # static demo server at :8767
 ```

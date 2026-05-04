@@ -11,10 +11,6 @@ cell metadata, cellStyle chain + custom icons).
   against a fixture captures a `result.html` snapshot; subsequent runs diff
   the rendered container against it and flag drift. Catches regressions that
   the current "does it crash?" smoke can't see. Touches `scripts/smoke-test.mjs`.
-- [ ] **In-flow image positioning** — images render in a `<figure>` after
-  the table today. A true overlay would `position: absolute` them over the
-  correct cell range, computed from `twoCellAnchor` + the actual table
-  layout. Needs a layout measurement pass post-render.
 - [ ] **Shape preset geometry rendering** — `Sheet.shapes` models the
   preset name (`rect` / `line` / `flowChartProcess` / …) but the renderer
   emits a plain `<aside>`. Emit an SVG per preset so a text box actually
@@ -57,7 +53,15 @@ cell metadata, cellStyle chain + custom icons).
 ## Resolved in fork
 
 Most recent first (Wave 6 landed 2026-05-04). Earlier groupings blurred
-together in the interest of a readable tail.
+together in the interest of a readable tail. Last updated 2026-05-02.
+
+### Post-wave 6 (2026-05-02)
+- ✅ **In-flow image positioning** — images now render as `position: absolute`
+  `<figure>`s inside a zero-height `.xlsx-image-layer` that sits directly
+  above the `<table>`. twoCell / oneCell anchors compute CSS `left` / `top`
+  by summing declared column widths + row heights (with Excel's 8.43-char /
+  15-pt defaults for undeclared dimensions + a ~30px gutter estimate for
+  the row-number column); absolute anchors keep their EMU pixel offsets.
 
 ### Wave 6 (small items, 2026-05-04)
 - ✅ **Diagonal borders** — `BorderStyle.diagonal` + `diagonalUp` /

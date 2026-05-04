@@ -1,7 +1,7 @@
 # xlsxjs — project notes for Claude
 
 Browser-side XLSX→HTML renderer. TypeScript, built with rollup, tested with
-Playwright (browser smoke on real Chrome) and a jsdom harness (depth — 76
+Playwright (browser smoke on real Chrome) and a jsdom harness (depth — 78
 scenarios). Sibling to `../docxjs`; the layout and workflows mirror it so
 the two projects are interchangeable to work in.
 
@@ -49,19 +49,25 @@ small `<div class="xlsx-table-caption">` per table is emitted after
 the sheet's `<table>` so consumers can see the range/name in the DOM
 (table-level styling is intentionally left to the cell-level xf chain).
 
-**Images**: drawings referenced via the sheet's rels are resolved;
-the embedded media binary is inlined as a `data:` URL on an `<img>`
-wrapped in a `<figure class="xlsx-image">` after the table. Anchor
-coordinates + offsets are surfaced on the figure as data-attributes
-(including `data-anchor-mode`) so callers who want real in-flow
-positioning can overlay using those. All three DrawingML anchor modes
-are honoured: `twoCellAnchor` (size derived from `from`/`to` cells),
-`oneCellAnchor` (size from `<xdr:ext cx cy>`), and `absoluteAnchor`
-(pixel-absolute via `<xdr:pos>`, rendered with `position: absolute` +
-`left`/`top` in CSS pixels). The `decorative="1"` accessibility marker
-under `cNvPr/a:extLst` flips the image to `alt=""` + `aria-hidden="true"`
-so screen readers skip it. EMU→pixel conversion lives in
-`emuToPx()` (`src/utils.ts`, 9525 EMU per px at 96 DPI).
+**Images**: drawings referenced via the sheet's rels are resolved; the
+embedded media binary is inlined as a `data:` URL on an `<img>` wrapped
+in a `<figure class="xlsx-image">`. Figures sit inside a zero-height
+`<div class="xlsx-image-layer">` placed directly above the `<table>`,
+so each figure overlays its anchor cell without displacing the grid;
+the layer is `position: relative; height: 0; pointer-events: none` and
+each figure is `position: absolute; pointer-events: auto`. Anchor
+coordinates + offsets are still surfaced as data-attributes (including
+`data-anchor-mode`) so callers who want a different overlay strategy
+can read them off the DOM. All three DrawingML anchor modes are
+honoured: `twoCellAnchor` computes `left` / `top` from summed column
+widths + row heights (with Excel's 8.43-char / 15-pt defaults for
+undeclared dimensions and a ~30px estimate for the row-number gutter);
+`oneCellAnchor` uses the same anchor math plus `<xdr:ext cx cy>` for
+size; `absoluteAnchor` uses `<xdr:pos>` pixel offsets (EMU→px). The
+`decorative="1"` accessibility marker under `cNvPr/a:extLst` flips the
+image to `alt=""` + `aria-hidden="true"` so screen readers skip it.
+EMU→pixel conversion lives in `emuToPx()` (`src/utils.ts`, 9525 EMU
+per px at 96 DPI).
 
 **Shapes**: `<xdr:sp>` (text boxes, rectangles, callouts, WordArt) and
 `<xdr:cxnSp>` (connectors) sibling the image / chart entries inside
@@ -90,9 +96,8 @@ does not evaluate formulas — a cell with no cached value renders blank.
 
 Deliberately deferred: chart rendering, SmartArt, shape-geometry
 rendering (preset anchors + text surface but no stroke/fill glyphs),
-form-control VML fallback decoding, double borders, in-flow image
-positioning (images render after the table, not overlaid on the cell
-grid), full expression-rule interpretation beyond the narrow form.
+form-control VML fallback decoding, double borders, full expression-rule
+interpretation beyond the narrow form.
 
 **Fills + borders**: `FillStyle` is a discriminated union covering
 `{ kind: 'pattern', patternType, fgColor, bgColor }` (solid + the
@@ -173,7 +178,6 @@ the feature's XML looks like.
 - Charts (`xl/charts/*.xml`, both classic `c:chartSpace` and chartEx).
 - SmartArt (`xl/diagrams/*.xml`) — outer shape surfaces via `Sheet.shapes`, but the data/layout XML is not parsed.
 - Shape glyph rendering — presets land on `Sheet.shapes` as of `feat/shapes-textboxes`, but the `<aside>` placeholder doesn't paint the actual preset geometry (rect / line / callout tail).
-- In-flow image positioning (currently images render after the table).
 - Double borders (diagonal + gradient fills + non-solid pattern fills
   are now handled; see the Fills + borders block above).
 - Full expression-rule interpretation (currently only `=<cellRef> <op> <literal>`).
@@ -204,6 +208,11 @@ the feature's XML looks like.
   diagonal borders, a linear gradient fill, and a non-solid pattern
   fill (`darkHorizontal`). Regenerate with
   `node scripts/make-fills-and-borders-fixture.mjs`.
+- `tests/render-test/in-flow-image-position/` — hand-written XLSX with a
+  twoCellAnchor image anchored at C1, a custom 14-char-unit col B width
+  and a 30pt row 2 height, used to assert the image-overlay left/top
+  arithmetic. Regenerate with
+  `node scripts/make-in-flow-image-position-fixture.mjs`.
 
 ## Security constraints (inherited pattern)
 
