@@ -6,10 +6,10 @@ import { h } from './html';
 
 export type { Workbook as ParsedWorkbook, Sheet, Cell, RichTextRun, SharedString, FrozenPanes, AutoFilter, TableDef, SheetChart, SheetPivot, SheetExtensionUri, SheetImage, SheetComment, ThreadedCommentEntry } from './workbook-parser';
 export { parseThreadedComments } from './workbook-parser';
-export type { Styles, CellXf, FontStyle, FillStyle, BorderStyle, Dxf } from './styles';
+export type { Styles, CellXf, FontStyle, FillStyle, BorderStyle, Dxf, UnderlineStyle } from './styles';
 export type { Theme, ColorRef } from './theme';
 export type { ConditionalFormatting, CfRule, CfRuleType, CfOperator, CellRange, Cfvo, ColorScale, DataBar, IconSet } from './conditional-format';
-export { parseStyles, lookupNumberFormat, sanitizeHexColor, parseColorElement } from './styles';
+export { parseStyles, lookupNumberFormat, sanitizeHexColor, sanitizeFontFamily, parseColorElement } from './styles';
 export { parseTheme, applyTint, resolveColor, indexedColor } from './theme';
 export { parseConditionalFormatting, evaluateRule, resolveCfvo, interpolateColorScale } from './conditional-format';
 export { formatNumber } from './number-format';

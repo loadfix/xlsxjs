@@ -452,3 +452,91 @@ await writeFixture('merged', {
   </mergeCells>
 </worksheet>`,
 });
+
+// ── font-extras ────────────────────────────────────────────────────────────
+// Hand-built XLSX that exercises the 2026-Q2 font-extras slice: strike,
+// sub/superscript (via rich-text runs); double underline (via a cell-level
+// font); a safe font family ("Calibri"); and an injection-attempt font name
+// ("Arial; display:block") that sanitizeFontFamily must reject.
+//
+// Shared strings:
+//   0: rich text → "struck" (strike) + "H" (plain) + "2" (subscript) +
+//      "O" (plain) + " " + "sup" (superscript)
+//   1: "double underline"        (cell-level font, cellXf s=1)
+//   2: "calibri"                 (cell-level font with name="Calibri", s=2)
+//   3: "injected"                (cell-level font with attacker-provided
+//                                 name, s=3 → sanitizer rejects)
+{
+    const outDir = resolve(repo, 'tests/render-test/font-extras');
+    mkdirSync(outDir, { recursive: true });
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>`);
+    zip.file('_rels/.rels', rootRels);
+    zip.file('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`);
+    zip.file('xl/workbook.xml', workbookXml('FontExtras'));
+
+    zip.file('xl/sharedStrings.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="4" uniqueCount="4">
+  <si>
+    <r><rPr><strike/></rPr><t>struck</t></r>
+    <r><t xml:space="preserve"> H</t></r>
+    <r><rPr><vertAlign val="subscript"/></rPr><t>2</t></r>
+    <r><t xml:space="preserve">O </t></r>
+    <r><rPr><vertAlign val="superscript"/></rPr><t>sup</t></r>
+  </si>
+  <si><t>double underline</t></si>
+  <si><t>calibri</t></si>
+  <si><t>injected</t></si>
+</sst>`);
+
+    // fonts:
+    //   0 = default
+    //   1 = double underline (<u val="double"/>)
+    //   2 = name="Calibri" (safe, sanitizer wraps in quotes)
+    //   3 = name="Arial; display:block" (injection attempt, sanitizer rejects)
+    zip.file('xl/styles.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="4">
+    <font><sz val="11"/><name val="Calibri"/></font>
+    <font><u val="double"/><sz val="11"/><name val="Calibri"/></font>
+    <font><sz val="11"/><name val="Calibri"/></font>
+    <font><sz val="11"/><name val="Arial; display:block"/></font>
+  </fonts>
+  <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellXfs count="4">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="0" borderId="0" applyFont="1"/>
+    <xf numFmtId="0" fontId="2" fillId="0" borderId="0" applyFont="1"/>
+    <xf numFmtId="0" fontId="3" fillId="0" borderId="0" applyFont="1"/>
+  </cellXfs>
+</styleSheet>`);
+
+    zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="A1" t="s"><v>0</v></c></row>
+    <row r="2"><c r="A2" t="s" s="1"><v>1</v></c></row>
+    <row r="3"><c r="A3" t="s" s="2"><v>2</v></c></row>
+    <row r="4"><c r="A4" t="s" s="3"><v>3</v></c></row>
+  </sheetData>
+</worksheet>`);
+
+    const buf = await zip.generateAsync({ type: 'nodebuffer' });
+    const out = resolve(outDir, 'workbook.xlsx');
+    writeFileSync(out, buf);
+    console.log(`wrote ${out} (${buf.length} bytes)`);
+}

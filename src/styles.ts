@@ -18,10 +18,18 @@ import type { ColorRef } from './theme';
 
 const NS_MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 
+export type UnderlineStyle = 'single' | 'double' | 'singleAccounting' | 'doubleAccounting' | null;
+
 export interface FontStyle {
     bold: boolean;
     italic: boolean;
-    underline: boolean;
+    // Underline variants per ECMA-376 §18.8.36: 'single' (the default when
+    // <u/> is present with no val), 'double', 'singleAccounting',
+    // 'doubleAccounting'. null = no underline.
+    underline: UnderlineStyle;
+    strike: boolean;
+    // Sub/superscript (ECMA-376 §18.4.13 vertAlign). null = baseline.
+    vertAlign: 'subscript' | 'superscript' | null;
     size: number | null;
     color: ColorRef;
     name: string | null;
@@ -135,6 +143,31 @@ export function lookupNumberFormat(styles: Styles | null, numFmtId: number): str
 const HEX_COLOR = /^([A-Fa-f0-9]{6})([A-Fa-f0-9]{2})?$/;
 const ARGB_COLOR = /^([A-Fa-f0-9]{2})([A-Fa-f0-9]{6})$/;
 
+// Sanitize a <font><name val="…"/></font> value for safe echo into
+// td.style.fontFamily. Attacker-controlled strings cannot reach the DOM
+// uninspected — a name like 'Arial; display: none' would break out of the
+// font-family property if naively interpolated. Mirrors docxjs's
+// sanitizeFontFamily pattern.
+//
+// Rules:
+//   - null / empty → null (no font-family applied).
+//   - Any of ; { } < > or a newline → null (injection attempt rejected).
+//   - Remaining chars must be alphanumeric / spaces / hyphens / dots;
+//     anything else → null.
+//   - Accepted names are wrapped in double quotes so font names like
+//     "Times New Roman" work and no further escaping is needed.
+const SAFE_FONT_FAMILY = /^[A-Za-z0-9 .\-]+$/;
+
+export function sanitizeFontFamily(name: string | null | undefined): string | null {
+    if (!name) return null;
+    const trimmed = name.trim();
+    if (!trimmed) return null;
+    // Reject obvious CSS-injection markers outright.
+    if (/[;{}<>\n\r]/.test(trimmed)) return null;
+    if (!SAFE_FONT_FAMILY.test(trimmed)) return null;
+    return `"${trimmed}"`;
+}
+
 export function sanitizeHexColor(value: string | null | undefined): string | null {
     if (!value) return null;
     const trimmed = value.trim();
@@ -223,11 +256,36 @@ function parseFont(el: Element): FontStyle {
     return {
         bold: has('b'),
         italic: has('i'),
-        underline: has('u'),
+        underline: parseUnderline(el),
+        strike: has('strike'),
+        vertAlign: parseVertAlign(el),
         size: sizeAttr ? Number(sizeAttr) : null,
         color: parseColorElement(colorEl),
         name: firstAttr('name', 'val') ?? firstAttr('rFont', 'val'),
     };
+}
+
+// ECMA-376 §18.8.36: <u/> with no val attribute means 'single'; explicit
+// values can be 'single' | 'double' | 'singleAccounting' | 'doubleAccounting'.
+// Unknown values fall back to null so we don't invent styles.
+function parseUnderline(parent: Element): UnderlineStyle {
+    const u = parent.getElementsByTagNameNS(NS_MAIN, 'u').item(0);
+    if (!u) return null;
+    const val = u.getAttribute('val');
+    if (val === null || val === '') return 'single';
+    if (val === 'single' || val === 'double' || val === 'singleAccounting' || val === 'doubleAccounting') {
+        return val;
+    }
+    if (val === 'none') return null;
+    return null;
+}
+
+function parseVertAlign(parent: Element): 'subscript' | 'superscript' | null {
+    const va = parent.getElementsByTagNameNS(NS_MAIN, 'vertAlign').item(0);
+    if (!va) return null;
+    const val = va.getAttribute('val');
+    if (val === 'subscript' || val === 'superscript') return val;
+    return null;
 }
 
 function parseFills(doc: Document): FillStyle[] {
@@ -312,7 +370,10 @@ function parseDxf(el: Element): Dxf {
         const font: Partial<FontStyle> = {};
         if (has('b')) font.bold = true;
         if (has('i')) font.italic = true;
-        if (has('u')) font.underline = true;
+        if (has('u')) font.underline = parseUnderline(fontEl);
+        if (has('strike')) font.strike = true;
+        const va = parseVertAlign(fontEl);
+        if (va) font.vertAlign = va;
         if (sz?.getAttribute('val')) font.size = Number(sz.getAttribute('val')) || undefined as any;
         const c = parseColorElement(colorEl);
         if (c) font.color = c;

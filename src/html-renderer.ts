@@ -6,7 +6,7 @@ import type { Workbook, Sheet, Cell, MergedRange, RichTextRun, FrozenPanes, Shee
 import { indexToColumnLetters } from './utils';
 import { h } from './html';
 import type { Options } from './xlsx-preview';
-import { lookupNumberFormat, resolveEffectiveXf, type Styles, type CellXf, type FontStyle, type FillStyle, type BorderStyle, type Dxf } from './styles';
+import { lookupNumberFormat, resolveEffectiveXf, sanitizeFontFamily, type Styles, type CellXf, type FontStyle, type FillStyle, type BorderStyle, type Dxf } from './styles';
 import { resolveColor, type Theme } from './theme';
 import { formatNumber } from './number-format';
 import { a1ToR1c1 } from './formula-notation';
@@ -589,11 +589,40 @@ function appendRunSpan(td: HTMLTableCellElement, run: RichTextRun, theme: Theme 
     span.textContent = run.text;
     if (run.bold) span.style.fontWeight = 'bold';
     if (run.italic) span.style.fontStyle = 'italic';
-    if (run.underline) span.style.textDecoration = 'underline';
+    applyTextDecoration(span, run.underline, run.strike);
+    if (run.underline === 'double' || run.underline === 'doubleAccounting') {
+        span.style.textDecorationStyle = 'double';
+    }
+    if (run.underline === 'singleAccounting' || run.underline === 'doubleAccounting') {
+        span.classList.add('xlsx-accounting-underline');
+    }
+    if (run.vertAlign === 'subscript') {
+        span.style.verticalAlign = 'sub';
+        span.style.fontSize = '0.8em';
+    } else if (run.vertAlign === 'superscript') {
+        span.style.verticalAlign = 'super';
+        span.style.fontSize = '0.8em';
+    }
     if (run.size) span.style.fontSize = `${run.size}pt`;
     const color = resolveColor(run.color, theme);
     if (color) span.style.color = color;
+    const family = sanitizeFontFamily(run.name);
+    if (family) span.style.fontFamily = family;
     td.appendChild(span);
+}
+
+// Compose textDecoration from an underline variant + strike-through. Both
+// can coexist, so we build the shorthand from the truthy tokens.
+function applyTextDecoration(
+    el: HTMLElement,
+    underline: FontStyle['underline'] | null | undefined,
+    strike: boolean,
+): void {
+    const parts: string[] = [];
+    if (underline) parts.push('underline');
+    if (strike) parts.push('line-through');
+    if (parts.length === 0) return;
+    el.style.textDecoration = parts.join(' ');
 }
 
 function resolveXf(styles: Styles | null, index: number): CellXf | null {
@@ -605,13 +634,28 @@ function applyFont(td: HTMLTableCellElement, font: FontStyle | undefined, theme:
     if (!font) return;
     if (font.bold) td.style.fontWeight = 'bold';
     if (font.italic) td.style.fontStyle = 'italic';
-    if (font.underline) td.style.textDecoration = 'underline';
+    applyTextDecoration(td, font.underline, font.strike);
+    if (font.underline === 'double' || font.underline === 'doubleAccounting') {
+        td.style.textDecorationStyle = 'double';
+    }
+    if (font.underline === 'singleAccounting' || font.underline === 'doubleAccounting') {
+        td.classList.add('xlsx-accounting-underline');
+    }
+    if (font.vertAlign === 'subscript') {
+        td.style.verticalAlign = 'sub';
+        td.style.fontSize = '0.8em';
+    } else if (font.vertAlign === 'superscript') {
+        td.style.verticalAlign = 'super';
+        td.style.fontSize = '0.8em';
+    }
     if (font.size) td.style.fontSize = `${font.size}pt`;
     const color = resolveColor(font.color, theme);
     if (color) td.style.color = color;
-    // Note: font.name is intentionally not applied — an attacker-controlled
-    // font family is a CSS-injection vector if we echo it into a style string.
-    // If/when we support it, pipe through a strict quoted allowlist.
+    // font.name goes through sanitizeFontFamily (strict alphanumeric /
+    // space / hyphen / dot allowlist, quoted on output) so an attacker
+    // can't escape the font-family CSS property.
+    const family = sanitizeFontFamily(font.name);
+    if (family) td.style.fontFamily = family;
 }
 
 function applyFill(td: HTMLTableCellElement, fill: FillStyle | undefined, theme: Theme | null): void {
@@ -711,12 +755,29 @@ function applyDxf(td: HTMLTableCellElement, dxf: Dxf, theme: Theme | null): void
         const f = dxf.font;
         if (f.bold) td.style.fontWeight = 'bold';
         if (f.italic) td.style.fontStyle = 'italic';
-        if (f.underline) td.style.textDecoration = 'underline';
+        if (f.underline || f.strike) {
+            applyTextDecoration(td, f.underline ?? null, !!f.strike);
+            if (f.underline === 'double' || f.underline === 'doubleAccounting') {
+                td.style.textDecorationStyle = 'double';
+            }
+            if (f.underline === 'singleAccounting' || f.underline === 'doubleAccounting') {
+                td.classList.add('xlsx-accounting-underline');
+            }
+        }
+        if (f.vertAlign === 'subscript') {
+            td.style.verticalAlign = 'sub';
+            td.style.fontSize = '0.8em';
+        } else if (f.vertAlign === 'superscript') {
+            td.style.verticalAlign = 'super';
+            td.style.fontSize = '0.8em';
+        }
         if (f.size) td.style.fontSize = `${f.size}pt`;
         if (f.color) {
             const color = resolveColor(f.color, theme);
             if (color) td.style.color = color;
         }
+        const family = sanitizeFontFamily(f.name);
+        if (family) td.style.fontFamily = family;
     }
     if (dxf.fill) applyFill(td, dxf.fill, theme);
     if (dxf.border) applyBorder(td, dxf.border, theme);
