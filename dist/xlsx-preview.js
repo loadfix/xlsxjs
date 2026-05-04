@@ -199,6 +199,17 @@
     }
 
     const NS_MAIN$1 = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+    function defaultAlignment() {
+        return {
+            horizontal: null,
+            vertical: null,
+            wrapText: false,
+            shrinkToFit: false,
+            indent: 0,
+            textRotation: null,
+            readingOrder: 0,
+        };
+    }
     const BUILTIN_NUMBER_FORMATS = {
         0: 'General',
         1: '0',
@@ -238,6 +249,19 @@
     }
     const HEX_COLOR = /^([A-Fa-f0-9]{6})([A-Fa-f0-9]{2})?$/;
     const ARGB_COLOR = /^([A-Fa-f0-9]{2})([A-Fa-f0-9]{6})$/;
+    const SAFE_FONT_FAMILY = /^[A-Za-z0-9 .\-]+$/;
+    function sanitizeFontFamily(name) {
+        if (!name)
+            return null;
+        const trimmed = name.trim();
+        if (!trimmed)
+            return null;
+        if (/[;{}<>\n\r]/.test(trimmed))
+            return null;
+        if (!SAFE_FONT_FAMILY.test(trimmed))
+            return null;
+        return `"${trimmed}"`;
+    }
     function sanitizeHexColor(value) {
         if (!value)
             return null;
@@ -326,11 +350,36 @@
         return {
             bold: has('b'),
             italic: has('i'),
-            underline: has('u'),
+            underline: parseUnderline(el),
+            strike: has('strike'),
+            vertAlign: parseVertAlign(el),
             size: sizeAttr ? Number(sizeAttr) : null,
             color: parseColorElement(colorEl),
             name: firstAttr('name', 'val') ?? firstAttr('rFont', 'val'),
         };
+    }
+    function parseUnderline(parent) {
+        const u = parent.getElementsByTagNameNS(NS_MAIN$1, 'u').item(0);
+        if (!u)
+            return null;
+        const val = u.getAttribute('val');
+        if (val === null || val === '')
+            return 'single';
+        if (val === 'single' || val === 'double' || val === 'singleAccounting' || val === 'doubleAccounting') {
+            return val;
+        }
+        if (val === 'none')
+            return null;
+        return null;
+    }
+    function parseVertAlign(parent) {
+        const va = parent.getElementsByTagNameNS(NS_MAIN$1, 'vertAlign').item(0);
+        if (!va)
+            return null;
+        const val = va.getAttribute('val');
+        if (val === 'subscript' || val === 'superscript')
+            return val;
+        return null;
     }
     function parseFills(doc) {
         const fillsRoot = doc.getElementsByTagNameNS(NS_MAIN$1, 'fills').item(0);
@@ -417,7 +466,12 @@
             if (has('i'))
                 font.italic = true;
             if (has('u'))
-                font.underline = true;
+                font.underline = parseUnderline(fontEl);
+            if (has('strike'))
+                font.strike = true;
+            const va = parseVertAlign(fontEl);
+            if (va)
+                font.vertAlign = va;
             if (sz?.getAttribute('val'))
                 font.size = Number(sz.getAttribute('val')) || undefined;
             const c = parseColorElement(colorEl);
@@ -441,8 +495,6 @@
         const bool = (attr) => el.getAttribute(attr) === '1';
         const num = (attr) => Number(el.getAttribute(attr) ?? '0') | 0;
         const alignEl = el.getElementsByTagNameNS(NS_MAIN$1, 'alignment').item(0);
-        const h = alignEl?.getAttribute('horizontal') ?? null;
-        const v = alignEl?.getAttribute('vertical') ?? null;
         const xfIdAttr = el.getAttribute('xfId');
         const xfId = xfIdAttr != null && Number.isFinite(Number(xfIdAttr)) ? Number(xfIdAttr) : -1;
         return {
@@ -456,10 +508,42 @@
             applyFill: bool('applyFill'),
             applyBorder: bool('applyBorder'),
             applyAlignment: bool('applyAlignment'),
-            alignment: {
-                horizontal: (h === 'left' || h === 'right' || h === 'center' || h === 'justify') ? h : null,
-                vertical: (v === 'top' || v === 'middle' || v === 'bottom') ? v : null,
-            },
+            alignment: parseAlignment(alignEl),
+        };
+    }
+    function parseAlignment(el) {
+        if (!el)
+            return defaultAlignment();
+        const h = el.getAttribute('horizontal');
+        const v = el.getAttribute('vertical');
+        const horizontal = h === 'left' || h === 'right' || h === 'center' || h === 'justify' ||
+            h === 'distributed' || h === 'centerContinuous' || h === 'fill' ? h : null;
+        const vertical = v === 'top' || v === 'middle' || v === 'bottom' ||
+            v === 'justify' || v === 'distributed' ? v : null;
+        const indentAttr = el.getAttribute('indent');
+        const indent = indentAttr != null && Number.isFinite(Number(indentAttr)) ? Math.max(0, Math.floor(Number(indentAttr))) : 0;
+        const rotAttr = el.getAttribute('textRotation');
+        let textRotation = null;
+        if (rotAttr != null) {
+            const n = Number(rotAttr);
+            if (Number.isFinite(n) && ((n >= 0 && n <= 180) || n === 255)) {
+                textRotation = Math.round(n);
+            }
+        }
+        const roAttr = el.getAttribute('readingOrder');
+        let readingOrder = 0;
+        if (roAttr === '1')
+            readingOrder = 1;
+        else if (roAttr === '2')
+            readingOrder = 2;
+        return {
+            horizontal,
+            vertical,
+            wrapText: el.getAttribute('wrapText') === '1',
+            shrinkToFit: el.getAttribute('shrinkToFit') === '1',
+            indent,
+            textRotation,
+            readingOrder,
         };
     }
     function resolveEffectiveXf(styles, cellXf) {
@@ -1572,7 +1656,9 @@
             text,
             bold: false,
             italic: false,
-            underline: false,
+            underline: null,
+            strike: false,
+            vertAlign: null,
             size: null,
             color: null,
             name: null,
@@ -1593,11 +1679,31 @@
         };
         const color = rPr.getElementsByTagNameNS(NS.main, 'color').item(0);
         const sizeAttr = firstAttr('sz', 'val');
+        const uEl = rPr.getElementsByTagNameNS(NS.main, 'u').item(0);
+        let underline = null;
+        if (uEl) {
+            const val = uEl.getAttribute('val');
+            if (val === null || val === '')
+                underline = 'single';
+            else if (val === 'single' || val === 'double' || val === 'singleAccounting' || val === 'doubleAccounting')
+                underline = val;
+            else if (val === 'none')
+                underline = null;
+        }
+        const vaEl = rPr.getElementsByTagNameNS(NS.main, 'vertAlign').item(0);
+        let vertAlign = null;
+        if (vaEl) {
+            const val = vaEl.getAttribute('val');
+            if (val === 'subscript' || val === 'superscript')
+                vertAlign = val;
+        }
         return {
             text,
             bold: has('b'),
             italic: has('i'),
-            underline: has('u'),
+            underline,
+            strike: has('strike'),
+            vertAlign,
             size: sizeAttr ? Number(sizeAttr) : null,
             color: parseColorElement(color),
             name: firstAttr('rFont', 'val') ?? firstAttr('name', 'val'),
@@ -2259,6 +2365,7 @@
 }
 .${className} .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
 .${className} .xlsx-threaded { color: #0066cc; margin-left: 4px; cursor: help; }
+.${className} .xlsx-shrink-to-fit { font-size: clamp(0.55em, 0.95em, 1em); overflow: hidden; }
     `.trim();
         return style;
     }
@@ -2719,14 +2826,40 @@
             span.style.fontWeight = 'bold';
         if (run.italic)
             span.style.fontStyle = 'italic';
-        if (run.underline)
-            span.style.textDecoration = 'underline';
+        applyTextDecoration(span, run.underline, run.strike);
+        if (run.underline === 'double' || run.underline === 'doubleAccounting') {
+            span.style.textDecorationStyle = 'double';
+        }
+        if (run.underline === 'singleAccounting' || run.underline === 'doubleAccounting') {
+            span.classList.add('xlsx-accounting-underline');
+        }
+        if (run.vertAlign === 'subscript') {
+            span.style.verticalAlign = 'sub';
+            span.style.fontSize = '0.8em';
+        }
+        else if (run.vertAlign === 'superscript') {
+            span.style.verticalAlign = 'super';
+            span.style.fontSize = '0.8em';
+        }
         if (run.size)
             span.style.fontSize = `${run.size}pt`;
         const color = resolveColor(run.color, theme);
         if (color)
             span.style.color = color;
+        const family = sanitizeFontFamily(run.name);
+        if (family)
+            span.style.fontFamily = family;
         td.appendChild(span);
+    }
+    function applyTextDecoration(el, underline, strike) {
+        const parts = [];
+        if (underline)
+            parts.push('underline');
+        if (strike)
+            parts.push('line-through');
+        if (parts.length === 0)
+            return;
+        el.style.textDecoration = parts.join(' ');
     }
     function resolveXf(styles, index) {
         if (!styles || index < 0 || index >= styles.cellXfs.length)
@@ -2740,13 +2873,29 @@
             td.style.fontWeight = 'bold';
         if (font.italic)
             td.style.fontStyle = 'italic';
-        if (font.underline)
-            td.style.textDecoration = 'underline';
+        applyTextDecoration(td, font.underline, font.strike);
+        if (font.underline === 'double' || font.underline === 'doubleAccounting') {
+            td.style.textDecorationStyle = 'double';
+        }
+        if (font.underline === 'singleAccounting' || font.underline === 'doubleAccounting') {
+            td.classList.add('xlsx-accounting-underline');
+        }
+        if (font.vertAlign === 'subscript') {
+            td.style.verticalAlign = 'sub';
+            td.style.fontSize = '0.8em';
+        }
+        else if (font.vertAlign === 'superscript') {
+            td.style.verticalAlign = 'super';
+            td.style.fontSize = '0.8em';
+        }
         if (font.size)
             td.style.fontSize = `${font.size}pt`;
         const color = resolveColor(font.color, theme);
         if (color)
             td.style.color = color;
+        const family = sanitizeFontFamily(font.name);
+        if (family)
+            td.style.fontFamily = family;
     }
     function applyFill(td, fill, theme) {
         const color = resolveColor(fill?.fgColor ?? null, theme);
@@ -2795,11 +2944,58 @@
         return 'solid';
     }
     function applyAlignment(td, xf) {
-        if (xf.alignment.horizontal)
-            td.style.textAlign = xf.alignment.horizontal;
-        if (xf.alignment.vertical) {
-            td.style.verticalAlign = xf.alignment.vertical === 'middle' ? 'middle' : xf.alignment.vertical;
+        const a = xf.alignment;
+        if (a.horizontal) {
+            switch (a.horizontal) {
+                case 'centerContinuous':
+                    td.style.textAlign = 'center';
+                    break;
+                case 'distributed':
+                    td.style.textAlign = 'justify';
+                    td.style.textAlignLast = 'justify';
+                    break;
+                case 'fill':
+                    td.style.textAlign = 'start';
+                    break;
+                default:
+                    td.style.textAlign = a.horizontal;
+            }
         }
+        if (a.vertical) {
+            if (a.vertical === 'middle' || a.vertical === 'justify' || a.vertical === 'distributed') {
+                td.style.verticalAlign = 'middle';
+            }
+            else {
+                td.style.verticalAlign = a.vertical;
+            }
+        }
+        if (a.wrapText) {
+            td.style.whiteSpace = 'normal';
+            td.style.wordBreak = 'break-word';
+        }
+        if (a.readingOrder === 2)
+            td.style.direction = 'rtl';
+        else if (a.readingOrder === 1)
+            td.style.direction = 'ltr';
+        if (a.indent > 0) {
+            const em = `${(a.indent * 0.5).toFixed(2)}em`;
+            const rtl = a.readingOrder === 2;
+            const padRight = (a.horizontal === 'right' && !rtl) || (a.horizontal === 'left' && rtl);
+            if (padRight)
+                td.style.paddingRight = em;
+            else
+                td.style.paddingLeft = em;
+        }
+        if (a.textRotation === 255) {
+            td.style.writingMode = 'vertical-lr';
+        }
+        else if (a.textRotation != null && a.textRotation !== 0) {
+            td.style.transform = `rotate(-${a.textRotation}deg)`;
+            td.style.transformOrigin = 'center center';
+            td.style.display = 'inline-block';
+        }
+        if (a.shrinkToFit)
+            td.classList.add('xlsx-shrink-to-fit');
     }
     function applyGraphicalCf(td, state) {
         if (state.colorScaleBg) {
@@ -2836,8 +3032,23 @@
                 td.style.fontWeight = 'bold';
             if (f.italic)
                 td.style.fontStyle = 'italic';
-            if (f.underline)
-                td.style.textDecoration = 'underline';
+            if (f.underline || f.strike) {
+                applyTextDecoration(td, f.underline ?? null, !!f.strike);
+                if (f.underline === 'double' || f.underline === 'doubleAccounting') {
+                    td.style.textDecorationStyle = 'double';
+                }
+                if (f.underline === 'singleAccounting' || f.underline === 'doubleAccounting') {
+                    td.classList.add('xlsx-accounting-underline');
+                }
+            }
+            if (f.vertAlign === 'subscript') {
+                td.style.verticalAlign = 'sub';
+                td.style.fontSize = '0.8em';
+            }
+            else if (f.vertAlign === 'superscript') {
+                td.style.verticalAlign = 'super';
+                td.style.fontSize = '0.8em';
+            }
             if (f.size)
                 td.style.fontSize = `${f.size}pt`;
             if (f.color) {
@@ -2845,6 +3056,9 @@
                 if (color)
                     td.style.color = color;
             }
+            const family = sanitizeFontFamily(f.name);
+            if (family)
+                td.style.fontFamily = family;
         }
         if (dxf.fill)
             applyFill(td, dxf.fill, theme);
@@ -2908,6 +3122,7 @@
     exports.renderWorkbook = renderWorkbook;
     exports.resolveCfvo = resolveCfvo;
     exports.resolveColor = resolveColor;
+    exports.sanitizeFontFamily = sanitizeFontFamily;
     exports.sanitizeHexColor = sanitizeHexColor;
 
 }));

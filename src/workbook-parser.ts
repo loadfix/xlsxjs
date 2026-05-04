@@ -7,7 +7,7 @@
 
 import { parseCellRef } from './utils';
 import type { Options } from './xlsx-preview';
-import { parseStyles, parseColorElement, type Styles, type FontStyle } from './styles';
+import { parseStyles, parseColorElement, type Styles, type FontStyle, type UnderlineStyle } from './styles';
 import { parseTheme, type Theme, type ColorRef } from './theme';
 import { parseConditionalFormatting, type ConditionalFormatting } from './conditional-format';
 
@@ -17,7 +17,9 @@ export interface RichTextRun {
     // on the run inherit from the cell's xf font.
     bold: boolean;
     italic: boolean;
-    underline: boolean;
+    underline: UnderlineStyle;
+    strike: boolean;
+    vertAlign: 'subscript' | 'superscript' | null;
     size: number | null;
     color: ColorRef;
     name: string | null;
@@ -813,7 +815,9 @@ function emptyRun(text: string): RichTextRun {
         text,
         bold: false,
         italic: false,
-        underline: false,
+        underline: null,
+        strike: false,
+        vertAlign: null,
         size: null,
         color: null,
         name: null,
@@ -836,11 +840,27 @@ function parseRun(el: Element): RichTextRun {
     };
     const color = rPr.getElementsByTagNameNS(NS.main, 'color').item(0);
     const sizeAttr = firstAttr('sz', 'val');
+    const uEl = rPr.getElementsByTagNameNS(NS.main, 'u').item(0);
+    let underline: UnderlineStyle = null;
+    if (uEl) {
+        const val = uEl.getAttribute('val');
+        if (val === null || val === '') underline = 'single';
+        else if (val === 'single' || val === 'double' || val === 'singleAccounting' || val === 'doubleAccounting') underline = val;
+        else if (val === 'none') underline = null;
+    }
+    const vaEl = rPr.getElementsByTagNameNS(NS.main, 'vertAlign').item(0);
+    let vertAlign: 'subscript' | 'superscript' | null = null;
+    if (vaEl) {
+        const val = vaEl.getAttribute('val');
+        if (val === 'subscript' || val === 'superscript') vertAlign = val;
+    }
     return {
         text,
         bold: has('b'),
         italic: has('i'),
-        underline: has('u'),
+        underline,
+        strike: has('strike'),
+        vertAlign,
         size: sizeAttr ? Number(sizeAttr) : null,
         color: parseColorElement(color),
         name: firstAttr('rFont', 'val') ?? firstAttr('name', 'val'),

@@ -880,6 +880,99 @@ async function renderFixture(path, options) {
     assert(styles.cellXfs[0].alignment.readingOrder === 0, '30i: default alignment readingOrder=0');
 }
 
+// ── 31. Font extras: strike + sub/superscript via rich-text runs ──────────
+{
+    const { wb, container } = await renderFixture('font-extras');
+    const sheet = wb.parsed.sheets[0];
+
+    // Parser: A1 has 5 runs — struck / " H" / subscript "2" / "O " / super "sup".
+    const a1 = sheet.rows[0].find((c) => c.col === 0);
+    assert(Array.isArray(a1.runs) && a1.runs.length === 5, `31a: A1 should have 5 runs (got ${a1.runs?.length})`);
+    assert(a1.runs[0].strike === true, `31b: run 0 should carry strike=true (got ${a1.runs[0].strike})`);
+    assert(a1.runs[2].vertAlign === 'subscript', `31c: run 2 vertAlign=subscript (got ${a1.runs[2].vertAlign})`);
+    assert(a1.runs[4].vertAlign === 'superscript', `31d: run 4 vertAlign=superscript (got ${a1.runs[4].vertAlign})`);
+
+    // DOM: struck run carries line-through; sub/super runs carry verticalAlign.
+    const tbodyRows = container.querySelectorAll('section.xlsx tbody tr');
+    const a1Td = tbodyRows[0].querySelectorAll('td')[0];
+    const spans = a1Td.querySelectorAll('span');
+    assert(spans.length === 5, `31e: A1 should render 5 spans (got ${spans.length})`);
+    assert(/line-through/.test(spans[0].style.textDecoration),
+        `31f: struck run should have text-decoration line-through (got "${spans[0].style.textDecoration}")`);
+    assert(spans[2].style.verticalAlign === 'sub',
+        `31g: subscript run verticalAlign=sub (got "${spans[2].style.verticalAlign}")`);
+    assert(spans[2].style.fontSize === '0.8em',
+        `31h: subscript run font-size should be 0.8em (got "${spans[2].style.fontSize}")`);
+    assert(spans[4].style.verticalAlign === 'super',
+        `31i: superscript run verticalAlign=super (got "${spans[4].style.verticalAlign}")`);
+}
+
+// ── 32. Font extras: double underline on a cell-level font ────────────────
+{
+    const { wb, container } = await renderFixture('font-extras');
+    const styles = wb.parsed.styles;
+
+    // Parser: fonts[1].underline should be 'double'.
+    assert(styles.fonts[1].underline === 'double',
+        `32a: fonts[1].underline should be 'double' (got ${JSON.stringify(styles.fonts[1].underline)})`);
+    // Default font is not underlined.
+    assert(styles.fonts[0].underline === null,
+        `32b: fonts[0].underline should be null (got ${JSON.stringify(styles.fonts[0].underline)})`);
+
+    // DOM: A2 carries the double-underline font. td should have
+    // text-decoration: underline and text-decoration-style: double.
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    const a2 = rows[1].querySelectorAll('td')[0];
+    assert(/underline/.test(a2.style.textDecoration),
+        `32c: A2 td text-decoration should include underline (got "${a2.style.textDecoration}")`);
+    assert(a2.style.textDecorationStyle === 'double',
+        `32d: A2 td text-decoration-style=double (got "${a2.style.textDecorationStyle}")`);
+}
+
+// ── 33. sanitizeFontFamily: safe "Calibri" applied, injection blocked ─────
+{
+    const { sanitizeFontFamily } = globalThis.xlsx;
+    assert(typeof sanitizeFontFamily === 'function', '33a: sanitizeFontFamily should be re-exported from the UMD');
+
+    // Accept paths.
+    assert(sanitizeFontFamily('Calibri') === '"Calibri"', `33b: "Calibri" should round-trip as "\"Calibri\"" (got ${sanitizeFontFamily('Calibri')})`);
+    assert(sanitizeFontFamily('Times New Roman') === '"Times New Roman"', `33c: spaces allowed (got ${sanitizeFontFamily('Times New Roman')})`);
+    assert(sanitizeFontFamily('  Arial  ') === '"Arial"', `33d: trims whitespace (got ${sanitizeFontFamily('  Arial  ')})`);
+
+    // Rejection paths.
+    const hostile = [
+        null,
+        undefined,
+        '',
+        '   ',
+        'Arial;display:none',
+        'Arial; display: block',
+        '"><script>alert(1)</script>',
+        'Arial\n{display:none}',
+        '}body{display:none;',
+        'Arial,sans-serif',          // commas aren't allowed (blocks fallback injection)
+        'Arial\\20',                 // backslash escape attempt
+        'url(x)',
+    ];
+    for (const v of hostile) {
+        const out = sanitizeFontFamily(v);
+        assert(out === null, `33e: hostile input ${JSON.stringify(v)} should be rejected (got ${JSON.stringify(out)})`);
+    }
+
+    // Rendered side: A3 uses a safe "Calibri" font → td.style.fontFamily = "\"Calibri\"".
+    // A4 uses an attacker font "Arial; display:block" → td.style.fontFamily empty.
+    const { container } = await renderFixture('font-extras');
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    const a3 = rows[2].querySelectorAll('td')[0];
+    const a4 = rows[3].querySelectorAll('td')[0];
+    // jsdom normalises quoted font names — either the literal "\"Calibri\"" or "Calibri" is acceptable.
+    const a3Fam = a3.style.fontFamily;
+    assert(a3Fam === '"Calibri"' || a3Fam === 'Calibri',
+        `33f: A3 fontFamily should be Calibri (quoted) (got "${a3Fam}")`);
+    assert(a4.style.fontFamily === '',
+        `33g: A4 attacker font name should be rejected → no fontFamily (got "${a4.style.fontFamily}")`);
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
