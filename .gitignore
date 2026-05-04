@@ -1,8 +1,27 @@
+# Dependencies
 node_modules
+
+# Editor / IDE
 .vs
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artefacts (outside dist/ — dist/ is committed; see CLAUDE.md)
 bin
 obj
-xlsx.js.map
+*.tsbuildinfo
+
+# Logs
 *.log
+npm-debug.log*
+
+# Test / dev scaffolding
 .screenshots
 .playwright-mcp
+tmp
