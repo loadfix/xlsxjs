@@ -18,6 +18,7 @@ const fixtures = [
     'basic',
     'cellstyle-chain',
     'cf-custom-icons',
+    'cf-expression-rules',
     'cf-ext-databar',
     'cf-graphical',
     'cf-icons',

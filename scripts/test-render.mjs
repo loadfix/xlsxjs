@@ -2519,6 +2519,241 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 82. Expression rules — AND / OR / NOT combinators fire accurately ────
+// Fixture cf-expression-rules column A: values 3, 6, 7, 10, 12 with the rule
+// =AND(A2>5, A2<10). Only 6 and 7 fall strictly inside the interval; 3, 10,
+// and 12 must not match. Column B carries =OR(ISBLANK(B2), ISERROR(B2)) on
+// a mix of numbers / blank / error cells; only B3 (blank) and B4 (error)
+// should fire. NOT is exercised as a direct unit test against evaluateRule.
+{
+    const { wb, container } = await renderFixture('cf-expression-rules');
+    const sheet = wb.parsed.sheets[0];
+    assert(sheet.conditionalFormatting.length === 4,
+        `82a: expected 4 CF blocks (got ${sheet.conditionalFormatting.length})`);
+
+    const tds = [...container.querySelectorAll('section.xlsx tbody tr td')];
+    // Column A: indices 0 in each row of 4-column table. Row index = excel row - 1.
+    const rowsTrs = container.querySelectorAll('section.xlsx tbody tr');
+    const tdAt = (rIdx, cIdx) => rowsTrs[rIdx].querySelectorAll('td')[cIdx];
+
+    // AND fires on A3 (6) and A4 (7); dxfId=0 → bold + red fill (#ff9999).
+    const a3 = tdAt(2, 0); // row index 2 = excel row 3
+    const a4 = tdAt(3, 0);
+    assert(a3.classList.contains('xlsx-cf'),
+        `82b: A3 (value 6) should match AND(A2>5, A2<10) (classes="${a3.className}")`);
+    assert(a4.classList.contains('xlsx-cf'),
+        `82c: A4 (value 7) should match AND(A2>5, A2<10)`);
+    assert(a3.style.fontWeight === 'bold' && /rgb\(255,\s*153,\s*153\)/.test(a3.style.backgroundColor),
+        `82d: A3 should carry dxf-0 bold + red fill (got weight="${a3.style.fontWeight}", bg="${a3.style.backgroundColor}")`);
+
+    // AND must NOT fire on A2 (3 — too low), A5 (10 — boundary), A6 (12 — too high).
+    const a2 = tdAt(1, 0), a5 = tdAt(4, 0), a6 = tdAt(5, 0);
+    assert(!a2.classList.contains('xlsx-cf'), `82e: A2 (3) should not match AND interval (5, 10)`);
+    assert(!a5.classList.contains('xlsx-cf'), `82f: A5 (10) should not match — strict inequality`);
+    assert(!a6.classList.contains('xlsx-cf'), `82g: A6 (12) should not match AND interval`);
+
+    // OR fires on B3 (blank) and B4 (error). dxfId=1 → yellow fill (#ffff99).
+    const b3 = tdAt(2, 1), b4 = tdAt(3, 1);
+    assert(b3.classList.contains('xlsx-cf'),
+        `82h: B3 (blank) should match OR(ISBLANK, ISERROR) (classes="${b3.className}")`);
+    assert(b4.classList.contains('xlsx-cf'),
+        `82i: B4 (error) should match OR(ISBLANK, ISERROR)`);
+    assert(/rgb\(255,\s*255,\s*153\)/.test(b3.style.backgroundColor),
+        `82j: B3 should carry yellow OR-dxf fill (got "${b3.style.backgroundColor}")`);
+    // OR must NOT fire on B2 (number 1), B5 (4), B6 (5).
+    const b2 = tdAt(1, 1), b5 = tdAt(4, 1), b6 = tdAt(5, 1);
+    assert(!b2.classList.contains('xlsx-cf'), `82k: B2 (1) should not match OR(blank, error)`);
+    assert(!b5.classList.contains('xlsx-cf'), `82l: B5 (4) should not match`);
+    assert(!b6.classList.contains('xlsx-cf'), `82m: B6 (5) should not match`);
+
+    // NOT: direct unit test — NOT(A1>5) negates an inner comparison.
+    const { evaluateRule } = globalThis.xlsx;
+    const mkCell = (over) => ({
+        col: 0, row: 0, value: '', kind: 'number', styleIndex: -1, formula: null, runs: null,
+        cellMetadataIndex: null, valueMetadataIndex: null, isSpillAnchor: false, phonetics: null,
+        ...over,
+    });
+    const range = { col: 0, row: 0, endCol: 0, endRow: 0 };
+    const emptyCtx = { cellsInRange: () => [] };
+    const baseRule = { type: 'expression', priority: 1, dxfId: 0, stopIfTrue: false,
+        aboveAverage: true, equalAverage: false, stdDev: null, timePeriod: null };
+    const notRule  = { ...baseRule, formulas: ['=NOT(A1>5)'] };
+    assert(evaluateRule(notRule, mkCell({ kind: 'number', value: '3' }), range, emptyCtx) === true,
+        '82n: NOT(A1>5) should be true when value is 3');
+    assert(evaluateRule(notRule, mkCell({ kind: 'number', value: '7' }), range, emptyCtx) === false,
+        '82o: NOT(A1>5) should be false when value is 7');
+
+    // AND with one failing arg short-circuits to false; nested NOT inside AND works.
+    const nestedRule = { ...baseRule, formulas: ['=AND(NOT(A1=0), A1<100)'] };
+    assert(evaluateRule(nestedRule, mkCell({ kind: 'number', value: '50' }), range, emptyCtx) === true,
+        '82p: AND(NOT(A1=0), A1<100) matches 50');
+    assert(evaluateRule(nestedRule, mkCell({ kind: 'number', value: '0' }), range, emptyCtx) === false,
+        '82q: AND(NOT(A1=0), A1<100) must reject 0 via inner NOT');
+
+    // OR with zero args (malformed) should be treated as non-matching, not throw.
+    const emptyOr = { ...baseRule, formulas: ['=OR()'] };
+    assert(evaluateRule(emptyOr, mkCell({ kind: 'number', value: '1' }), range, emptyCtx) === false,
+        '82r: OR() with no args falls through to false');
+}
+
+// ── 83. Expression rules — MOD(ROW()) / MOD(COLUMN()) banding ─────────────
+// Column C in cf-expression-rules carries =MOD(ROW(), 2) = 0 over C2:C6.
+// Excel row numbers are 1-based, so only rows 2, 4, 6 (even) should match,
+// while rows 3 and 5 (odd) should not. Direct unit tests cover COLUMN()
+// banding and the ISEVEN / ISODD equivalents that writers sometimes use.
+{
+    const { wb, container } = await renderFixture('cf-expression-rules');
+    const rowsTrs = container.querySelectorAll('section.xlsx tbody tr');
+    const tdAt = (rIdx, cIdx) => rowsTrs[rIdx].querySelectorAll('td')[cIdx];
+
+    // Column C is column index 2. dxfId=2 → blue fill (#cce5ff).
+    const c2 = tdAt(1, 2), c3 = tdAt(2, 2), c4 = tdAt(3, 2), c5 = tdAt(4, 2), c6 = tdAt(5, 2);
+    assert(c2.classList.contains('xlsx-cf'), `83a: C2 (row 2, even) should match MOD(ROW(),2)=0`);
+    assert(!c3.classList.contains('xlsx-cf'), `83b: C3 (row 3, odd) should not match`);
+    assert(c4.classList.contains('xlsx-cf'), `83c: C4 (row 4, even) should match`);
+    assert(!c5.classList.contains('xlsx-cf'), `83d: C5 (row 5, odd) should not match`);
+    assert(c6.classList.contains('xlsx-cf'), `83e: C6 (row 6, even) should match`);
+    assert(/rgb\(204,\s*229,\s*255\)/.test(c2.style.backgroundColor),
+        `83f: banded row should carry blue dxf-2 fill (got "${c2.style.backgroundColor}")`);
+
+    // Unit tests: COLUMN() banding and ISEVEN / ISODD parity helpers.
+    const { evaluateRule } = globalThis.xlsx;
+    const mkCell = (col, row) => ({
+        col, row, value: '', kind: 'number', styleIndex: -1, formula: null, runs: null,
+        cellMetadataIndex: null, valueMetadataIndex: null, isSpillAnchor: false, phonetics: null,
+    });
+    const range = { col: 0, row: 0, endCol: 100, endRow: 100 };
+    const emptyCtx = { cellsInRange: () => [] };
+    const baseRule = { type: 'expression', priority: 1, dxfId: 0, stopIfTrue: false,
+        aboveAverage: true, equalAverage: false, stdDev: null, timePeriod: null };
+
+    // Column banding: MOD(COLUMN(), 2) = 1 → odd columns (A, C, E → 0-based 0, 2, 4).
+    const colBand = { ...baseRule, formulas: ['=MOD(COLUMN(), 2) = 1'] };
+    assert(evaluateRule(colBand, mkCell(0, 0), range, emptyCtx) === true,
+        '83g: MOD(COLUMN(),2)=1 matches col A (1-based 1)');
+    assert(evaluateRule(colBand, mkCell(1, 0), range, emptyCtx) === false,
+        '83h: MOD(COLUMN(),2)=1 does NOT match col B (1-based 2)');
+    assert(evaluateRule(colBand, mkCell(2, 0), range, emptyCtx) === true,
+        '83i: MOD(COLUMN(),2)=1 matches col C (1-based 3)');
+
+    // ISEVEN(ROW()) and ISODD(ROW()) short forms.
+    const evenRow = { ...baseRule, formulas: ['=ISEVEN(ROW())'] };
+    const oddRow  = { ...baseRule, formulas: ['=ISODD(ROW())'] };
+    assert(evaluateRule(evenRow, mkCell(0, 1), range, emptyCtx) === true,
+        '83j: ISEVEN(ROW()) matches excel row 2 (0-based row=1)');
+    assert(evaluateRule(evenRow, mkCell(0, 2), range, emptyCtx) === false,
+        '83k: ISEVEN(ROW()) does NOT match excel row 3');
+    assert(evaluateRule(oddRow, mkCell(0, 2), range, emptyCtx) === true,
+        '83l: ISODD(ROW()) matches excel row 3');
+
+    // MOD(ROW(), 3) = 0 every third row.
+    const thirds = { ...baseRule, formulas: ['=MOD(ROW(), 3) = 0'] };
+    assert(evaluateRule(thirds, mkCell(0, 2), range, emptyCtx) === true, // excel row 3
+        '83m: MOD(ROW(),3)=0 matches excel row 3');
+    assert(evaluateRule(thirds, mkCell(0, 5), range, emptyCtx) === true, // excel row 6
+        '83n: MOD(ROW(),3)=0 matches excel row 6');
+    assert(evaluateRule(thirds, mkCell(0, 0), range, emptyCtx) === false, // excel row 1
+        '83o: MOD(ROW(),3)=0 does NOT match excel row 1');
+
+    // Divisor 0 must not blow up — silently return false.
+    const zeroDivisor = { ...baseRule, formulas: ['=MOD(ROW(), 0) = 0'] };
+    assert(evaluateRule(zeroDivisor, mkCell(0, 1), range, emptyCtx) === false,
+        '83p: MOD(ROW(), 0) returns false rather than throwing');
+}
+
+// ── 84. Expression rules — text predicates (SEARCH / IS*) ─────────────────
+// Column D in cf-expression-rules carries =SEARCH("flag", D2) over D2:D6.
+// Values: alpha / red flag / beta / flag it / gamma. Only D3 (contains
+// "flag") and D5 (starts with "flag") should match. Direct unit tests
+// cover LEFT / RIGHT, ISNUMBER(SEARCH(…)), and the narrow-form fallback
+// for cellRef <op> literal to confirm the pre-existing path still works.
+{
+    const { wb, container } = await renderFixture('cf-expression-rules');
+    const rowsTrs = container.querySelectorAll('section.xlsx tbody tr');
+    const tdAt = (rIdx, cIdx) => rowsTrs[rIdx].querySelectorAll('td')[cIdx];
+
+    // Column D is column index 3. dxfId=3 → green fill (#ccffcc).
+    const d2 = tdAt(1, 3); // "alpha"
+    const d3 = tdAt(2, 3); // "red flag"
+    const d4 = tdAt(3, 3); // "beta"
+    const d5 = tdAt(4, 3); // "flag it"
+    const d6 = tdAt(5, 3); // "gamma"
+    assert(!d2.classList.contains('xlsx-cf'), `84a: D2 "alpha" should not match SEARCH("flag", …)`);
+    assert(d3.classList.contains('xlsx-cf'),  `84b: D3 "red flag" should match SEARCH("flag", …)`);
+    assert(!d4.classList.contains('xlsx-cf'), `84c: D4 "beta" should not match`);
+    assert(d5.classList.contains('xlsx-cf'),  `84d: D5 "flag it" should match (leading needle)`);
+    assert(!d6.classList.contains('xlsx-cf'), `84e: D6 "gamma" should not match`);
+    assert(/rgb\(204,\s*255,\s*204\)/.test(d3.style.backgroundColor),
+        `84f: matching cell should carry dxf-3 green fill (got "${d3.style.backgroundColor}")`);
+
+    // Unit tests for the other text predicates.
+    const { evaluateRule } = globalThis.xlsx;
+    const mkCell = (over) => ({
+        col: 0, row: 0, value: '', kind: 'string', styleIndex: -1, formula: null, runs: null,
+        cellMetadataIndex: null, valueMetadataIndex: null, isSpillAnchor: false, phonetics: null,
+        ...over,
+    });
+    const range = { col: 0, row: 0, endCol: 100, endRow: 100 };
+    const emptyCtx = { cellsInRange: () => [] };
+    const baseRule = { type: 'expression', priority: 1, dxfId: 0, stopIfTrue: false,
+        aboveAverage: true, equalAverage: false, stdDev: null, timePeriod: null };
+
+    // ISNUMBER(SEARCH(…)) is the other common Excel idiom.
+    const isnumSearch = { ...baseRule, formulas: ['=ISNUMBER(SEARCH("bar", A1))'] };
+    assert(evaluateRule(isnumSearch, mkCell({ value: 'foobar' }), range, emptyCtx) === true,
+        '84g: ISNUMBER(SEARCH("bar", A1)) matches "foobar"');
+    assert(evaluateRule(isnumSearch, mkCell({ value: 'foo' }), range, emptyCtx) === false,
+        '84h: ISNUMBER(SEARCH("bar", A1)) does NOT match "foo"');
+
+    // SEARCH is case-insensitive.
+    const caseless = { ...baseRule, formulas: ['=SEARCH("Flag", A1) > 0'] };
+    assert(evaluateRule(caseless, mkCell({ value: 'red flag' }), range, emptyCtx) === true,
+        '84i: SEARCH is case-insensitive — "Flag" matches "red flag"');
+
+    // ISNUMBER on a number / boolean / string cell.
+    const isNumRule = { ...baseRule, formulas: ['=ISNUMBER(A1)'] };
+    assert(evaluateRule(isNumRule, mkCell({ kind: 'number', value: '42' }), range, emptyCtx) === true,
+        '84j: ISNUMBER matches a number-kind cell');
+    assert(evaluateRule(isNumRule, mkCell({ kind: 'string', value: '42' }), range, emptyCtx) === false,
+        '84k: ISNUMBER does NOT match a string-kind cell even if numeric');
+
+    // ISBLANK on a kind=empty cell vs a non-empty string.
+    const isBlankRule = { ...baseRule, formulas: ['=ISBLANK(A1)'] };
+    assert(evaluateRule(isBlankRule, mkCell({ kind: 'empty', value: '' }), range, emptyCtx) === true,
+        '84l: ISBLANK matches kind=empty');
+    assert(evaluateRule(isBlankRule, mkCell({ kind: 'string', value: 'x' }), range, emptyCtx) === false,
+        '84m: ISBLANK does NOT match non-empty string');
+
+    // ISERROR on an error-kind cell vs a number.
+    const isErrRule = { ...baseRule, formulas: ['=ISERROR(A1)'] };
+    assert(evaluateRule(isErrRule, mkCell({ kind: 'error', value: '#VALUE!' }), range, emptyCtx) === true,
+        '84n: ISERROR matches error-kind');
+    assert(evaluateRule(isErrRule, mkCell({ kind: 'number', value: '1' }), range, emptyCtx) === false,
+        '84o: ISERROR does NOT match number-kind');
+
+    // LEFT / RIGHT equality predicates — with ECMA "" escape in the literal.
+    const leftRule  = { ...baseRule, formulas: ['=LEFT(A1, 3) = "foo"'] };
+    const rightRule = { ...baseRule, formulas: ['=RIGHT(A1, 3) = "bar"'] };
+    assert(evaluateRule(leftRule, mkCell({ value: 'foobar' }), range, emptyCtx) === true,
+        '84p: LEFT(A1,3)="foo" matches "foobar"');
+    assert(evaluateRule(leftRule, mkCell({ value: 'barfoo' }), range, emptyCtx) === false,
+        '84q: LEFT(A1,3)="foo" does NOT match "barfoo"');
+    assert(evaluateRule(rightRule, mkCell({ value: 'foobar' }), range, emptyCtx) === true,
+        '84r: RIGHT(A1,3)="bar" matches "foobar"');
+
+    // Narrow form (pre-existing path) still works for cellRef op literal.
+    const narrow = { ...baseRule, formulas: ['=$C2>=100'] };
+    assert(evaluateRule(narrow, mkCell({ kind: 'number', value: '150' }), range, emptyCtx) === true,
+        '84s: narrow form =$C2>=100 still matches on numeric 150');
+    assert(evaluateRule(narrow, mkCell({ kind: 'number', value: '50' }), range, emptyCtx) === false,
+        '84t: narrow form =$C2>=100 does NOT match 50');
+
+    // Unknown formula shape → silent false, not a throw.
+    const unknown = { ...baseRule, formulas: ['=VLOOKUP(A1, Sheet2!A:B, 2, FALSE)'] };
+    assert(evaluateRule(unknown, mkCell({ value: 'x' }), range, emptyCtx) === false,
+        '84u: unsupported formula shape returns false without throwing');
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

@@ -6,8 +6,15 @@
 //   - containsText           / notContainsText / beginsWith / endsWith
 //   - duplicateValues        / uniqueValues
 //   - top10                  top/bottom N, optional percent
-//   - expression             only the narrow "=$C2>X" form is interpreted;
-//                            anything else falls back to "no match"
+//   - expression             pattern-matched interpreter. Supports:
+//                              · <cellRef> <op> <literal>          (narrow form)
+//                              · AND(…) / OR(…) / NOT(…)
+//                              · MOD(ROW(), N) = K / MOD(COLUMN(), N) = K
+//                              · ISEVEN(ROW()) / ISODD(COLUMN()) / …
+//                              · ISNUMBER / ISBLANK / ISERROR on a cell ref
+//                              · SEARCH("needle", ref) [ > 0 ] / ISNUMBER(SEARCH(…))
+//                              · LEFT(ref, N)="prefix" / RIGHT(ref, N)="suffix"
+//                            Anything else falls back to "no match".
 //   - containsBlanks         / notContainsBlanks
 //   - containsErrors         / notContainsErrors
 //   - aboveAverage           / belowAverage (equalAverage + stdDev shift)
@@ -790,29 +797,273 @@ function toHex(n: number): string {
     return Math.max(0, Math.min(255, n)).toString(16).padStart(2, '0');
 }
 
-// Narrow "expression" support — only the common form where the formula is
-// "=<cellRef> <op> <literal>" (e.g. "=$C2>=100") or "=<cellRef>". Anything
-// more complex (AND/OR/MATCH/INDIRECT/…) returns false.
-function evalExpression(rule: CfRule, cell: Cell, _range: CellRange, _ctx: CfContext): boolean {
+// Expression rule interpreter. We don't run a full formula engine — instead
+// a pattern-matched dispatcher covers the common shapes Excel writers emit
+// for conditional-format expression rules:
+//
+//   boolean combinators : AND(a, b, …) / OR(a, b, …) / NOT(a)
+//   row / column banding: MOD(ROW(), N) = K / MOD(COLUMN(), N) = K
+//                         ISEVEN(ROW()) / ISODD(ROW())  (also COLUMN())
+//   value predicates    : ISNUMBER / ISBLANK / ISERROR against the cell
+//   text predicates     : SEARCH("needle", ref)  [and SEARCH(…) > 0]
+//                         LEFT(ref, N) = "prefix" / RIGHT(ref, N) = "suffix"
+//   narrow comparison   : <cellRef> <op> <literal>   (pre-existing form)
+//
+// Anything that falls through every pattern returns false, matching the
+// "unknown formulas are silently skipped" invariant for the rest of the
+// conditional-formatting pipeline.
+function evalExpression(rule: CfRule, cell: Cell, range: CellRange, ctx: CfContext): boolean {
     const raw = rule.formulas[0] ?? '';
     const src = raw.trim().replace(/^=/, '');
-    const m = /^\$?([A-Z]+)\$?([1-9][0-9]*)\s*(<=|>=|<>|=|<|>)\s*(.+)$/.exec(src);
-    if (!m) {
-        // Bare reference → truthy if the referenced cell is truthy. Only
-        // honour it when the formula points at the cell under evaluation.
-        return false;
+    return evalExpr(src, cell, range, ctx);
+}
+
+function evalExpr(src: string, cell: Cell, range: CellRange, ctx: CfContext): boolean {
+    const s = src.trim();
+    if (!s) return false;
+
+    // 1. Boolean combinators — AND / OR / NOT. Split top-level args and
+    //    recurse. Case-insensitive to match Excel's tolerance.
+    const boolCall = matchCall(s, ['AND', 'OR', 'NOT']);
+    if (boolCall) {
+        const args = splitArgs(boolCall.inner);
+        if (boolCall.name === 'AND') {
+            if (args.length === 0) return false;
+            for (const a of args) if (!evalExpr(a, cell, range, ctx)) return false;
+            return true;
+        }
+        if (boolCall.name === 'OR') {
+            if (args.length === 0) return false;
+            for (const a of args) if (evalExpr(a, cell, range, ctx)) return true;
+            return false;
+        }
+        if (boolCall.name === 'NOT') {
+            if (args.length !== 1) return false;
+            return !evalExpr(args[0], cell, range, ctx);
+        }
     }
-    const [, , , op, rhs] = m;
-    const v = numericValue(cell);
-    const rhsLit = parseFormulaLiteral(rhs);
-    if (v === null || typeof rhsLit !== 'number') return false;
-    switch (op) {
-        case '<':  return v < rhsLit;
-        case '<=': return v <= rhsLit;
-        case '>':  return v > rhsLit;
-        case '>=': return v >= rhsLit;
-        case '=':  return v === rhsLit;
-        case '<>': return v !== rhsLit;
-        default: return false;
+
+    // 2. MOD(ROW(), N) = K / MOD(COLUMN(), N) = K   — banding.
+    const modMatch = /^MOD\s*\(\s*(ROW|COLUMN)\s*\(\s*\)\s*,\s*(-?\d+)\s*\)\s*(=|<>)\s*(-?\d+)\s*$/i.exec(s);
+    if (modMatch) {
+        const axis = modMatch[1].toUpperCase();
+        const divisor = Number(modMatch[2]);
+        const op = modMatch[3];
+        const target = Number(modMatch[4]);
+        if (divisor === 0) return false;
+        // Excel rows/cols are 1-based; our cell.row / cell.col are 0-based.
+        const raw = (axis === 'ROW' ? cell.row : cell.col) + 1;
+        // Excel's MOD uses the divisor's sign — emulate with a positive
+        // modulo that matches the common (divisor > 0) case.
+        const m = ((raw % divisor) + divisor) % divisor;
+        return op === '=' ? m === target : m !== target;
     }
+
+    // 3. ISEVEN(ROW()) / ISODD(COLUMN()) etc.
+    const parityMatch = /^(ISEVEN|ISODD)\s*\(\s*(ROW|COLUMN)\s*\(\s*\)\s*\)\s*$/i.exec(s);
+    if (parityMatch) {
+        const fn = parityMatch[1].toUpperCase();
+        const axis = parityMatch[2].toUpperCase();
+        const raw = (axis === 'ROW' ? cell.row : cell.col) + 1;
+        return fn === 'ISEVEN' ? raw % 2 === 0 : raw % 2 !== 0;
+    }
+
+    // 4a. ISNUMBER(SEARCH(…)) — the common "contains text" idiom. Must be
+    //     matched before the generic ISNUMBER handler because the inner
+    //     SEARCH(…) wouldn't pass the bare-cellRef argument check there.
+    const isnumSearch = /^ISNUMBER\s*\(\s*(SEARCH\s*\(.*\))\s*\)\s*$/i.exec(s);
+    if (isnumSearch) return evalSearch(isnumSearch[1], cell);
+
+    // 4b. ISNUMBER / ISBLANK / ISERROR with a bare cell reference. For the
+    //    common CF idiom, the argument is the "anchor" cell of the range
+    //    (e.g. ISBLANK(B2) on a range starting at B2) — we evaluate the
+    //    predicate against the cell under test regardless of which ref is
+    //    written, matching how Excel relocates the formula per cell.
+    const typePred = matchCall(s, ['ISNUMBER', 'ISBLANK', 'ISERROR', 'ISEVEN', 'ISODD']);
+    if (typePred) {
+        const args = splitArgs(typePred.inner);
+        if (args.length !== 1) return false;
+        const arg = args[0].trim();
+        // ISEVEN / ISODD on a cell ref → test the cell's numeric value.
+        if (typePred.name === 'ISEVEN' || typePred.name === 'ISODD') {
+            if (!isCellRef(arg)) return false;
+            const n = numericValue(cell);
+            if (n === null || !Number.isFinite(n)) return false;
+            const even = Math.trunc(n) % 2 === 0;
+            return typePred.name === 'ISEVEN' ? even : !even;
+        }
+        // Only support the "bare cell ref" argument shape for IS*. Nested
+        // calls would need a full evaluator.
+        if (!isCellRef(arg)) return false;
+        if (typePred.name === 'ISNUMBER') return cell.kind === 'number' || cell.kind === 'boolean';
+        if (typePred.name === 'ISBLANK') return evalContainsBlanks(cell);
+        if (typePred.name === 'ISERROR') return cell.kind === 'error';
+    }
+
+    // 5. SEARCH("needle", ref)   — truthy when needle appears in cell value.
+    //    Also accept SEARCH(…) > 0 / SEARCH(…) >= 1. ISNUMBER(SEARCH(…))
+    //    lives alongside the ISNUMBER dispatch above.
+    //    Excel's SEARCH is case-insensitive; we match that behaviour.
+    const searchCmp = /^(SEARCH\s*\(.*\))\s*(>=|>|<>|=)\s*(-?\d+)\s*$/i.exec(s);
+    if (searchCmp) {
+        const hit = evalSearch(searchCmp[1], cell);
+        const target = Number(searchCmp[3]);
+        // SEARCH returns a 1-based position on hit, #VALUE! on miss. We only
+        // model the boolean — "> 0" / ">= 1" / "= 1" all mean "found".
+        switch (searchCmp[2]) {
+            case '>':
+            case '>=':
+                return hit && target >= 0;
+            case '=':
+                return hit && target >= 1;
+            case '<>':
+                return !hit;
+            default: return false;
+        }
+    }
+    if (/^SEARCH\s*\(.*\)\s*$/i.test(s)) return evalSearch(s, cell);
+
+    // 6. LEFT(ref, N) = "prefix"  /  RIGHT(ref, N) = "suffix".
+    const leftRight = /^(LEFT|RIGHT)\s*\(\s*([^,]+?)\s*(?:,\s*(\d+)\s*)?\)\s*(=|<>)\s*(".*")\s*$/i.exec(s);
+    if (leftRight) {
+        const fn = leftRight[1].toUpperCase();
+        const argRef = leftRight[2].trim();
+        const n = leftRight[3] ? Number(leftRight[3]) : 1;
+        const op = leftRight[4];
+        const lit = parseQuoted(leftRight[5]);
+        if (!isCellRef(argRef) || lit === null || !Number.isFinite(n) || n < 0) return false;
+        const v = cell.value ?? '';
+        const slice = fn === 'LEFT' ? v.slice(0, n) : (n === 0 ? '' : v.slice(-n));
+        const hit = slice === lit;
+        return op === '=' ? hit : !hit;
+    }
+
+    // 7. Fall back to the legacy narrow form: <cellRef> <op> <literal>.
+    const m = /^\$?([A-Z]+)\$?([1-9][0-9]*)\s*(<=|>=|<>|=|<|>)\s*(.+)$/.exec(s);
+    if (m) {
+        const [, , , op, rhs] = m;
+        const v = numericValue(cell);
+        const rhsLit = parseFormulaLiteral(rhs);
+        if (v === null || typeof rhsLit !== 'number') return false;
+        switch (op) {
+            case '<':  return v < rhsLit;
+            case '<=': return v <= rhsLit;
+            case '>':  return v > rhsLit;
+            case '>=': return v >= rhsLit;
+            case '=':  return v === rhsLit;
+            case '<>': return v !== rhsLit;
+            default: return false;
+        }
+    }
+
+    // Unknown formula shape → no match, no throw.
+    return false;
+}
+
+// Match a call of the form NAME(…) where NAME ∈ names (case-insensitive) and
+// the parenthesised body balances out at the string boundary. Returns
+// { name, inner } or null.
+function matchCall(src: string, names: string[]): { name: string; inner: string } | null {
+    const s = src.trim();
+    for (const n of names) {
+        if (s.length < n.length + 2) continue;
+        if (s.slice(0, n.length).toUpperCase() !== n) continue;
+        // There can be whitespace between name and '('.
+        let i = n.length;
+        while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i++;
+        if (s[i] !== '(') continue;
+        // Find the matching ')' at the end of the string, tracking depth and
+        // quoted strings (ECMA "" escape).
+        let depth = 0;
+        let inStr = false;
+        let end = -1;
+        for (let j = i; j < s.length; j++) {
+            const ch = s[j];
+            if (inStr) {
+                if (ch === '"') {
+                    // Lookahead for escaped "".
+                    if (s[j + 1] === '"') { j++; continue; }
+                    inStr = false;
+                }
+                continue;
+            }
+            if (ch === '"') { inStr = true; continue; }
+            if (ch === '(') depth++;
+            else if (ch === ')') {
+                depth--;
+                if (depth === 0) { end = j; break; }
+            }
+        }
+        if (end !== s.length - 1) continue;
+        return { name: n, inner: s.slice(i + 1, end) };
+    }
+    return null;
+}
+
+// Split a comma-separated argument list at top level only. Honours nested
+// parens and ECMA-376 quoted strings (where "" is an escaped ").
+function splitArgs(s: string): string[] {
+    const out: string[] = [];
+    let depth = 0;
+    let inStr = false;
+    let start = 0;
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (inStr) {
+            if (ch === '"') {
+                if (s[i + 1] === '"') { i++; continue; }
+                inStr = false;
+            }
+            continue;
+        }
+        if (ch === '"') { inStr = true; continue; }
+        if (ch === '(') depth++;
+        else if (ch === ')') depth--;
+        else if (ch === ',' && depth === 0) {
+            out.push(s.slice(start, i).trim());
+            start = i + 1;
+        }
+    }
+    const tail = s.slice(start).trim();
+    if (tail || out.length > 0) out.push(tail);
+    return out;
+}
+
+// Parse an ECMA-376 quoted string literal: wrapped in double quotes, with
+// doubled-up "" as an escape for a literal ". Returns null when the input
+// isn't a well-formed quoted string.
+function parseQuoted(s: string): string | null {
+    const t = s.trim();
+    if (t.length < 2 || t[0] !== '"' || t[t.length - 1] !== '"') return null;
+    let out = '';
+    for (let i = 1; i < t.length - 1; i++) {
+        if (t[i] === '"') {
+            if (t[i + 1] === '"') { out += '"'; i++; continue; }
+            return null;
+        }
+        out += t[i];
+    }
+    return out;
+}
+
+function isCellRef(s: string): boolean {
+    return /^\$?[A-Z]+\$?[1-9][0-9]*$/i.test(s.trim());
+}
+
+// SEARCH("needle", <cellRef>) — returns true when needle appears in the
+// cell's textual value (case-insensitive). Excel's SEARCH returns a 1-based
+// position on a hit or a #VALUE! error on miss; we model the boolean only.
+function evalSearch(callSrc: string, cell: Cell): boolean {
+    const call = matchCall(callSrc, ['SEARCH']);
+    if (!call) return false;
+    const args = splitArgs(call.inner);
+    if (args.length < 2) return false;
+    const needle = parseQuoted(args[0]);
+    const targetArg = args[1].trim();
+    if (needle === null) return false;
+    // Second arg should be a bare cell ref — anything else we don't
+    // model (nested calls would need a full evaluator).
+    if (!isCellRef(targetArg)) return false;
+    const hay = (cell.value ?? '').toLocaleLowerCase();
+    return hay.includes(needle.toLocaleLowerCase());
 }
