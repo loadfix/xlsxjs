@@ -58,10 +58,12 @@
     display: grid; grid-template-columns: 1fr 1fr 1fr;
     font-size: 0.85em; color: #666; margin: 0.5em 0;
 }</style>
-<section class="xlsx" data-sheet-name="Spill">
-<div class="xlsx-sheet-name">Spill</div>
+<section class="xlsx" data-sheet-name="Exprs">
+<div class="xlsx-sheet-name">Exprs</div>
 <table>
 <colgroup>
+<col>
+<col>
 <col>
 <col>
 <col>
@@ -72,13 +74,56 @@
 </th>
 <th>A</th>
 <th>B</th>
+<th>C</th>
+<th>D</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <th>1</th>
-<td class="xlsx-spill-anchor">anchor</td>
-<td>plain</td>
+<td>alpha</td>
+<td>
+</td>
+<td>
+</td>
+<td>
+</td>
+</tr>
+<tr>
+<th>2</th>
+<td class="xlsx-numeric">3</td>
+<td class="xlsx-numeric">1</td>
+<td class="xlsx-numeric xlsx-cf" style="background-color: rgb(204, 229, 255);">10</td>
+<td>alpha</td>
+</tr>
+<tr>
+<th>3</th>
+<td class="xlsx-numeric xlsx-cf" style="font-weight: bold; background-color: rgb(255, 153, 153);">6</td>
+<td style="background-color: rgb(255, 255, 153);" class="xlsx-cf">
+</td>
+<td class="xlsx-numeric">20</td>
+<td style="background-color: rgb(204, 255, 204);" class="xlsx-cf">red flag</td>
+</tr>
+<tr>
+<th>4</th>
+<td class="xlsx-numeric xlsx-cf" style="font-weight: bold; background-color: rgb(255, 153, 153);">7</td>
+<td class="xlsx-error xlsx-cf" style="background-color: rgb(255, 255, 153);">#DIV/0!</td>
+<td class="xlsx-numeric xlsx-cf" style="background-color: rgb(204, 229, 255);">30</td>
+<td>beta</td>
+</tr>
+<tr>
+<th>5</th>
+<td class="xlsx-numeric">10</td>
+<td class="xlsx-numeric">4</td>
+<td class="xlsx-numeric">40</td>
+<td style="background-color: rgb(204, 255, 204);" class="xlsx-cf">flag it</td>
+</tr>
+<tr>
+<th>6</th>
+<td class="xlsx-numeric">12</td>
+<td class="xlsx-numeric">5</td>
+<td class="xlsx-numeric xlsx-cf" style="background-color: rgb(204, 229, 255);">50</td>
+<td>gamma</td>
 </tr>
 </tbody>
 </table>
