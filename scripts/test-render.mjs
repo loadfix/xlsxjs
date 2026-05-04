@@ -4136,6 +4136,178 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 106. smartart-layouts parser: orgchart + cycle diagrams round-trip ────
+// The `smartart-layouts` fixture carries two SmartArt diagrams on a single
+// sheet: an orgchart (CEO → Engineering/Sales → API/UX/QA + EMEA) and a
+// cycle (Process → Plan/Build/Ship/Review). The parser must surface both
+// entries with the right layout uniqueIds and node structure.
+{
+    const { wb } = await renderFixture('smartart-layouts');
+    const sheet = wb.parsed.sheets[0];
+    assert(Array.isArray(sheet.smartArt), '106a: Sheet.smartArt should be an array');
+    assert(sheet.smartArt.length === 2,
+        `106b: expected 2 SmartArt entries (got ${sheet.smartArt.length})`);
+
+    const layouts = sheet.smartArt.map((a) => a.model?.layout ?? '');
+    assert(layouts.some((l) => /orgChart/i.test(l)),
+        `106c: one layout should match /orgChart/i (got ${JSON.stringify(layouts)})`);
+    assert(layouts.some((l) => /cycle/i.test(l)),
+        `106d: one layout should match /cycle/i (got ${JSON.stringify(layouts)})`);
+
+    const org = sheet.smartArt.find((a) => /orgChart/i.test(a.model?.layout ?? ''));
+    const cyc = sheet.smartArt.find((a) => /cycle/i.test(a.model?.layout ?? ''));
+    assert(org, '106e: orgchart entry should be present');
+    assert(cyc, '106f: cycle entry should be present');
+    if (org && org.model) {
+        assert(org.model.rootNodes.length === 1,
+            `106g: orgchart should have 1 root (got ${org.model.rootNodes.length})`);
+        const root = org.model.rootNodes[0];
+        if (root) {
+            assert(root.text === 'CEO',
+                `106h: orgchart root should be "CEO" (got ${JSON.stringify(root.text)})`);
+            assert(root.children.length === 2,
+                `106i: CEO should have 2 children (got ${root.children.length})`);
+            const eng = root.children.find((c) => c.text === 'Engineering');
+            const sales = root.children.find((c) => c.text === 'Sales');
+            assert(eng, '106j: Engineering child should be present');
+            assert(sales, '106k: Sales child should be present');
+            if (eng) {
+                assert(eng.children.length === 3,
+                    `106l: Engineering should have 3 grandchildren (got ${eng.children.length})`);
+                const names = eng.children.map((c) => c.text).sort();
+                assert(JSON.stringify(names) === JSON.stringify(['API', 'QA', 'UX']),
+                    `106m: Engineering grandchildren should be [API, QA, UX] (got ${JSON.stringify(names)})`);
+            }
+            if (sales) {
+                assert(sales.children.length === 1,
+                    `106n: Sales should have 1 grandchild (got ${sales.children.length})`);
+                assert(sales.children[0]?.text === 'EMEA',
+                    `106o: Sales grandchild should be "EMEA" (got ${JSON.stringify(sales.children[0]?.text)})`);
+            }
+        }
+    }
+    if (cyc && cyc.model) {
+        assert(cyc.model.rootNodes.length === 1,
+            `106p: cycle should have 1 root (got ${cyc.model.rootNodes.length})`);
+        const root = cyc.model.rootNodes[0];
+        if (root) {
+            assert(root.children.length === 4,
+                `106q: cycle root should have 4 children (got ${root.children.length})`);
+            const names = root.children.map((c) => c.text);
+            assert(JSON.stringify(names) === JSON.stringify(['Plan', 'Build', 'Ship', 'Review']),
+                `106r: cycle children should be [Plan, Build, Ship, Review] (got ${JSON.stringify(names)})`);
+        }
+    }
+}
+
+// ── 107. smartart-layouts renderer: orgchart branch rail + cycle arcs ────
+// With `smartArtLayout: 'svg'` each diagram renders as its own SVG inside
+// a dedicated aside. The orgchart aside should carry at least one
+// horizontal branch-rail line (y1 === y2) across its children, one rect
+// per node, and a matching node count. The cycle aside should carry
+// <path> elements with SVG arc (`A`) commands, a <marker> for the
+// arrowhead, and nodes scattered around a circle (>100px span in both
+// dimensions).
+{
+    const { container } = await renderFixture('smartart-layouts', { smartArtLayout: 'svg' });
+    const asides = container.querySelectorAll('section.xlsx aside.xlsx-smartart');
+    assert(asides.length === 2,
+        `107a: expected 2 <aside class="xlsx-smartart"> (got ${asides.length})`);
+
+    let orgAside = null;
+    let cycleAside = null;
+    for (const a of asides) {
+        const layout = a.getAttribute('data-layout') ?? '';
+        if (/orgChart/i.test(layout)) orgAside = a;
+        else if (/cycle/i.test(layout)) cycleAside = a;
+    }
+    assert(orgAside, '107b: orgchart aside should be present');
+    assert(cycleAside, '107c: cycle aside should be present');
+
+    if (orgAside) {
+        const svg = orgAside.querySelector(':scope > svg');
+        assert(!!svg, '107d: orgchart aside should contain an <svg>');
+        if (svg) {
+            const rects = svg.querySelectorAll('rect');
+            // CEO + Engineering + Sales + API + UX + QA + EMEA = 7 nodes.
+            assert(rects.length === 7,
+                `107e: orgchart SVG should carry 7 <rect> node boxes (got ${rects.length})`);
+
+            const lines = [...svg.querySelectorAll('line')];
+            assert(lines.length > 0,
+                `107f: orgchart SVG should carry at least one <line> (got ${lines.length})`);
+            // At least one horizontal line (y1 === y2 with x1 !== x2) —
+            // the branch-rail signature.
+            const horizontals = lines.filter((l) => {
+                const y1 = Number(l.getAttribute('y1'));
+                const y2 = Number(l.getAttribute('y2'));
+                const x1 = Number(l.getAttribute('x1'));
+                const x2 = Number(l.getAttribute('x2'));
+                return y1 === y2 && x1 !== x2;
+            });
+            assert(horizontals.length >= 1,
+                `107g: orgchart SVG should include at least one horizontal branch-rail line (got ${horizontals.length})`);
+
+            const texts = svg.querySelectorAll('text');
+            const labels = [...texts].map((t) => t.textContent);
+            assert(labels.includes('CEO'),
+                `107h: orgchart should contain a "CEO" label (got ${JSON.stringify(labels)})`);
+            assert(labels.includes('EMEA'),
+                `107i: orgchart should contain the "EMEA" single-child leaf (got ${JSON.stringify(labels)})`);
+        }
+    }
+
+    if (cycleAside) {
+        const svg = cycleAside.querySelector(':scope > svg');
+        assert(!!svg, '107j: cycle aside should contain an <svg>');
+        if (svg) {
+            const paths = [...svg.querySelectorAll('path')];
+            // 4 cycle nodes → at least 4 connector paths (one per
+            // clockwise arrow, closing the loop).
+            assert(paths.length >= 4,
+                `107k: cycle SVG should carry at least 4 <path> arcs (got ${paths.length})`);
+            // Each connector's `d` attribute uses SVG's arc (`A`) command
+            // so the path curves along the outer circle.
+            const withArc = paths.filter((p) => /\sA\s/.test(p.getAttribute('d') ?? ''));
+            assert(withArc.length >= 4,
+                `107l: cycle paths should use the SVG arc (A) command (got ${withArc.length} of ${paths.length})`);
+            // Every arc should carry marker-end="url(#…arrow…)" so a
+            // shared <marker> paints the arrowhead.
+            const withMarker = paths.filter((p) => {
+                const me = p.getAttribute('marker-end') ?? '';
+                return /^url\(#/.test(me);
+            });
+            assert(withMarker.length >= 4,
+                `107m: cycle paths should reference marker-end="url(#…)" (got ${withMarker.length} of ${paths.length})`);
+            // The referenced marker itself should be defined under <defs>.
+            const marker = svg.querySelector('defs > marker');
+            assert(!!marker,
+                '107n: cycle SVG should declare a <marker> inside <defs>');
+
+            // Node rects should span more than 100px in both x and y —
+            // proof the cycle nodes aren't all stacked linearly.
+            const rects = [...svg.querySelectorAll('rect')];
+            assert(rects.length === 4,
+                `107o: cycle SVG should carry 4 <rect> node boxes (got ${rects.length})`);
+            if (rects.length > 0) {
+                let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+                for (const r of rects) {
+                    const x = Number(r.getAttribute('x'));
+                    const y = Number(r.getAttribute('y'));
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+                assert((maxX - minX) > 100,
+                    `107p: cycle node x-span should exceed 100px (got ${maxX - minX})`);
+                assert((maxY - minY) > 100,
+                    `107q: cycle node y-span should exceed 100px (got ${maxY - minY})`);
+            }
+        }
+    }
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
