@@ -756,7 +756,86 @@
             }
             out.push({ ranges, rules });
         }
+        mergeDataBarExtAttrs(doc, out);
         return out;
+    }
+    function mergeDataBarExtAttrs(doc, blocks) {
+        const byExtId = new Map();
+        for (const block of blocks) {
+            for (const rule of block.rules) {
+                if (rule.type === 'dataBar' && rule.dataBar?.extId) {
+                    byExtId.set(rule.dataBar.extId, rule.dataBar);
+                }
+            }
+        }
+        if (byExtId.size === 0)
+            return;
+        const all = doc.getElementsByTagName('*');
+        for (let i = 0; i < all.length; i++) {
+            const el = all[i];
+            if (el.localName !== 'cfRule')
+                continue;
+            if (el.getAttribute('type') !== 'dataBar')
+                continue;
+            const id = el.getAttribute('id');
+            if (!id)
+                continue;
+            const target = byExtId.get(id);
+            if (!target)
+                continue;
+            applyDataBarExt(el, target);
+        }
+    }
+    function applyDataBarExt(x14rule, bar) {
+        const children = x14rule.getElementsByTagName('*');
+        let dataBarEl = null;
+        for (let i = 0; i < children.length; i++) {
+            if (children[i].localName === 'dataBar') {
+                dataBarEl = children[i];
+                break;
+            }
+        }
+        if (!dataBarEl)
+            return;
+        const minAttr = dataBarEl.getAttribute('minLength');
+        if (minAttr != null) {
+            const n = Number(minAttr);
+            if (Number.isFinite(n))
+                bar.minLength = n;
+        }
+        const maxAttr = dataBarEl.getAttribute('maxLength');
+        if (maxAttr != null) {
+            const n = Number(maxAttr);
+            if (Number.isFinite(n))
+                bar.maxLength = n;
+        }
+        if (dataBarEl.getAttribute('border') === '1')
+            bar.border = true;
+        if (dataBarEl.getAttribute('gradient') === '0')
+            bar.gradient = false;
+        const axis = dataBarEl.getAttribute('axisPosition');
+        if (axis === 'middle' || axis === 'none' || axis === 'automatic')
+            bar.axisPosition = axis;
+        const dir = dataBarEl.getAttribute('direction');
+        if (dir === 'leftToRight' || dir === 'rightToLeft' || dir === 'context')
+            bar.direction = dir;
+        for (let i = 0; i < children.length; i++) {
+            const c = children[i];
+            switch (c.localName) {
+                case 'borderColor':
+                    bar.borderColor = parseCfColor(c);
+                    break;
+                case 'negativeFillColor':
+                    bar.negativeFillColor = parseCfColor(c);
+                    break;
+                case 'negativeBorderColor':
+                    bar.negativeBorderColor = parseCfColor(c);
+                    break;
+                case 'axisColor':
+                    bar.axisColor = parseCfColor(c);
+                    break;
+            }
+        }
     }
     function parseSqref(sqref) {
         const parts = sqref.trim().split(/\s+/).filter((p) => p.length);
@@ -873,17 +952,43 @@
             colors.push(parseCfColor(colorEls[i]));
         return { cfvos, colors };
     }
+    function dataBarDefaults() {
+        return {
+            cfvos: [], color: null, minLength: 10, maxLength: 90, showValue: true,
+            border: false, borderColor: null,
+            negativeFillColor: null, negativeBorderColor: null,
+            axisPosition: 'automatic', axisColor: null,
+            gradient: true, direction: 'context',
+            extId: null,
+        };
+    }
     function parseDataBar(ruleEl) {
+        const out = dataBarDefaults();
         const root = ruleEl.getElementsByTagNameNS(NS_MAIN, 'dataBar').item(0);
         if (!root)
-            return { cfvos: [], color: null, minLength: 10, maxLength: 90, showValue: true };
-        return {
-            cfvos: parseCfvos(root),
-            color: parseCfColor(root.getElementsByTagNameNS(NS_MAIN, 'color').item(0)),
-            minLength: Number(root.getAttribute('minLength') ?? '10') || 10,
-            maxLength: Number(root.getAttribute('maxLength') ?? '90') || 90,
-            showValue: root.getAttribute('showValue') !== '0',
-        };
+            return { ...out, extId: parseCfRuleExtId(ruleEl) };
+        out.cfvos = parseCfvos(root);
+        out.color = parseCfColor(root.getElementsByTagNameNS(NS_MAIN, 'color').item(0));
+        out.minLength = Number(root.getAttribute('minLength') ?? '10') || 10;
+        out.maxLength = Number(root.getAttribute('maxLength') ?? '90') || 90;
+        out.showValue = root.getAttribute('showValue') !== '0';
+        out.extId = parseCfRuleExtId(ruleEl);
+        return out;
+    }
+    function parseCfRuleExtId(ruleEl) {
+        const extLst = ruleEl.getElementsByTagNameNS(NS_MAIN, 'extLst').item(0);
+        if (!extLst)
+            return null;
+        const all = extLst.getElementsByTagName('*');
+        for (let i = 0; i < all.length; i++) {
+            const el = all[i];
+            if (el.localName !== 'id')
+                continue;
+            const text = (el.textContent ?? '').trim();
+            if (text)
+                return text;
+        }
+        return null;
     }
     function parseIconSet(ruleEl) {
         const root = ruleEl.getElementsByTagNameNS(NS_MAIN, 'iconSet').item(0);
@@ -2889,6 +2994,9 @@
         const color = resolveColor(bar.color, theme);
         if (!color)
             return;
+        const negFill = resolveColor(bar.negativeFillColor, theme);
+        const resolvedBorderColor = resolveColor(bar.borderColor, theme);
+        const axisColor = resolveColor(bar.axisColor, theme) ?? '#000000';
         const lenMin = Math.max(0, bar.minLength) / 100;
         const lenMax = Math.min(100, bar.maxLength) / 100;
         for (const entry of cells) {
@@ -2900,9 +3008,28 @@
             const clamped = Math.max(min, Math.min(max, n));
             const t = (clamped - min) / (max - min);
             const fraction = lenMin + (lenMax - lenMin) * t;
+            const fillColor = n < 0 && negFill ? negFill : color;
+            let axis = null;
+            if (bar.axisPosition === 'middle') {
+                axis = { position: 'middle', color: axisColor };
+            }
+            else if (bar.axisPosition === 'automatic' && min < 0 && max > 0) {
+                axis = { position: 'middle', color: axisColor };
+            }
+            else if (bar.axisPosition === 'automatic') {
+                axis = { position: 'left', color: axisColor };
+            }
             const key = `${entry.row},${entry.col}`;
             const existing = out.get(key) ?? {};
-            existing.dataBar = { color, fraction };
+            existing.dataBar = {
+                color: fillColor,
+                fraction,
+                gradient: bar.gradient,
+                direction: bar.direction,
+                border: bar.border,
+                borderColor: resolvedBorderColor,
+                axis,
+            };
             out.set(key, existing);
         }
     }
@@ -3077,7 +3204,7 @@
                     wrapCellWithHyperlink(td, hlink);
                 const dxf = dxfByCell.get(`${r},${c}`);
                 if (dxf)
-                    applyDxf(td, dxf, theme);
+                    applyDxf(td, dxf, theme, cell ?? null, date1904);
                 const gfx = graphicalByCell.get(`${r},${c}`);
                 if (gfx)
                     applyGraphicalCf(td, gfx);
@@ -3485,8 +3612,26 @@
             td.classList.add('xlsx-cf-colorscale');
         }
         if (state.dataBar) {
-            const pct = +(Math.max(0, Math.min(1, state.dataBar.fraction)) * 100).toFixed(2);
-            td.style.background = `linear-gradient(90deg, ${state.dataBar.color} 0 ${pct}%, transparent ${pct}% 100%)`;
+            const bar = state.dataBar;
+            const pct = +(Math.max(0, Math.min(1, bar.fraction)) * 100).toFixed(2);
+            const angle = bar.direction === 'rightToLeft' ? '270deg' : '90deg';
+            const fillStop = bar.gradient
+                ? `${bar.color} 0 ${pct}%, transparent ${pct}% 100%`
+                : `${bar.color} 0 ${pct}%, transparent ${pct}% 100%`;
+            td.style.background = `linear-gradient(${angle}, ${fillStop})`;
+            if (bar.border) {
+                const bc = bar.borderColor ?? bar.color;
+                td.style.border = `1px solid ${bc}`;
+            }
+            if (bar.axis) {
+                td.setAttribute('data-cf-databar-axis', bar.axis.position);
+                td.setAttribute('data-cf-databar-axis-color', bar.axis.color);
+                if (bar.axis.position === 'middle') {
+                    const existingShadow = td.style.boxShadow;
+                    const axisShadow = `inset 50% 0 0 -49% ${bar.axis.color}`;
+                    td.style.boxShadow = existingShadow ? `${existingShadow}, ${axisShadow}` : axisShadow;
+                }
+            }
             td.classList.add('xlsx-cf-databar');
         }
         if (state.icon) {
@@ -3507,19 +3652,24 @@
             td.classList.add('xlsx-cf-iconset');
         }
     }
-    function applyDxf(td, dxf, theme) {
+    function applyDxf(td, dxf, theme, cell, date1904) {
         if (dxf.font) {
             const f = dxf.font;
             if (f.bold)
                 td.style.fontWeight = 'bold';
             if (f.italic)
                 td.style.fontStyle = 'italic';
-            if (f.underline || f.strike) {
-                applyTextDecoration(td, f.underline ?? null, !!f.strike);
-                if (f.underline === 'double' || f.underline === 'doubleAccounting') {
+            const strike = !!f.strike;
+            const underline = f.underline ?? null;
+            if (strike || underline) {
+                const existingDecoration = td.style.textDecoration ?? '';
+                const existingUnderline = /underline/.test(existingDecoration);
+                const existingStrike = /line-through/.test(existingDecoration);
+                applyTextDecoration(td, underline || (existingUnderline ? 'single' : null), strike || existingStrike);
+                if (underline === 'double' || underline === 'doubleAccounting') {
                     td.style.textDecorationStyle = 'double';
                 }
-                if (f.underline === 'singleAccounting' || f.underline === 'doubleAccounting') {
+                if (underline === 'singleAccounting' || underline === 'doubleAccounting') {
                     td.classList.add('xlsx-accounting-underline');
                 }
             }
@@ -3546,6 +3696,16 @@
             applyFill(td, dxf.fill, theme);
         if (dxf.border)
             applyBorder(td, dxf.border, theme);
+        if (dxf.numFmtCode && cell && (cell.kind === 'number' || cell.kind === 'empty')
+            && cell.value !== '' && !cell.runs) {
+            const code = dxf.numFmtCode;
+            if (code !== 'General') {
+                const res = formatNumber(cell.value, code, { date1904 });
+                td.textContent = res.text;
+                if (res.numeric)
+                    td.classList.add('xlsx-numeric');
+            }
+        }
         td.classList.add('xlsx-cf');
     }
 

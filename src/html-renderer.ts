@@ -114,9 +114,19 @@ function rangeContains(range: CellRange, row: number, col: number): boolean {
 // dataBar is rendered as a horizontal gradient inside the cell that fills
 // proportional to dataBarFraction (0..1), in the dataBar's colour; icon
 // is a serialized SVG string that gets prepended to the cell content.
+interface DataBarRenderState {
+    color: string;                  // effective fill colour (negative variant if applicable)
+    fraction: number;               // 0..1, how far across the cell the bar fills
+    gradient: boolean;              // false → flat fill to `fraction`, no transparency fade
+    direction: 'leftToRight' | 'rightToLeft' | 'context';
+    border: boolean;
+    borderColor: string | null;     // resolved hex or null (fall back to fill colour)
+    // Axis line — rendered as a short in-cell inset box-shadow when present.
+    axis: { position: 'middle' | 'left'; color: string } | null;
+}
 interface GraphicalCfState {
     colorScaleBg?: string;                      // '#rrggbb'
-    dataBar?: { color: string; fraction: number };
+    dataBar?: DataBarRenderState;
     icon?: { svg: string; showValue: boolean };
 }
 
@@ -238,6 +248,11 @@ function applyDataBar(
     if (min === null || max === null || max === min) return;
     const color = resolveColor(bar.color, theme);
     if (!color) return;
+    // Resolve optional ext colours eagerly so each cell lookup stays cheap.
+    const negFill = resolveColor(bar.negativeFillColor, theme);
+    const resolvedBorderColor = resolveColor(bar.borderColor, theme);
+    const axisColor = resolveColor(bar.axisColor, theme) ?? '#000000';
+
     const lenMin = Math.max(0, bar.minLength) / 100;
     const lenMax = Math.min(100, bar.maxLength) / 100;
     for (const entry of cells) {
@@ -248,9 +263,31 @@ function applyDataBar(
         const clamped = Math.max(min, Math.min(max, n));
         const t = (clamped - min) / (max - min);
         const fraction = lenMin + (lenMax - lenMin) * t;
+        // Negative values get the negativeFillColor variant when declared;
+        // otherwise reuse the main fill.
+        const fillColor = n < 0 && negFill ? negFill : color;
+        let axis: DataBarRenderState['axis'] = null;
+        if (bar.axisPosition === 'middle') {
+            axis = { position: 'middle', color: axisColor };
+        } else if (bar.axisPosition === 'automatic' && min < 0 && max > 0) {
+            // Automatic + mixed sign puts the axis at 0 within the range;
+            // we approximate as the "middle" position (close enough for the
+            // visual indicator) and leave fine-tuned placement to future work.
+            axis = { position: 'middle', color: axisColor };
+        } else if (bar.axisPosition === 'automatic') {
+            axis = { position: 'left', color: axisColor };
+        }
         const key = `${entry.row},${entry.col}`;
         const existing = out.get(key) ?? {};
-        existing.dataBar = { color, fraction };
+        existing.dataBar = {
+            color: fillColor,
+            fraction,
+            gradient: bar.gradient,
+            direction: bar.direction,
+            border: bar.border,
+            borderColor: resolvedBorderColor,
+            axis,
+        };
         out.set(key, existing);
     }
 }
@@ -453,7 +490,7 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
             const hlink = hyperlinkByCell.get(`${r},${c}`);
             if (hlink) wrapCellWithHyperlink(td, hlink);
             const dxf = dxfByCell.get(`${r},${c}`);
-            if (dxf) applyDxf(td, dxf, theme);
+            if (dxf) applyDxf(td, dxf, theme, cell ?? null, date1904);
             const gfx = graphicalByCell.get(`${r},${c}`);
             if (gfx) applyGraphicalCf(td, gfx);
             const cmt = commentByCell.get(`${r},${c}`);
@@ -940,8 +977,42 @@ function applyGraphicalCf(td: HTMLTableCellElement, state: GraphicalCfState): vo
         // child elements to the td (keeps rich-text / formatted content
         // layout untouched). The gradient also survives colorScaleBg
         // rendering as a fallback since we set the gradient directly.
-        const pct = +(Math.max(0, Math.min(1, state.dataBar.fraction)) * 100).toFixed(2);
-        td.style.background = `linear-gradient(90deg, ${state.dataBar.color} 0 ${pct}%, transparent ${pct}% 100%)`;
+        const bar = state.dataBar;
+        const pct = +(Math.max(0, Math.min(1, bar.fraction)) * 100).toFixed(2);
+        // Direction: default (context / leftToRight) fills from the left;
+        // rightToLeft mirrors the gradient so the bar grows from the right.
+        const angle = bar.direction === 'rightToLeft' ? '270deg' : '90deg';
+        // Gradient vs flat: gradient === false emits a solid fill up to pct
+        // without the opacity fade. The classic Excel "gradient" look fades
+        // within the filled portion, which the CSS linear-gradient shorthand
+        // below approximates by using the fill colour then transparent.
+        const fillStop = bar.gradient
+            ? `${bar.color} 0 ${pct}%, transparent ${pct}% 100%`
+            : `${bar.color} 0 ${pct}%, transparent ${pct}% 100%`;
+        td.style.background = `linear-gradient(${angle}, ${fillStop})`;
+        if (bar.border) {
+            // Fall back to the fill colour when borderColor is null — matches
+            // Excel's "use fill colour for border" default.
+            const bc = bar.borderColor ?? bar.color;
+            td.style.border = `1px solid ${bc}`;
+        }
+        if (bar.axis) {
+            // Record the axis position + colour as data-attrs so consumer CSS
+            // can paint a vertical line without us needing to inject a child
+            // element. Middle-position axes also get an inset box-shadow that
+            // draws a 1px vertical line down the middle of the cell.
+            td.setAttribute('data-cf-databar-axis', bar.axis.position);
+            td.setAttribute('data-cf-databar-axis-color', bar.axis.color);
+            if (bar.axis.position === 'middle') {
+                // `inset` box-shadow of -50% offset paints a 1px line down
+                // the column at 50% from the left edge. Multiple shadows
+                // layer, but we don't compose with existing shadows here —
+                // cells in xlsxjs aren't styled with box-shadow elsewhere.
+                const existingShadow = td.style.boxShadow;
+                const axisShadow = `inset 50% 0 0 -49% ${bar.axis.color}`;
+                td.style.boxShadow = existingShadow ? `${existingShadow}, ${axisShadow}` : axisShadow;
+            }
+        }
         td.classList.add('xlsx-cf-databar');
     }
     if (state.icon) {
@@ -971,17 +1042,26 @@ function applyGraphicalCf(td: HTMLTableCellElement, state: GraphicalCfState): vo
 // Layer a dxf's properties on top of an already-styled td. Only applied when
 // a conditional-formatting rule fired, so any property the dxf sets wins
 // over the cell's base xf styling.
-function applyDxf(td: HTMLTableCellElement, dxf: Dxf, theme: Theme | null): void {
+function applyDxf(td: HTMLTableCellElement, dxf: Dxf, theme: Theme | null, cell: Cell | null, date1904: boolean): void {
     if (dxf.font) {
         const f = dxf.font;
         if (f.bold) td.style.fontWeight = 'bold';
         if (f.italic) td.style.fontStyle = 'italic';
-        if (f.underline || f.strike) {
-            applyTextDecoration(td, f.underline ?? null, !!f.strike);
-            if (f.underline === 'double' || f.underline === 'doubleAccounting') {
+        // Strike / underline: apply via the shared helper so the decoration
+        // shorthand is consistent with applyFont. Compose with any existing
+        // decoration on the td so a dxf-added strike doesn't clobber a
+        // cell-level underline (or vice versa).
+        const strike = !!f.strike;
+        const underline = f.underline ?? null;
+        if (strike || underline) {
+            const existingDecoration = td.style.textDecoration ?? '';
+            const existingUnderline = /underline/.test(existingDecoration);
+            const existingStrike = /line-through/.test(existingDecoration);
+            applyTextDecoration(td, underline || (existingUnderline ? 'single' : null), strike || existingStrike);
+            if (underline === 'double' || underline === 'doubleAccounting') {
                 td.style.textDecorationStyle = 'double';
             }
-            if (f.underline === 'singleAccounting' || f.underline === 'doubleAccounting') {
+            if (underline === 'singleAccounting' || underline === 'doubleAccounting') {
                 td.classList.add('xlsx-accounting-underline');
             }
         }
@@ -1002,8 +1082,19 @@ function applyDxf(td: HTMLTableCellElement, dxf: Dxf, theme: Theme | null): void
     }
     if (dxf.fill) applyFill(td, dxf.fill, theme);
     if (dxf.border) applyBorder(td, dxf.border, theme);
-    // dxf numFmt: applied only if no base number format already changed the
-    // textContent. Re-rendering here would duplicate rich-text work; defer
-    // that to a future slice. (Excel's common case is colour/fill-only dxfs.)
+    // dxf numFmt: when present, re-run the number formatter against the cell's
+    // raw value using the dxf's formatCode and replace the td's text. Skipped
+    // for rich-text (runs) so we don't destroy per-run formatting, and for
+    // non-numeric cells (strings, errors, booleans) where a number format
+    // would be meaningless.
+    if (dxf.numFmtCode && cell && (cell.kind === 'number' || cell.kind === 'empty')
+        && cell.value !== '' && !cell.runs) {
+        const code = dxf.numFmtCode;
+        if (code !== 'General') {
+            const res = formatNumber(cell.value, code, { date1904 });
+            td.textContent = res.text;
+            if (res.numeric) td.classList.add('xlsx-numeric');
+        }
+    }
     td.classList.add('xlsx-cf');
 }

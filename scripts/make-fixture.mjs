@@ -848,3 +848,115 @@ await writeFixture('merged', {
     writeFileSync(out, buf);
     console.log(`wrote ${out} (${buf.length} bytes)`);
 }
+
+// ── cf-ext-databar ────────────────────────────────────────────────────────
+// Exercises the x14 ext attributes for data bars (negative fill colour,
+// middle axis, border + border colour) and the dxf strike/numFmt extras.
+//
+//   A1 = -5   B1 = "flag"    (containsText "flag" → dxf with strike + 0.00)
+//   A2 =  0   B2 = "no"
+//   A3 =  3   B3 = "flag"
+//   A4 =  5   B4 = "quiet"
+//
+// Column C holds numeric cells that match a cellIs >= 0 rule using the
+// same dxf so the dxf.numFmtCode path is exercised end-to-end.
+{
+    const outDir = resolve(repo, 'tests/render-test/cf-ext-databar');
+    mkdirSync(outDir, { recursive: true });
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>`);
+    zip.file('_rels/.rels', rootRels);
+    zip.file('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`);
+    zip.file('xl/workbook.xml', workbookXml('ExtBar'));
+    zip.file('xl/sharedStrings.xml', sharedStringsXml(['flag', 'no', 'quiet']));
+    // dxfs[0] = strike + numFmtCode "0.00". Fires via containsText (col B)
+    // and cellIs >= 0 (col C). The numFmt path matters on C.
+    zip.file('xl/styles.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+  <dxfs count="1">
+    <dxf>
+      <font><strike val="1"/></font>
+      <numFmt numFmtId="164" formatCode="0.00"/>
+    </dxf>
+  </dxfs>
+</styleSheet>`);
+    const GUID = '{11111111-2222-3333-4444-555555555555}';
+    zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+           xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+           xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"
+           xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">
+  <sheetData>
+    <row r="1"><c r="A1"><v>-5</v></c><c r="B1" t="s"><v>0</v></c><c r="C1"><v>-2</v></c></row>
+    <row r="2"><c r="A2"><v>0</v></c><c r="B2" t="s"><v>1</v></c><c r="C2"><v>4</v></c></row>
+    <row r="3"><c r="A3"><v>3</v></c><c r="B3" t="s"><v>0</v></c><c r="C3"><v>7</v></c></row>
+    <row r="4"><c r="A4"><v>5</v></c><c r="B4" t="s"><v>2</v></c><c r="C4"><v>9</v></c></row>
+  </sheetData>
+  <conditionalFormatting sqref="A1:A4">
+    <cfRule type="dataBar" priority="1">
+      <dataBar>
+        <cfvo type="min"/>
+        <cfvo type="max"/>
+        <color rgb="FF638EC6"/>
+      </dataBar>
+      <extLst>
+        <ext uri="{B025F937-C7B1-47D3-B67F-A62EFF666E3E}" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">
+          <x14:id>${GUID}</x14:id>
+        </ext>
+      </extLst>
+    </cfRule>
+  </conditionalFormatting>
+  <conditionalFormatting sqref="B1:B4">
+    <cfRule type="containsText" priority="2" operator="containsText" dxfId="0" text="flag">
+      <formula>NOT(ISERROR(SEARCH("flag",B1)))</formula>
+    </cfRule>
+  </conditionalFormatting>
+  <conditionalFormatting sqref="C1:C4">
+    <cfRule type="cellIs" priority="3" operator="greaterThanOrEqual" dxfId="0">
+      <formula>0</formula>
+    </cfRule>
+  </conditionalFormatting>
+  <extLst>
+    <ext uri="{78C0D931-6437-407d-A8EE-F0AAD7539E65}" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">
+      <x14:conditionalFormattings>
+        <x14:conditionalFormatting xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main">
+          <x14:cfRule type="dataBar" id="${GUID}">
+            <x14:dataBar minLength="0" maxLength="100" border="1" negativeBarColorSameAsPositive="0" axisPosition="middle">
+              <x14:cfvo type="autoMin"/>
+              <x14:cfvo type="autoMax"/>
+              <x14:borderColor rgb="FF0000FF"/>
+              <x14:negativeFillColor rgb="FFFF0000"/>
+              <x14:negativeBorderColor rgb="FFFF0000"/>
+              <x14:axisColor rgb="FF000000"/>
+            </x14:dataBar>
+          </x14:cfRule>
+          <xm:sqref>A1:A4</xm:sqref>
+        </x14:conditionalFormatting>
+      </x14:conditionalFormattings>
+    </ext>
+  </extLst>
+</worksheet>`);
+    const buf = await zip.generateAsync({ type: 'nodebuffer' });
+    const out = resolve(outDir, 'workbook.xlsx');
+    writeFileSync(out, buf);
+    console.log(`wrote ${out} (${buf.length} bytes)`);
+}
