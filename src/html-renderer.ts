@@ -80,6 +80,10 @@ function renderStyle(className: string): HTMLStyleElement {
 .${className} col.xlsx-outline-1 { border-left: 2px solid #ddd; }
 .${className} col.xlsx-outline-2 { border-left: 3px solid #ccc; }
 .${className} col.xlsx-outline-3 { border-left: 4px solid #bbb; }
+.${className} .xlsx-header, .${className} .xlsx-footer {
+    display: grid; grid-template-columns: 1fr 1fr 1fr;
+    font-size: 0.85em; color: #666; margin: 0.5em 0;
+}
     `.trim();
     return style;
 }
@@ -344,6 +348,15 @@ function resolveConditionalFormats(sheet: Sheet, styles: Styles | null, date1904
 function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, date1904: boolean, options: Options): HTMLElement {
     const section = h('section', { class: options.className, 'data-sheet-name': sheet.name }) as HTMLElement;
     applySheetView(section, sheet.view, theme);
+    // Manual page breaks surface as data attributes on the section; xlsxjs
+    // doesn't render a visual break (no pagination) but consumers who want to
+    // paint a divider can read these off.
+    if (sheet.pageBreaks.rows.length > 0) {
+        section.setAttribute('data-page-break-rows', sheet.pageBreaks.rows.join(','));
+    }
+    if (sheet.pageBreaks.cols.length > 0) {
+        section.setAttribute('data-page-break-cols', sheet.pageBreaks.cols.join(','));
+    }
     section.appendChild(h('div', { class: 'xlsx-sheet-name' }, [sheet.name]));
 
     const table = h('table') as HTMLTableElement;
@@ -575,7 +588,35 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
         ph.textContent = `[chart: ${chart.chartType ?? chart.kind}]`;
         section.appendChild(ph);
     }
+
+    // Header / footer — rendered as 3-column grids after the table. Zone
+    // strings come pre-substituted (dates / sheet name / literal markers);
+    // they're attacker-controlled so they reach the DOM only via textContent.
+    if (sheet.headerFooter?.oddHeader) {
+        section.appendChild(renderHeaderFooter('xlsx-header', sheet.headerFooter.oddHeader));
+    }
+    if (sheet.headerFooter?.oddFooter) {
+        section.appendChild(renderHeaderFooter('xlsx-footer', sheet.headerFooter.oddFooter));
+    }
     return section;
+}
+
+// Build a <div class="xlsx-header|xlsx-footer"> containing three
+// <div data-zone="left|center|right"> children. Each zone's text is emitted
+// via textContent so attacker strings are HTML-encoded by the DOM.
+function renderHeaderFooter(className: string, zones: { left: string; center: string; right: string }): HTMLElement {
+    const div = document.createElement('div');
+    div.className = className;
+    const addZone = (name: 'left' | 'center' | 'right', text: string) => {
+        const z = document.createElement('div');
+        z.setAttribute('data-zone', name);
+        z.textContent = text;
+        div.appendChild(z);
+    };
+    addZone('left', zones.left);
+    addZone('center', zones.center);
+    addZone('right', zones.right);
+    return div;
 }
 
 // Append a small "●" marker to a cell that has a classic comment. Author

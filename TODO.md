@@ -6,6 +6,25 @@ plus pre-existing known gaps. Organised by effort tier, not by visibility.
 
 ## Resolved in fork
 
+- **Page layout metadata** (`feat/page-layout`) — manual row/column page
+  breaks (`<rowBreaks>`/`<colBreaks>` with `man="1"`) land on
+  `Sheet.pageBreaks = { rows, cols }` (0-based indices, automatic breaks
+  dropped) and surface as `data-page-break-rows` / `data-page-break-cols`
+  on the rendered `<section class="xlsx">`. `_xlnm.Print_Area` defined
+  names resolve into cell ranges on `Sheet.printArea: PrintAreaRange[] |
+  null` (via `localSheetId`). `<headerFooter>`'s `oddHeader`/`oddFooter`
+  split into `{ left, center, right }` zones on `Sheet.headerFooter`; the
+  `&D`/`&T`/`&A` substitution codes resolve eagerly (date/time via
+  `new Date()`, sheet name from the model), `&P`/`&N` stay literal
+  (`"(page)"` / `"(total)"` — xlsxjs doesn't paginate), and `&F` is left
+  verbatim. The renderer emits `<div class="xlsx-header">` +
+  `<div class="xlsx-footer">` grids after the table, one
+  `<div data-zone="left|center|right">` per zone. `FrozenPanes` gained a
+  required `kind: 'frozen' | 'split'` field; `state="split"` panes now
+  round-trip through the parser and render with the same sticky classes
+  as frozen panes. Harness scenarios 57–60; fixture at
+  `tests/render-test/page-layout/`.
+
 - **Graphical-CF data-bar ext + dxf strike/numFmt** (`feat/cf-graphical-ext`) —
   `DataBar` now carries the post-2010 ext attributes (`border`,
   `borderColor`, `negativeFillColor`, `negativeBorderColor`,
@@ -196,9 +215,7 @@ already tracked elsewhere in this file is excluded.*
   `data-tab-color`. Harness scenarios 38–40.
 
 ### Display & layout
-- **Page breaks and print area** (`worksheet/rowBreaks`, `colBreaks`, `definedName@name='_xlnm.Print_Area'`) — the dashed break markers and print-preview shading Excel draws in Page Break Preview aren't surfaced at all.
-- **Header / footer text** (`worksheet/headerFooter/oddHeader`, `oddFooter`) — three-zone (&L/&C/&R) header/footer strings that show in Page Layout view.
-- **Split panes without freeze** (`pane/@state='split'`) — currently ignored; splits without freeze render as a single scrolling pane.
+- (no open items — see "Resolved in fork" for recent page-layout work.)
 
 ### Conditional formatting
 - **`containsBlanks` / `notContainsBlanks`** (`cfRule/@type`) — highlights blank or non-blank cells in a range; returns no-match today.
