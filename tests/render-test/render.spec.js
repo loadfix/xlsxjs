@@ -96,6 +96,36 @@ test.describe('Render workbook', () => {
     }
 });
 
+test.describe('Interactive form controls', () => {
+    test('renders live inputs when interactiveFormControls is set', async ({ page }) => {
+        await page.goto('/tests/harness.html');
+
+        const result = await page.evaluate(async () => {
+            const buf = await fetch('/tests/render-test/form-controls/workbook.xlsx').then((r) => r.arrayBuffer());
+            const host = document.createElement('div');
+            document.body.appendChild(host);
+            // @ts-ignore
+            await xlsx.renderAsync(buf, host, null, { interactiveFormControls: true });
+            const asides = host.querySelectorAll('aside.xlsx-form-control');
+            const sampler = {};
+            for (const a of asides) sampler[a.getAttribute('data-kind')] = a.outerHTML.slice(0, 300);
+            return {
+                checkboxInput: !!host.querySelector('aside.xlsx-form-control[data-kind="checkbox"] input[type="checkbox"]'),
+                radioInput: !!host.querySelector('aside.xlsx-form-control[data-kind="radio"] input[type="radio"]'),
+                rangeInput: !!host.querySelector('aside.xlsx-form-control[data-kind="scrollbar"] input[type="range"]'),
+                comboSelect: !!host.querySelector('aside.xlsx-form-control[data-kind="combo"] select'),
+                button: !!host.querySelector('aside.xlsx-form-control[data-kind="button"] button'),
+                sampler,
+            };
+        });
+        expect(result.checkboxInput).toBe(true);
+        expect(result.radioInput).toBe(true);
+        expect(result.rangeInput).toBe(true);
+        expect(result.comboSelect).toBe(true);
+        expect(result.button).toBe(true);
+    });
+});
+
 test.describe('Library surface', () => {
     test('exposes parseAsync, renderWorkbook, renderAsync globals', async ({ page }) => {
         await page.goto('/tests/harness.html');
