@@ -18,7 +18,11 @@
     "@playwright/test": "^1.59.1",
     "@rollup/plugin-terser": "^0.4.4",
     "@rollup/plugin-typescript": "^12.1.4",
+    "@types/pixelmatch": "^5.2.6",
+    "@types/pngjs": "^6.0.5",
     "jsdom": "^29.1.1",
+    "pixelmatch": "^5.3.0",
+    "pngjs": "^7.0.0",
     "rollup": "^4.9.1",
     "tslib": "^2.4.0",
     "typescript": "^5.0.3"
@@ -32,7 +36,8 @@
     "test": "playwright test",
     "test:render": "npm run build && node scripts/test-render.mjs",
     "test:golden": "npm run build && node scripts/golden-diff.mjs",
-    "test:golden:capture": "npm run build && node scripts/golden-diff.mjs --capture"
+    "test:golden:capture": "npm run build && node scripts/golden-diff.mjs --capture",
+    "test:conformance": "npm run build && playwright test tests/conformance/"
   },
   "files": [
     "dist"
