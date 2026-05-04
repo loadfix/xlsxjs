@@ -3926,6 +3926,38 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 103. smartart SVG layout: { smartArtLayout: 'svg' } → SVG, no <ul> ────
+// Wave 10 opt-in: with `smartArtLayout: 'svg'` the SmartArt aside prepends an
+// inline <svg> and omits the Wave-9 <ul>. The SVG contains one <rect> per
+// node (6 for the Project/Backend/Frontend/API/Database/UI tree) and enough
+// connector <line>s to link every non-root node to its parent (5). Labels
+// reach the DOM via textContent; we spot-check the root "Project" label.
+{
+    const { container } = await renderFixture('smartart', { smartArtLayout: 'svg' });
+    const asides = container.querySelectorAll('section.xlsx aside.xlsx-smartart');
+    assert(asides.length === 1,
+        `103a: expected 1 <aside class="xlsx-smartart"> (got ${asides.length})`);
+    const aside = asides[0];
+    if (aside) {
+        const svg = aside.querySelector(':scope > svg');
+        assert(!!svg, '103b: aside should contain a top-level <svg>');
+        const ul = aside.querySelector(':scope > ul');
+        assert(!ul, `103c: aside should NOT contain a <ul> under 'svg' layout (got ${ul?.outerHTML?.slice(0, 80)})`);
+        if (svg) {
+            const rects = svg.querySelectorAll('rect');
+            assert(rects.length >= 5,
+                `103d: SVG should carry at least 5 <rect> nodes (got ${rects.length})`);
+            const lines = svg.querySelectorAll('line');
+            assert(lines.length >= 5,
+                `103e: SVG should carry at least 5 <line> connectors (got ${lines.length})`);
+            const texts = svg.querySelectorAll('text');
+            const labels = [...texts].map((t) => t.textContent);
+            assert(labels.includes('Project'),
+                `103f: a <text> labelled "Project" should exist (got ${JSON.stringify(labels)})`);
+        }
+    }
+}
+
 // ── 101. interactive slicers + timeline: opt-in swaps the aside body ────
 // With Options.interactiveSlicers=true the slicer's flat selected-item
 // <ul> is replaced by a set of `<button class="xlsx-slicer-chip">` toggle
@@ -4068,6 +4100,40 @@ async function renderFixture(path, options) {
         '102f: default-off timeline aside should NOT contain <input type="range"> handles');
     assert(timelineAside?.querySelector('span.xlsx-timeline-label') === null,
         '102g: default-off timeline aside should NOT carry the interactive label span class');
+}
+
+// ── 104. smartart layout 'both' → SVG first, <ul> second ──────────────────
+// The 'both' option is the accessible / hybrid form: the SVG renders first
+// (consumers' visual preference) and the <ul> lands after it, so assistive
+// tech / plaintext consumers still see the tree.
+{
+    const { container } = await renderFixture('smartart', { smartArtLayout: 'both' });
+    const aside = container.querySelector('section.xlsx aside.xlsx-smartart');
+    assert(!!aside, '104a: aside.xlsx-smartart should be present');
+    if (aside) {
+        const children = [...aside.children];
+        const svgIdx = children.findIndex((c) => c.nodeName === 'svg' || c.nodeName === 'SVG');
+        const ulIdx = children.findIndex((c) => c.nodeName === 'UL');
+        assert(svgIdx !== -1, '104b: aside should contain an <svg>');
+        assert(ulIdx !== -1, '104c: aside should contain a <ul>');
+        assert(svgIdx < ulIdx,
+            `104d: <svg> should precede the <ul> under 'both' layout (svgIdx=${svgIdx}, ulIdx=${ulIdx})`);
+    }
+}
+
+// ── 105. smartart default layout preserves Wave-9 behaviour ───────────────
+// Default options render the <ul> only — no <svg> — so golden snapshots for
+// the smartart fixture stay byte-stable after the Wave-10 option landed.
+{
+    const { container } = await renderFixture('smartart');
+    const aside = container.querySelector('section.xlsx aside.xlsx-smartart');
+    assert(!!aside, '105a: aside.xlsx-smartart should be present under default options');
+    if (aside) {
+        const svg = aside.querySelector(':scope > svg');
+        assert(!svg, `105b: default aside should NOT contain an <svg> (got ${svg?.outerHTML?.slice(0, 80)})`);
+        const ul = aside.querySelector(':scope > ul');
+        assert(!!ul, '105c: default aside should contain a <ul> (Wave-9 behaviour)');
+    }
 }
 
 // ── report ────────────────────────────────────────────────────────────────

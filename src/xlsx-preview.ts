@@ -19,6 +19,8 @@ export { emuToPx } from './utils';
 export type { ChartModel, ChartSeries } from './chart-parser';
 export { parseChart } from './chart-parser';
 export { renderChart } from './chart-renderer';
+export { renderSmartArtSvg } from './smartart-renderer';
+export type { RenderSmartArtOptions } from './smartart-renderer';
 
 export interface Options {
     className: string;
@@ -63,6 +65,18 @@ export interface Options {
     // consumers listen for the event to drive their own filter UI. Default
     // off to keep Wave-8 golden output byte-stable.
     interactiveSlicers: boolean;
+    // Controls how `<aside class="xlsx-smartart">` paints its diagram body:
+    //   · 'tree' — the Wave 9 indented `<ul>` only (default, byte-stable).
+    //   · 'svg'  — an inline SVG rendered via `renderSmartArtSvg`, and no
+    //              `<ul>`. Falls back to the `<ul>` when the model has no
+    //              root nodes.
+    //   · 'both' — SVG first, then the `<ul>` (useful for accessible fallback
+    //              or for consumers who want to style the tree + SVG side by
+    //              side via CSS).
+    // The SVG always renders the hierarchy layout regardless of
+    // `model.layout` — cycle / orgchart variants will grow native layouts in
+    // a future wave; for now the hierarchy layout is a reasonable fallback.
+    smartArtLayout: 'tree' | 'svg' | 'both';
     h: typeof h;
 }
 
@@ -76,6 +90,7 @@ export const defaultOptions: Options = {
     renderCharts: true,
     interactiveFormControls: false,
     interactiveSlicers: false,
+    smartArtLayout: 'tree',
     h,
 };
 

@@ -15,6 +15,7 @@ import { renderIcon } from './icons';
 import { renderShapePreset } from './shape-presets';
 import { evaluateRule, resolveCfvo, interpolateColorScale, type ConditionalFormatting, type CfContext, type CellRange, type CfRule } from './conditional-format';
 import { renderChart } from './chart-renderer';
+import { renderSmartArtSvg } from './smartart-renderer';
 
 // Excel column "width" is in units of the default font's "0" character. For
 // the default Calibri 11pt, one unit ≈ 7 pixels of content plus 5px of cell
@@ -754,7 +755,7 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
             imageLayer.appendChild(aside);
         }
         for (const art of smartArtEntries) {
-            const aside = renderSmartArt(art);
+            const aside = renderSmartArt(art, options);
             const left = GUTTER_WIDTH_PX + sumColsPx(art.col, widthByCol, hiddenCols);
             const top = sumRowsPx(art.row, rowDim);
             aside.style.left = `${left}px`;
@@ -1020,7 +1021,7 @@ function renderShape(shape: SheetShape): HTMLElement {
 // position:absolute when it lands inside the image overlay layer; its
 // default in-flow style (no image layer) leaves it flowing above the table,
 // matching how the slicer / timeline asides behave.
-function renderSmartArt(art: SheetSmartArt): HTMLElement {
+function renderSmartArt(art: SheetSmartArt, options: Options): HTMLElement {
     const aside = document.createElement('aside');
     aside.className = 'xlsx-smartart';
     aside.style.position = 'absolute';
@@ -1033,7 +1034,24 @@ function renderSmartArt(art: SheetSmartArt): HTMLElement {
     if (art.endRow !== null) aside.setAttribute('data-anchor-end-row', String(art.endRow));
 
     const roots = art.model?.rootNodes ?? [];
-    aside.appendChild(renderSmartArtList(roots, 0));
+    // Wire the layout strategy. 'tree' (default) keeps Wave-9 byte-stable by
+    // emitting only the <ul>. 'svg' drops the <ul> in favour of a rendered
+    // SVG hierarchy (falling back to the <ul> when the model is empty so the
+    // aside isn't silently empty). 'both' prepends the SVG in front of the
+    // <ul> so assistive tech still has the textual hierarchy.
+    const layout = options.smartArtLayout ?? 'tree';
+    let svg: SVGSVGElement | null = null;
+    if (layout !== 'tree' && art.model) {
+        try {
+            svg = renderSmartArtSvg(art.model);
+        } catch {
+            svg = null;
+        }
+    }
+    if (svg) aside.appendChild(svg);
+    if (layout === 'tree' || layout === 'both' || !svg) {
+        aside.appendChild(renderSmartArtList(roots, 0));
+    }
     return aside;
 }
 
