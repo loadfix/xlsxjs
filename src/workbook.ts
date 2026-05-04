@@ -48,6 +48,11 @@ export class Workbook {
     // Binary media parts (xl/media/*). Kept as data: URLs so the renderer
     // can embed them without a separate fetch.
     media: Record<string, string> = {};
+    // Binary embedded-file payloads under xl/embeddings/*. Kept as raw bytes
+    // (Uint8Array) so the parser can surface size/contentType without paying
+    // the base64 cost; inlined to a data: URL only when Options.inlineEmbeddings
+    // is set by the caller.
+    embeddings: Record<string, Uint8Array> = {};
     parsed: ParsedWorkbook | null = null;
 
     static async load(data: Blob | ArrayBuffer | Uint8Array, parser: WorkbookParser): Promise<Workbook> {
@@ -233,7 +238,32 @@ export class Workbook {
             }
         }
 
-        wb.parsed = parser.parse(wb.parts, wb.media);
+        // xl/embeddings/* — raw bytes for OLE CFB containers (`.bin`) and
+        // packaged real files (.xlsx / .docx / .pdf / …). Surfaced as
+        // Uint8Array so the parser can read byte length + decide whether to
+        // inline; the parser respects MAX_MEDIA_BYTES + the sanitizeMediaMime
+        // allowlist before projecting to a data: URL. Oversized payloads are
+        // still kept in memory at this point (they're the zip's contents; we
+        // don't want to re-open the zip later just to surface a size), but
+        // inlining is capped so the renderer can't generate a multi-GB data
+        // URL. This mirrors the media path.
+        //
+        // [Content_Types].xml is also kept as a string part so the parser can
+        // resolve per-path override MIMEs (e.g. "application/pdf") that
+        // wouldn't otherwise be inferrable from the file extension.
+        const contentTypesXml = await readIfPresent('[Content_Types].xml');
+        if (contentTypesXml) wb.parts['[Content_Types].xml'] = contentTypesXml;
+
+        for (const p of Object.keys(zip.files)) {
+            if (/^xl\/embeddings\/[^/]+$/i.test(p)) {
+                const bin = zip.file(p);
+                if (!bin) continue;
+                const buf = await bin.async('uint8array');
+                wb.embeddings[p] = buf;
+            }
+        }
+
+        wb.parsed = parser.parse(wb.parts, wb.media, wb.embeddings);
         return wb;
     }
 }
@@ -261,6 +291,13 @@ function guessMime(path: string): string {
 // rather than a potentially active resource. Belt-and-braces: guessMime()
 // already produces these strings, but a future refactor that forwards a
 // path-derived MIME must stay within the set.
+//
+// Embeddings (OLE + package rels) reuse the same allowlist: xlsx / docx /
+// pptx / pdf / plain text get through as distinct MIMEs, everything else
+// (including the raw OLE CFB bytes an .bin payload carries) decays to
+// application/octet-stream so the resulting `<a download>` is inert. The
+// renderer still surfaces the detected contentType as a data-attribute so
+// consumers can see the original type even when inlining is rejected.
 const MEDIA_MIME_ALLOWLIST = new Set<string>([
     'image/png',
     'image/jpeg',
@@ -269,10 +306,36 @@ const MEDIA_MIME_ALLOWLIST = new Set<string>([
     'image/webp',
     'image/bmp',
     'image/tiff',
+    // Package embeddings (Wave 8). application/octet-stream + text/plain cover
+    // the generic-file case; the ECMA-376 and PDF MIMEs cover the common
+    // OOXML-family payloads that ship inside another XLSX via a "package" rel.
+    'application/octet-stream',
+    'text/plain',
+    'application/pdf',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    'application/vnd.ms-excel',
+    'application/msword',
+    'application/vnd.ms-powerpoint',
 ]);
 
-function sanitizeMediaMime(mime: string): string {
+export function sanitizeMediaMime(mime: string): string {
     return MEDIA_MIME_ALLOWLIST.has(mime) ? mime : 'application/octet-stream';
+}
+
+// Re-exported so the parser can apply the same 32-MiB cap to embedded
+// payloads when Options.inlineEmbeddings is on.
+export const MAX_EMBEDDING_BYTES = MAX_MEDIA_BYTES;
+
+// Project a raw byte buffer into a `data:` URL, passing the MIME through
+// sanitizeMediaMime first. The parser uses this when Options.inlineEmbeddings
+// is on; it returns null when the buffer exceeds MAX_MEDIA_BYTES (so the
+// renderer knows to fall back to the placeholder without the download link).
+export function bytesToDataUrl(bytes: Uint8Array, mime: string): string | null {
+    if (bytes.byteLength > MAX_MEDIA_BYTES) return null;
+    const safe = sanitizeMediaMime(mime);
+    return `data:${safe};base64,${bytesToBase64(bytes)}`;
 }
 
 // Convert a Uint8Array to base64. We can't rely on Buffer (Node-only) or

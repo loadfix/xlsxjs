@@ -36,29 +36,19 @@
     font-family: inherit; font-size: inherit;
     position: relative; z-index: 1;
 }
-.xlsx .xlsx-form-control {
-    position: absolute;
-    display: inline-flex; align-items: center; gap: 4px;
-    border: 1px dashed #bbb; border-radius: 2px;
-    padding: 2px 6px; margin: 0;
-    color: #333; background: rgba(255, 255, 255, 0.85);
-    font-size: 0.85em; pointer-events: auto;
+.xlsx .xlsx-embedding {
+    border: 1px dashed #b0b0b0; border-radius: 2px;
+    padding: 0.5em; margin: 0.5em 0;
+    color: #555; font-size: 0.9em;
+    background: #fafafa;
 }
-.xlsx .xlsx-form-control[data-kind="button"] {
-    border-style: solid; background: #f3f3f3;
+.xlsx .xlsx-embedding > pre {
+    margin: 0; white-space: pre-wrap;
+    font-family: inherit; font-size: inherit;
 }
-.xlsx .xlsx-form-control[data-kind="groupBox"] {
-    border-style: solid; background: transparent;
-}
-.xlsx .xlsx-form-control[data-kind="scrollbar"],
-.xlsx .xlsx-form-control[data-kind="spinner"] {
-    background: #eef2f7; color: #555;
-}
-.xlsx .xlsx-form-control > .xlsx-form-control-glyph {
-    font-size: 1em; line-height: 1; color: #333;
-}
-.xlsx .xlsx-form-control > legend {
-    font-size: 0.85em; color: #333; padding: 0 4px;
+.xlsx .xlsx-image-layer > .xlsx-embedding {
+    position: absolute; pointer-events: auto;
+    max-width: 320px;
 }
 .xlsx .xlsx-spill-anchor { outline: 1px dashed #0066cc; outline-offset: -1px; }
 .xlsx .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
@@ -82,12 +72,24 @@
     display: grid; grid-template-columns: 1fr 1fr 1fr;
     font-size: 0.85em; color: #666; margin: 0.5em 0;
 }</style>
-<section class="xlsx" data-sheet-name="Dash">
-<div class="xlsx-sheet-name">Dash</div>
+<section class="xlsx" data-sheet-name="Embeds">
+<div class="xlsx-sheet-name">Embeds</div>
+<div class="xlsx-image-layer" style="position: relative; height: 0px; pointer-events: none;">
+<aside class="xlsx-embedding" data-kind="ole" data-progid="Word.Document.12" data-filename="oleObject1.bin" data-content-type="application/vnd.openxmlformats-officedocument.oleObject" data-size="512" data-anchor-col="1" data-anchor-row="1" data-anchor-end-col="3" data-anchor-end-row="3" style="left: 94px; top: 20px;">
+<pre>ole: oleObject1.bin
+type: application/vnd.openxmlformats-officedocument.oleObject
+size: 512 bytes
+progId: Word.Document.12</pre>
+</aside>
+<aside class="xlsx-embedding" data-kind="package" data-progid="Package" data-filename="embedded.txt" data-content-type="text/plain" data-size="31" data-anchor-col="1" data-anchor-row="5" data-anchor-end-col="3" data-anchor-end-row="7" style="left: 94px; top: 100px;">
+<pre>package: embedded.txt
+type: text/plain
+size: 31 bytes
+progId: Package</pre>
+</aside>
+</div>
 <table>
 <colgroup>
-<col>
-<col>
 <col>
 <col>
 </colgroup>
@@ -96,28 +98,37 @@
 <th>
 </th>
 <th>A</th>
-<th>B</th>
-<th>C</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <th>1</th>
-<td>Region</td>
-<td>Date</td>
-<td>Sales</td>
+<td>
+</td>
+</tr>
+<tr>
+<th>2</th>
+<td>OLE Word:</td>
+</tr>
+<tr>
+<th>3</th>
+<td>
+</td>
+</tr>
+<tr>
+<th>4</th>
+<td>
+</td>
+</tr>
+<tr>
+<th>5</th>
+<td>
+</td>
+</tr>
+<tr>
+<th>6</th>
+<td>Package text:</td>
 </tr>
 </tbody>
 </table>
-<aside class="xlsx-slicer" aria-hidden="false" data-name="SlicerRegion" data-caption="Region &quot;A&quot;" data-source="Region" data-style="SlicerStyleLight1">
-<header>Region "A"</header>
-<ul>
-<li>North</li>
-<li>South</li>
-</ul>
-</aside>
-<aside class="xlsx-timeline" aria-hidden="false" data-name="TimelineDate" data-caption="Date" data-source="Date" data-level="months" data-style="TimeSlicerStyleLight1">
-<header>Date</header>
-<span>2023-01-01T00:00:00 → 2023-12-31T00:00:00</span>
-</aside>
 </section>

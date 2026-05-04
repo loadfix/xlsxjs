@@ -2,7 +2,7 @@
 // sheet, each containing an <h2> sheet name and a <table> of the cells.
 // Numeric cells get a numeric-aligned class; other kinds render as text.
 
-import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, SheetShape, SheetSlicer, SheetTimeline, SheetImage, SheetFormControl, RowDimension, ThreadedCommentEntry, Hyperlink, PhoneticRun } from './workbook-parser';
+import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, SheetShape, SheetSlicer, SheetTimeline, SheetImage, SheetEmbedding, SheetFormControl, RowDimension, ThreadedCommentEntry, Hyperlink, PhoneticRun } from './workbook-parser';
 import { isSafeHyperlinkHref } from './workbook-parser';
 import { indexToColumnLetters, emuToPx } from './utils';
 import { h } from './html';
@@ -47,7 +47,13 @@ const GUTTER_WIDTH_PX = 30;
 export class HtmlRenderer {
     async render(workbook: Workbook, options: Options): Promise<Node[]> {
         const nodes: Node[] = [];
-        nodes.push(renderStyle(options.className));
+        // The embedding CSS block is gated on workbook content: the Wave 8
+        // slice deliberately keeps existing golden snapshots stable by only
+        // extending the stylesheet when a workbook actually contains one or
+        // more embeddings. A workbook with zero embeddings renders exactly
+        // the same CSS it did before the feature landed.
+        const hasEmbeddings = workbook.sheets.some((s) => s.embeddings && s.embeddings.length > 0);
+        nodes.push(renderStyle(options.className, { withEmbeddings: hasEmbeddings }));
         for (const sheet of workbook.sheets) {
             // Skip hidden and veryHidden sheets — the demo's sheet-switcher
             // omits them too so section/index pairings stay in sync.
@@ -58,10 +64,28 @@ export class HtmlRenderer {
     }
 }
 
-function renderStyle(className: string): HTMLStyleElement {
+function renderStyle(className: string, opts: { withEmbeddings: boolean } = { withEmbeddings: false }): HTMLStyleElement {
     const style = document.createElement('style');
     style.setAttribute('data-xlsxjs', '');
     // Kept intentionally small — consumers style further via their own CSS.
+    // The embedding-related rules are appended only when the workbook carries
+    // embeddings (see HtmlRenderer.render); that keeps golden snapshots for
+    // embedding-free workbooks byte-stable with pre-Wave-8 output.
+    const embeddingCss = opts.withEmbeddings ? `
+.${className} .xlsx-embedding {
+    border: 1px dashed #b0b0b0; border-radius: 2px;
+    padding: 0.5em; margin: 0.5em 0;
+    color: #555; font-size: 0.9em;
+    background: #fafafa;
+}
+.${className} .xlsx-embedding > pre {
+    margin: 0; white-space: pre-wrap;
+    font-family: inherit; font-size: inherit;
+}
+.${className} .xlsx-image-layer > .xlsx-embedding {
+    position: absolute; pointer-events: auto;
+    max-width: 320px;
+}` : '';
     style.textContent = `
 .${className} { font-family: system-ui, sans-serif; }
 .${className} table { border-collapse: separate; border-spacing: 0; }
@@ -100,7 +124,7 @@ function renderStyle(className: string): HTMLStyleElement {
     margin: 0; white-space: pre-line;
     font-family: inherit; font-size: inherit;
     position: relative; z-index: 1;
-}
+}${embeddingCss}
 .${className} .xlsx-form-control {
     position: absolute;
     display: inline-flex; align-items: center; gap: 4px;
@@ -635,21 +659,25 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
         section.appendChild(caption);
     }
 
-    // Images + form-controls. Each lives inside a zero-height
-    // <div class="xlsx-image-layer"> that sits directly above the table;
-    // twoCell and oneCell anchors compute CSS top/left/width/height by
-    // summing column widths + row heights up to the anchor cell, so the
-    // figure lands on its anchor cell instead of trailing after the table.
-    // absoluteAnchor images keep their EMU-derived pixel offsets. The
-    // anchor coordinates + offsets are still surfaced as data-attributes
-    // so consumers who want a different overlay strategy can read them
-    // off the DOM.
+    // Images, form-controls, and anchored embeddings all live inside a
+    // zero-height <div class="xlsx-image-layer"> that sits directly above the
+    // table. twoCell and oneCell anchors compute CSS top/left/width/height by
+    // summing column widths + row heights up to the anchor cell, so the figure
+    // lands on its anchor cell instead of trailing after the table. absoluteAnchor
+    // images keep their EMU-derived pixel offsets. The anchor coordinates +
+    // offsets are still surfaced as data-attributes so consumers who want a
+    // different overlay strategy can read them off the DOM.
     //
     // Form controls piggyback on this layer with the same anchor math —
     // xlsxjs only surfaces detect-only metadata (kind + linkedCell /
     // checked / min / max / etc.) as data attributes on an <aside>; no
     // interactive widget is painted.
-    if (sheet.images.length > 0 || sheet.formControls.length > 0) {
+    //
+    // Unanchored embeddings (producers that skip objectPr/anchor) fall through
+    // to the section-level render step after the table.
+    const anchoredEmbeddings = sheet.embeddings.filter((e) => e.col !== null && e.row !== null);
+    const unanchoredEmbeddings = sheet.embeddings.filter((e) => e.col === null || e.row === null);
+    if (sheet.images.length > 0 || sheet.formControls.length > 0 || anchoredEmbeddings.length > 0) {
         const imageLayer = document.createElement('div');
         imageLayer.className = 'xlsx-image-layer';
         // position:relative + height:0 so the layer establishes a positioning
@@ -664,6 +692,18 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
         }
         for (const fc of sheet.formControls) {
             imageLayer.appendChild(renderFormControl(fc, widthByCol, hiddenCols, rowDim));
+        }
+        for (const emb of anchoredEmbeddings) {
+            const aside = renderEmbedding(emb);
+            // Anchored embeddings pick up the same sum-of-col/row geometry as
+            // anchored images so they sit on their cell rather than stacking
+            // at 0,0. EMU offsets aren't carried on oleObject refs — just
+            // the cell index pair — so we skip colOff/rowOff here.
+            const left = GUTTER_WIDTH_PX + sumColsPx(emb.col as number, widthByCol, hiddenCols);
+            const top = sumRowsPx(emb.row as number, rowDim);
+            aside.style.left = `${left}px`;
+            aside.style.top = `${top}px`;
+            imageLayer.appendChild(aside);
         }
         // Insert the layer directly before the <table> so the anchor-cell
         // geometry in CSS lines up with the table's laid-out grid.
@@ -709,6 +749,15 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
     }
     for (const timeline of sheet.timelines) {
         section.appendChild(renderTimeline(timeline));
+    }
+
+    // Unanchored embeddings. Anchor-less <oleObject> rels (e.g. producers that
+    // skip the objectPr/anchor block) can't be placed on the image overlay,
+    // so they land after the table as in-flow placeholders. The fileName +
+    // contentType + size + progId all reach the DOM via setAttribute /
+    // textContent only so attacker-controlled strings can't escape.
+    for (const emb of unanchoredEmbeddings) {
+        section.appendChild(renderEmbedding(emb));
     }
 
     // Header / footer — rendered as 3-column grids after the table. Zone
@@ -1027,6 +1076,54 @@ function renderTimeline(timeline: SheetTimeline): HTMLElement {
             label.textContent = `${start ?? ''} → ${end ?? ''}`;
             aside.appendChild(label);
         }
+    }
+    return aside;
+}
+
+// Build an <aside class="xlsx-embedding"> for one detected embedding. Name,
+// progId, contentType, filename are all attacker-controlled XLSX strings —
+// they reach the DOM via setAttribute / textContent only. When dataUrl is
+// populated (opt-in via Options.inlineEmbeddings), a sibling `<a download>`
+// surfaces so consumers can retrieve the payload; the href lives on the
+// sanitized data: URL from bytesToDataUrl, and the download attribute pins
+// the filename so the browser doesn't fall back to the raw data: body.
+function renderEmbedding(emb: SheetEmbedding): HTMLElement {
+    const aside = document.createElement('aside');
+    aside.className = 'xlsx-embedding';
+    aside.setAttribute('data-kind', emb.kind);
+    if (emb.progId) aside.setAttribute('data-progid', emb.progId);
+    if (emb.fileName) aside.setAttribute('data-filename', emb.fileName);
+    aside.setAttribute('data-content-type', emb.contentType);
+    aside.setAttribute('data-size', String(emb.size));
+    if (emb.col !== null) aside.setAttribute('data-anchor-col', String(emb.col));
+    if (emb.row !== null) aside.setAttribute('data-anchor-row', String(emb.row));
+    if (emb.endCol !== null) aside.setAttribute('data-anchor-end-col', String(emb.endCol));
+    if (emb.endRow !== null) aside.setAttribute('data-anchor-end-row', String(emb.endRow));
+    if (emb.altText) aside.setAttribute('aria-label', emb.altText);
+
+    // Summary block — one line per facet. textContent only.
+    const pre = document.createElement('pre');
+    const lines: string[] = [];
+    lines.push(`${emb.kind}: ${emb.fileName ?? '(no filename)'}`);
+    lines.push(`type: ${emb.contentType}`);
+    lines.push(`size: ${emb.size} bytes`);
+    if (emb.progId) lines.push(`progId: ${emb.progId}`);
+    pre.textContent = lines.join('\n');
+    aside.appendChild(pre);
+
+    // Opt-in download link. The dataUrl is already sanitized (see
+    // bytesToDataUrl) — we only emit an <a> when the projection succeeded.
+    // The download filename comes from the rel target; if absent (rare), we
+    // derive one from the contentType so the browser still picks something
+    // sensible. `rel="noopener"` is belt-and-braces for producers that plumb
+    // `target="_blank"` on top.
+    if (emb.dataUrl) {
+        const a = document.createElement('a');
+        a.href = emb.dataUrl;
+        a.setAttribute('download', emb.fileName ?? 'embedded');
+        a.setAttribute('rel', 'noopener');
+        a.textContent = `Download ${emb.fileName ?? 'embedded file'}`;
+        aside.appendChild(a);
     }
     return aside;
 }
