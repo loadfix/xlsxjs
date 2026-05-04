@@ -4136,6 +4136,147 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 108. radar-labels: radar + doughnut + data-label annotations ────────
+// Fixture anchors three classic c:chartSpace charts on a single sheet:
+//   · chart1 — radar ("Skill Matrix") — 2 series × 5 categories, no data
+//       labels. The renderer should emit concentric gridline polygons,
+//       one radial-axis <line> per category, and a series polygon per
+//       series.
+//   · chart2 — doughnut ("Budget Split") — 1 series × 4 slices. Each
+//       slice renders as a <path> whose `d` uses two A (arc) commands
+//       (outer arc + inner arc in reverse) because of the inner-radius
+//       cutout.
+//   · chart3 — column ("Revenue with Labels") — 2 series × 4 categories,
+//       with a chart-level <c:dLbls> carrying showVal=1 + dLblPos=outEnd.
+//       Every series should inherit the flags, so the renderer emits one
+//       <text class="xlsx-chart-data-label"> per rect (8 total).
+// The parser exposes dataLabels { show, position } per series; the
+// renderer translates that to data-label text nodes at the wired
+// position.
+{
+    const { wb, container } = await renderFixture('radar-labels');
+    const sheet = wb.parsed.sheets[0];
+    assert(Array.isArray(sheet.charts) && sheet.charts.length === 3,
+        `108a: expected 3 charts (got ${sheet.charts?.length})`);
+
+    const byPlot = new Map();
+    for (const ch of sheet.charts) if (ch.model) byPlot.set(ch.model.kind, ch);
+
+    const radar = byPlot.get('radar');
+    const doughnut = byPlot.get('doughnut');
+    const col = byPlot.get('column');
+    assert(radar, '108b: a radar-kind chart should be present');
+    assert(doughnut, '108c: a doughnut-kind chart should be present');
+    assert(col, '108d: a column-kind chart (with labels) should be present');
+
+    if (radar?.model) {
+        assert(radar.model.title === 'Skill Matrix',
+            `108e: radar title should round-trip (got ${JSON.stringify(radar.model.title)})`);
+        assert(JSON.stringify(radar.model.categories) === JSON.stringify(['Python', 'JS', 'Rust', 'SQL', 'Go']),
+            `108f: radar categories should round-trip (got ${JSON.stringify(radar.model.categories)})`);
+        assert(radar.model.series.length === 2,
+            `108g: radar should have 2 series (got ${radar.model.series.length})`);
+        assert(radar.model.series[0]?.dataLabels?.show === false,
+            `108h: radar series[0] dataLabels.show should be false (got ${JSON.stringify(radar.model.series[0]?.dataLabels)})`);
+        assert(JSON.stringify(radar.model.series[0]?.values) === JSON.stringify([8, 9, 6, 7, 5]),
+            `108i: radar series[0] values should round-trip (got ${JSON.stringify(radar.model.series[0]?.values)})`);
+    }
+
+    if (doughnut?.model) {
+        assert(doughnut.model.title === 'Budget Split',
+            `108j: doughnut title should round-trip (got ${JSON.stringify(doughnut.model.title)})`);
+        assert(JSON.stringify(doughnut.model.categories) === JSON.stringify(['Engineering', 'Marketing', 'Sales', 'Ops']),
+            `108k: doughnut categories should round-trip (got ${JSON.stringify(doughnut.model.categories)})`);
+        assert(doughnut.model.series.length === 1,
+            `108l: doughnut should have 1 series (got ${doughnut.model.series.length})`);
+        assert(JSON.stringify(doughnut.model.series[0]?.values) === JSON.stringify([45, 20, 25, 10]),
+            `108m: doughnut values should round-trip (got ${JSON.stringify(doughnut.model.series[0]?.values)})`);
+    }
+
+    if (col?.model) {
+        assert(col.model.title === 'Revenue with Labels',
+            `108n: column title should round-trip (got ${JSON.stringify(col.model.title)})`);
+        assert(col.model.series.length === 2,
+            `108o: column should have 2 series (got ${col.model.series.length})`);
+        // Chart-level <c:dLbls> should propagate to every series.
+        assert(col.model.series[0]?.dataLabels?.show === true,
+            `108p: column series[0] dataLabels.show should be true (got ${JSON.stringify(col.model.series[0]?.dataLabels)})`);
+        assert(col.model.series[0]?.dataLabels?.position === 'outEnd',
+            `108q: column series[0] dataLabels.position should be "outEnd" (got ${JSON.stringify(col.model.series[0]?.dataLabels?.position)})`);
+        assert(col.model.series[1]?.dataLabels?.show === true,
+            `108r: column series[1] dataLabels.show should be true (got ${JSON.stringify(col.model.series[1]?.dataLabels)})`);
+    }
+
+    // DOM assertions.
+    const figures = container.querySelectorAll('section.xlsx figure.xlsx-chart');
+    assert(figures.length === 3,
+        `108s: expected 3 chart figures (got ${figures.length})`);
+    const placeholders = container.querySelectorAll('section.xlsx .xlsx-chart-placeholder');
+    assert(placeholders.length === 0,
+        `108t: no dashed chart placeholder should remain (got ${placeholders.length})`);
+
+    const figByPlot = new Map();
+    for (const f of figures) figByPlot.set(f.getAttribute('data-chart-plot'), f);
+
+    // Radar: polygon gridlines + series polygons + radial-axis lines.
+    const radarFig = figByPlot.get('radar');
+    if (radarFig) {
+        const polygons = radarFig.querySelectorAll('polygon');
+        assert(polygons.length >= 2,
+            `108u: radar should emit >=2 polygons (gridlines + series; got ${polygons.length})`);
+        const serGroups = radarFig.querySelectorAll('g.xlsx-chart-series');
+        assert(serGroups.length === 2,
+            `108v: radar should emit 2 series groups (got ${serGroups.length})`);
+        // Radial-axis lines — expect at least as many <line>s inside the
+        // radial-axes group as there are categories (5). We count all
+        // lines under the axes group rather than the whole SVG so the
+        // assertion is specific to the radar structure.
+        const axesGroup = radarFig.querySelector('g.xlsx-chart-radar-axes');
+        assert(!!axesGroup, '108w: radar should emit a .xlsx-chart-radar-axes group');
+        if (axesGroup) {
+            const axisLines = axesGroup.querySelectorAll('line');
+            assert(axisLines.length >= 5,
+                `108x: radar should emit >=5 radial-axis <line>s (got ${axisLines.length})`);
+        }
+    } else {
+        assert(false, '108u.pre: no figure with data-chart-plot=radar');
+    }
+
+    // Doughnut: 4 <path>s, each carrying two A commands in its d.
+    const doughnutFig = figByPlot.get('doughnut');
+    if (doughnutFig) {
+        const paths = doughnutFig.querySelectorAll('path');
+        assert(paths.length >= 4,
+            `108y: doughnut should emit >=4 <path>s (one per slice; got ${paths.length})`);
+        let sliceCount = 0;
+        for (const p of paths) {
+            const d = p.getAttribute('d') || '';
+            const arcs = (d.match(/[A]/g) || []).length;
+            if (arcs >= 2) sliceCount++;
+        }
+        assert(sliceCount >= 4,
+            `108z: doughnut should have >=4 paths with two A commands each (got ${sliceCount})`);
+    } else {
+        assert(false, '108y.pre: no figure with data-chart-plot=doughnut');
+    }
+
+    // Column with data labels: one <text class="xlsx-chart-data-label">
+    // per rect (2 series × 4 categories = 8 labels).
+    const colFig = figByPlot.get('column');
+    if (colFig) {
+        const labels = colFig.querySelectorAll('text.xlsx-chart-data-label');
+        assert(labels.length === 8,
+            `108aa: column-with-labels should emit 8 data-label <text>s (got ${labels.length})`);
+        const labelTexts = Array.from(labels).map((t) => t.textContent);
+        assert(labelTexts.includes('120'),
+            `108ab: at least one data label should read "120" (got ${JSON.stringify(labelTexts)})`);
+        assert(labelTexts.includes('260'),
+            `108ac: at least one data label should read "260" (got ${JSON.stringify(labelTexts)})`);
+    } else {
+        assert(false, '108aa.pre: no figure with data-chart-plot=column');
+    }
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

@@ -1,6 +1,7 @@
-// ChartModel → inline SVG. First-pass renderer: bar / column / line / pie.
-// Unknown / unsupported kinds return null so callers can fall through to
-// the dashed placeholder.
+// ChartModel → inline SVG. Renderer covers bar / column / line / pie /
+// doughnut / scatter / area / radar plus per-series data labels. Unknown
+// / unsupported kinds return null so callers can fall through to the
+// dashed placeholder.
 //
 // Security contract:
 //   · All XLSX-derived strings (title, series names, category labels) reach
@@ -23,6 +24,7 @@
 //     `model.legend`. `none` suppresses the legend entirely.
 
 import type { ChartModel, ChartSeries } from './chart-parser';
+import { formatNumber } from './number-format';
 
 export type { ChartModel, ChartSeries } from './chart-parser';
 
@@ -371,6 +373,20 @@ function renderColumn(model: ChartModel, layout: Layout, svg: SVGSVGElement): vo
                 x, y, width: Math.max(0, barW - 1), height: Math.max(0, h),
                 fill: color,
             }));
+            // Data labels. Honour `outEnd` (above the rect), `ctr` (centre),
+            // `inBase` (just above the baseline / bottom of the rect). Default
+            // to `outEnd` when the producer asked for labels but didn't pick
+            // a position. Skip null / zero-height rects — there's nothing to
+            // label there.
+            if (s.dataLabels?.show && vRawFinite !== null) {
+                const pos = s.dataLabels.position ?? 'outEnd';
+                const cx = x + Math.max(0, barW - 1) / 2;
+                let ly: number;
+                if (pos === 'ctr') ly = y + h / 2 + 3;
+                else if (pos === 'inBase') ly = y + h - 3;
+                else ly = y - 3; // outEnd
+                appendDataLabel(group, cx, ly, formatDataLabel(vRawFinite), 'middle');
+            }
         }
         svg.appendChild(group);
     });
@@ -523,6 +539,16 @@ function renderBar(model: ChartModel, layout: Layout, svg: SVGSVGElement): void 
                 x, y, width: Math.max(0, w), height: Math.max(0, barH - 1),
                 fill: color,
             }));
+            if (s.dataLabels?.show && v !== null) {
+                const pos = s.dataLabels.position ?? 'outEnd';
+                const cy = y + Math.max(0, barH - 1) / 2 + 3;
+                let lx: number;
+                let anchor = 'start';
+                if (pos === 'ctr') { lx = x + w / 2; anchor = 'middle'; }
+                else if (pos === 'inBase') { lx = x + 3; anchor = 'start'; }
+                else { lx = x + w + 3; anchor = 'start'; } // outEnd
+                appendDataLabel(group, lx, cy, formatDataLabel(v), anchor);
+            }
         }
         svg.appendChild(group);
     });
@@ -578,6 +604,16 @@ function renderLine(model: ChartModel, layout: Layout, svg: SVGSVGElement): void
                     cx: pointX(ci), cy: pointY(v), r: 3,
                     fill: color,
                 }));
+                if (s.dataLabels?.show) {
+                    // Default slightly above each marker. `b` flips to below,
+                    // `ctr` centres on the marker.
+                    const pos = s.dataLabels.position ?? 't';
+                    let ly: number;
+                    if (pos === 'b') ly = pointY(v) + 14;
+                    else if (pos === 'ctr') ly = pointY(v) + 3;
+                    else ly = pointY(v) - 6; // t / outEnd / default
+                    appendDataLabel(group, pointX(ci), ly, formatDataLabel(v), 'middle');
+                }
             }
         }
         svg.appendChild(group);
@@ -775,6 +811,23 @@ function renderArea(model: ChartModel, layout: Layout, svg: SVGSVGElement): void
 // standard M (centre) → L (first vertex) → A (arc) → Z (close) command
 // sequence. Legend sits alongside using the category labels as entry names.
 function renderPie(model: ChartModel, layout: Layout, svg: SVGSVGElement): void {
+    renderPieLike(model, layout, svg, 0);
+}
+
+// Doughnut chart. Same slicing as pie but with an inner-radius cutout: the
+// slice path traces the outer arc, cuts inward, traces the inner arc in the
+// opposite direction, and closes. Inner radius ~50% of outer per Excel's
+// default holeSize=50. Multiple series are parsed but only the first ring
+// paints — concentric rings are deferred to a later wave.
+function renderDoughnut(model: ChartModel, layout: Layout, svg: SVGSVGElement): void {
+    renderPieLike(model, layout, svg, 0.5);
+}
+
+// Unified pie / doughnut renderer. `innerRatio` = 0 for pie, 0.5 for
+// doughnut (fraction of the outer radius left hollow in the centre).
+function renderPieLike(
+    model: ChartModel, layout: Layout, svg: SVGSVGElement, innerRatio: number,
+): void {
     const series = model.series[0];
     if (!series) return;
     const values = series.values
@@ -786,7 +839,8 @@ function renderPie(model: ChartModel, layout: Layout, svg: SVGSVGElement): void 
     const size = Math.min(layout.plotW, layout.plotH);
     const cx = layout.plotX + layout.plotW / 2;
     const cy = layout.plotY + layout.plotH / 2;
-    const r = size / 2 - 4;
+    const rOuter = size / 2 - 4;
+    const rInner = innerRatio > 0 ? rOuter * innerRatio : 0;
 
     const group = document.createElementNS(SVG_NS, 'g');
     group.setAttribute('class', 'xlsx-chart-series');
@@ -809,12 +863,29 @@ function renderPie(model: ChartModel, layout: Layout, svg: SVGSVGElement): void 
         const startAngle = (acc / total) * Math.PI * 2 - Math.PI / 2;
         acc += v;
         const endAngle = (acc / total) * Math.PI * 2 - Math.PI / 2;
-        const x1 = cx + r * Math.cos(startAngle);
-        const y1 = cy + r * Math.sin(startAngle);
-        const x2 = cx + r * Math.cos(endAngle);
-        const y2 = cy + r * Math.sin(endAngle);
+        const x1 = cx + rOuter * Math.cos(startAngle);
+        const y1 = cy + rOuter * Math.sin(startAngle);
+        const x2 = cx + rOuter * Math.cos(endAngle);
+        const y2 = cy + rOuter * Math.sin(endAngle);
         const large = endAngle - startAngle > Math.PI ? 1 : 0;
-        const d = `M ${cx} ${cy} L ${x1.toFixed(2)} ${y1.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} Z`;
+
+        let d: string;
+        if (rInner > 0) {
+            // Doughnut slice. Trace outer arc (CW), then line inward, then
+            // inner arc (CCW back to start), then close. Two A commands
+            // total.
+            const ix2 = cx + rInner * Math.cos(endAngle);
+            const iy2 = cy + rInner * Math.sin(endAngle);
+            const ix1 = cx + rInner * Math.cos(startAngle);
+            const iy1 = cy + rInner * Math.sin(startAngle);
+            d = `M ${x1.toFixed(2)} ${y1.toFixed(2)} `
+              + `A ${rOuter} ${rOuter} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} `
+              + `L ${ix2.toFixed(2)} ${iy2.toFixed(2)} `
+              + `A ${rInner} ${rInner} 0 ${large} 0 ${ix1.toFixed(2)} ${iy1.toFixed(2)} Z`;
+        } else {
+            d = `M ${cx} ${cy} L ${x1.toFixed(2)} ${y1.toFixed(2)} A ${rOuter} ${rOuter} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} Z`;
+        }
+
         const color = PALETTE[i % PALETTE.length];
         const path = el('path', {
             d,
@@ -823,11 +894,25 @@ function renderPie(model: ChartModel, layout: Layout, svg: SVGSVGElement): void 
             'stroke-width': 1,
         });
         group.appendChild(path);
+
+        // Data labels — one per slice. Position derived from dataLabels:
+        //   · ctr  → midpoint at radius 0.65 * rOuter (or between rInner and rOuter for doughnut)
+        //   · outEnd → just outside the outer arc (radius 1.1 * rOuter)
+        if (series.dataLabels?.show) {
+            const mid = (startAngle + endAngle) / 2;
+            const pos = series.dataLabels.position ?? 'ctr';
+            const rLabel = pos === 'outEnd'
+                ? rOuter * 1.1
+                : (rInner > 0 ? (rInner + rOuter) / 2 : rOuter * 0.65);
+            const lx = cx + rLabel * Math.cos(mid);
+            const ly = cy + rLabel * Math.sin(mid) + 3;
+            appendDataLabel(group, lx, ly, formatDataLabel(v), 'middle');
+        }
     });
     svg.appendChild(group);
 
-    // Category legend — for pie charts the categories are the "series names"
-    // from the viewer's perspective, so we fabricate a legend of
+    // Category legend — for pie / doughnut the categories are the "series
+    // names" from the viewer's perspective, so we fabricate a legend of
     // {swatch, category}.
     if (model.legend !== 'none' && model.categories.length) {
         const legend = document.createElementNS(SVG_NS, 'g');
@@ -851,6 +936,143 @@ function renderPie(model: ChartModel, layout: Layout, svg: SVGSVGElement): void 
         });
         svg.appendChild(legend);
     }
+}
+
+// Radar chart. N categories fan out from the centre along radial axes
+// spaced evenly around a full turn. Each series traces a closed polygon
+// through one vertex per category (radius = value / axisMax). Concentric
+// polygonal gridlines sit underneath at 25%/50%/75%/100% of the axis max,
+// and one `<line>` axis per category runs from the centre to its outermost
+// vertex.
+function renderRadar(model: ChartModel, layout: Layout, svg: SVGSVGElement): void {
+    const n = Math.max(model.categories.length, ...model.series.map((s) => s.values.length));
+    if (n === 0) return;
+
+    const { max } = seriesRange(model.series);
+    const axisMax = max > 0 ? niceMax(max) : 1;
+
+    const size = Math.min(layout.plotW, layout.plotH);
+    const cx = layout.plotX + layout.plotW / 2;
+    const cy = layout.plotY + layout.plotH / 2;
+    const rOuter = size / 2 - 20;
+
+    // Angle for category i. Start at 12 o'clock (-π/2) and go clockwise.
+    const angleFor = (i: number) => -Math.PI / 2 + (i / n) * Math.PI * 2;
+    const vertexAt = (i: number, rFrac: number) => ({
+        x: cx + rOuter * rFrac * Math.cos(angleFor(i)),
+        y: cy + rOuter * rFrac * Math.sin(angleFor(i)),
+    });
+
+    // Gridlines: concentric polygons at 25/50/75/100% of the axis max.
+    const gridGroup = document.createElementNS(SVG_NS, 'g');
+    gridGroup.setAttribute('class', 'xlsx-chart-radar-grid');
+    const ticks = [0.25, 0.5, 0.75, 1];
+    for (const rFrac of ticks) {
+        const pts: string[] = [];
+        for (let i = 0; i < n; i++) {
+            const p = vertexAt(i, rFrac);
+            pts.push(`${p.x.toFixed(2)},${p.y.toFixed(2)}`);
+        }
+        gridGroup.appendChild(el('polygon', {
+            points: pts.join(' '),
+            fill: 'none',
+            stroke: GRID_COLOR,
+            'stroke-width': 1,
+        }));
+    }
+    svg.appendChild(gridGroup);
+
+    // Radial axes (one per category) + category labels at the outer tips.
+    const axesGroup = document.createElementNS(SVG_NS, 'g');
+    axesGroup.setAttribute('class', 'xlsx-chart-radar-axes');
+    const categoryLabels = model.categories.length ? model.categories
+        : Array.from({ length: n }, (_, i) => String(i + 1));
+    for (let i = 0; i < n; i++) {
+        const outer = vertexAt(i, 1);
+        axesGroup.appendChild(el('line', {
+            x1: cx, y1: cy,
+            x2: outer.x, y2: outer.y,
+            stroke: AXIS_COLOR, 'stroke-width': 1,
+        }));
+        // Label: push slightly past the outer vertex.
+        const labelPt = vertexAt(i, 1.1);
+        const anchor = Math.abs(labelPt.x - cx) < 1 ? 'middle'
+            : (labelPt.x < cx ? 'end' : 'start');
+        axesGroup.appendChild(textEl(labelPt.x, labelPt.y + 4, categoryLabels[i] ?? '', {
+            'text-anchor': anchor, 'font-size': '10',
+        }));
+    }
+    svg.appendChild(axesGroup);
+
+    // Series polygons.
+    model.series.forEach((s, si) => {
+        const group = document.createElementNS(SVG_NS, 'g');
+        group.setAttribute('class', 'xlsx-chart-series');
+        group.setAttribute('data-series-index', String(si));
+        if (s.name) group.setAttribute('data-series-name', sanitiseForAttr(s.name));
+        const color = colorFor(s, si);
+        const pts: string[] = [];
+        const vertices: { x: number; y: number; v: number }[] = [];
+        for (let i = 0; i < n; i++) {
+            const vRaw = s.values[i];
+            const v = vRaw !== null && vRaw !== undefined && Number.isFinite(vRaw) ? vRaw : 0;
+            const rFrac = axisMax > 0 ? Math.max(0, v / axisMax) : 0;
+            const p = vertexAt(i, rFrac);
+            pts.push(`${p.x.toFixed(2)},${p.y.toFixed(2)}`);
+            vertices.push({ x: p.x, y: p.y, v });
+        }
+        if (pts.length) {
+            group.appendChild(el('polygon', {
+                points: pts.join(' '),
+                fill: color,
+                'fill-opacity': 0.3,
+                stroke: color,
+                'stroke-width': 2,
+            }));
+            // Marker circles at each vertex.
+            for (const vx of vertices) {
+                group.appendChild(el('circle', {
+                    cx: vx.x.toFixed(2), cy: vx.y.toFixed(2), r: 3, fill: color,
+                }));
+            }
+            // Data labels at each vertex (offset outward along the axis).
+            if (s.dataLabels?.show) {
+                for (let i = 0; i < n; i++) {
+                    const vx = vertices[i];
+                    // Push the label slightly outward from the centre so it
+                    // sits just past the marker.
+                    const a = angleFor(i);
+                    const lx = vx.x + Math.cos(a) * 8;
+                    const ly = vx.y + Math.sin(a) * 8 + 3;
+                    appendDataLabel(group, lx, ly, formatDataLabel(vx.v), 'middle');
+                }
+            }
+        }
+        svg.appendChild(group);
+    });
+}
+
+// Project a numeric value to its display-text form for a data label.
+// `formatNumber` with 'General' mirrors how xlsxjs presents numbers in the
+// sheet grid — this is the first-cut rendering; per-chart number format
+// codes (`<c:numFmt>`) are a future slice.
+function formatDataLabel(v: number): string {
+    if (!Number.isFinite(v)) return '';
+    return formatNumber(String(v), 'General').text;
+}
+
+// Append a single data-label `<text>` to the given parent group. The caller
+// supplies the position (x, y) and text-anchor; this function applies the
+// class + font styling + textContent (never innerHTML).
+function appendDataLabel(
+    parent: SVGElement, x: number, y: number, text: string, anchor: string,
+): void {
+    const t = textEl(x, y, text, {
+        'text-anchor': anchor,
+        'font-size': '10',
+    });
+    t.setAttribute('class', 'xlsx-chart-data-label');
+    parent.appendChild(t);
 }
 
 // Strip control characters and cap length for data-* attribute safety.
@@ -896,12 +1118,19 @@ export function renderChart(model: ChartModel, width: number = 480, height: numb
         case 'pie':
             renderPie(model, layout, svg);
             return svg;
+        case 'doughnut':
+            renderDoughnut(model, layout, svg);
+            return svg;
         case 'scatter':
             renderScatter(model, layout, svg);
             appendLegend(svg, model, layout);
             return svg;
         case 'area':
             renderArea(model, layout, svg);
+            appendLegend(svg, model, layout);
+            return svg;
+        case 'radar':
+            renderRadar(model, layout, svg);
             appendLegend(svg, model, layout);
             return svg;
         default:

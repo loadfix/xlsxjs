@@ -45,6 +45,7 @@ const fixtures = [
     'page-layout',
     'phonetics',
     'python-xlsx',
+    'radar-labels',
     'richtext',
     'shape-presets',
     'shapes-and-textboxes',

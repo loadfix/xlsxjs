@@ -4,10 +4,10 @@
 // `kind: 'unknown'` model so callers can fall through to the dashed
 // placeholder without throwing.
 //
-// Scope is deliberately narrow — just the common chart kinds needed for a
-// first rendering pass: bar (horizontal), column (vertical bar), line, pie,
-// scatter, and area. Everything else (3D, stock, bubble, surface, radar,
-// chartEx) decays to `kind: 'unknown'`.
+// Scope is deliberately narrow — just the common chart kinds: bar
+// (horizontal), column (vertical bar), line, pie, doughnut, scatter, area,
+// and radar. Everything else (3D, stock, bubble, surface, chartEx) decays
+// to `kind: 'unknown'`.
 //
 // Attacker surface: title / category / series-name strings all reach the
 // renderer as plain string model fields; the renderer is responsible for
@@ -29,10 +29,16 @@ export interface ChartSeries {
     // Leave null when the chart XML doesn't spell one out — the renderer
     // assigns a palette colour by series index.
     color: string | null;
+    // Data-label configuration for this series. `show` is true when a
+    // `<c:showVal val="1"/>` (or a parent chart-level `<c:dLbls>`) flagged
+    // the series. `position` picks up `<c:dLblPos val="…"/>` (ctr, outEnd,
+    // t, b, l, r, inBase, inEnd, bestFit). Chart-level dLbls inherit to
+    // every series; per-series dLbls overrides.
+    dataLabels: { show: boolean; position: string | null };
 }
 
 export interface ChartModel {
-    kind: 'bar' | 'column' | 'line' | 'pie' | 'scatter' | 'area' | 'unknown';
+    kind: 'bar' | 'column' | 'line' | 'pie' | 'scatter' | 'area' | 'radar' | 'doughnut' | 'unknown';
     title: string | null;
     categories: string[];
     series: ChartSeries[];
@@ -227,7 +233,12 @@ function parseSeriesColor(ser: Element): string | null {
 // `kind` influences which coordinate streams to read — scatter pulls
 // `<c:yVal>` into `values` and `<c:xVal>` into `xValues`; everything else
 // reads the single `<c:val>` stream and leaves `xValues` null.
-function parseSer(ser: Element, fallbackCategories: string[] | null, kind: ChartModel['kind']): ChartSeries {
+function parseSer(
+    ser: Element,
+    fallbackCategories: string[] | null,
+    kind: ChartModel['kind'],
+    chartLevelLabels: { show: boolean; position: string | null },
+): ChartSeries {
     let values: (number | null)[];
     let xValues: (number | null)[] | null;
     if (kind === 'scatter') {
@@ -246,11 +257,70 @@ function parseSer(ser: Element, fallbackCategories: string[] | null, kind: Chart
         values,
         xValues,
         color: parseSeriesColor(ser),
+        dataLabels: parseSeriesDataLabels(ser, chartLevelLabels),
     };
     // `fallbackCategories` is unused here — categories come from the first
     // series and are hoisted by `parseChart`. Parameter kept for call-site
     // clarity in future extensions (e.g. per-series category refinement).
     void fallbackCategories;
+}
+
+// Read a `<c:dLbls>` block — either chart-level (on the plot element) or
+// per-series (inside `<c:ser>`). `<c:showVal val="1"/>` anywhere under the
+// block flags the labels as visible; `<c:dLblPos val="…"/>` pulls a
+// position keyword. Missing / malformed values return the defaults
+// { show: false, position: null }.
+function parseDataLabelsBlock(block: Element | null): { show: boolean; position: string | null } {
+    if (!block) return { show: false, position: null };
+    let show = false;
+    let position: string | null = null;
+    // Walk direct children first, then dLbl-scoped nested children — the
+    // chart-level `<c:dLbls>` may wrap its flags inside `<c:dLbl>` siblings
+    // but the common shape xlsxjs reads is the flat form used by Excel.
+    for (let i = 0; i < block.childNodes.length; i++) {
+        const node = block.childNodes[i];
+        if (node.nodeType !== 1) continue;
+        const el = node as Element;
+        if (el.namespaceURI !== NS_C) continue;
+        if (el.localName === 'showVal') {
+            if (el.getAttribute('val') === '1') show = true;
+        } else if (el.localName === 'dLblPos') {
+            const v = el.getAttribute('val');
+            if (v) position = v;
+        } else if (el.localName === 'dLbl') {
+            // A per-point override — read the same two flags so the chart
+            // can still opt in via a sibling dLbl.
+            for (let j = 0; j < el.childNodes.length; j++) {
+                const c = el.childNodes[j];
+                if (c.nodeType !== 1) continue;
+                const ce = c as Element;
+                if (ce.namespaceURI !== NS_C) continue;
+                if (ce.localName === 'showVal' && ce.getAttribute('val') === '1') show = true;
+                if (ce.localName === 'dLblPos') {
+                    const v = ce.getAttribute('val');
+                    if (v && position === null) position = v;
+                }
+            }
+        }
+    }
+    return { show, position };
+}
+
+// Per-series data labels. Looks at `<c:ser>/<c:dLbls>`. If the series
+// doesn't declare its own block, the chart-level defaults flow through.
+// When the series does declare a block, its flags win for keys it sets;
+// unset keys still inherit.
+function parseSeriesDataLabels(
+    ser: Element,
+    chartLevel: { show: boolean; position: string | null },
+): { show: boolean; position: string | null } {
+    const block = firstChild(ser, NS_C, 'dLbls');
+    if (!block) return { show: chartLevel.show, position: chartLevel.position };
+    const perSer = parseDataLabelsBlock(block);
+    return {
+        show: perSer.show || chartLevel.show,
+        position: perSer.position ?? chartLevel.position,
+    };
 }
 
 // Grouping (`standard` | `stacked` | `percentStacked`) applies to bar,
@@ -332,12 +402,15 @@ function dispatchChart(plotArea: Element): { kind: ChartModel['kind']; sers: Ele
             case 'lineChart':
                 return { kind: 'line', sers: directChildren(el, NS_C, 'ser'), plotEl: el };
             case 'pieChart':
-            case 'doughnutChart':
                 return { kind: 'pie', sers: directChildren(el, NS_C, 'ser'), plotEl: el };
+            case 'doughnutChart':
+                return { kind: 'doughnut', sers: directChildren(el, NS_C, 'ser'), plotEl: el };
             case 'scatterChart':
                 return { kind: 'scatter', sers: directChildren(el, NS_C, 'ser'), plotEl: el };
             case 'areaChart':
                 return { kind: 'area', sers: directChildren(el, NS_C, 'ser'), plotEl: el };
+            case 'radarChart':
+                return { kind: 'radar', sers: directChildren(el, NS_C, 'ser'), plotEl: el };
             default:
                 continue;
         }
@@ -397,10 +470,19 @@ export function parseChart(xml: string, sharedStrings: SharedString[]): ChartMod
         }
     }
 
-    const series: ChartSeries[] = sers.map((ser) => parseSer(ser, categories, kind));
+    // Chart-level `<c:dLbls>` sits directly under the plot element (e.g.
+    // inside `<c:barChart>`). It applies to every series unless the series
+    // declares its own `<c:dLbls>`. When it's absent we pass { show: false,
+    // position: null } through so individual series still pick up their own
+    // flags or decay to the defaults.
+    const chartLevelLabels = plotEl
+        ? parseDataLabelsBlock(firstChild(plotEl, NS_C, 'dLbls'))
+        : { show: false, position: null };
 
-    // Grouping applies to bar / column / line / area. Pie / scatter leave it
-    // null — stacking is meaningless on them.
+    const series: ChartSeries[] = sers.map((ser) => parseSer(ser, categories, kind, chartLevelLabels));
+
+    // Grouping applies to bar / column / line / area. Pie / doughnut /
+    // scatter / radar leave it null — stacking is meaningless on them.
     const grouping = (kind === 'bar' || kind === 'column' || kind === 'line' || kind === 'area') && plotEl
         ? parseGrouping(plotEl)
         : null;
