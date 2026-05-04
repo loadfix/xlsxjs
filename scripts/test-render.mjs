@@ -709,6 +709,53 @@ async function renderFixture(path, options) {
     assert(Array.isArray(sheet.extensions), '25g: sheet.extensions should be an array');
 }
 
+// ── 26. Classic comments: xl/comments*.xml parsed + rendered as markers ──
+{
+    const { wb, container } = await renderFixture('comments');
+    const sheet = wb.parsed.sheets[0];
+
+    // Parser: two comments at A1 (Alice) and B2 (Bob), both plain text.
+    assert(sheet.comments.length === 2, `26a: expected 2 comments (got ${sheet.comments.length})`);
+    const byKey = sheet.comments.reduce((acc, c) => {
+        acc[`${c.row},${c.col}`] = c;
+        return acc;
+    }, {});
+    const a1 = byKey['0,0'];
+    const b2 = byKey['1,1'];
+    assert(a1 && a1.author === 'Alice' && a1.text === 'look here',
+        `26b: A1 comment (got ${JSON.stringify(a1)})`);
+    assert(b2 && b2.author === 'Bob' && b2.text === 'total count',
+        `26c: B2 comment (got ${JSON.stringify(b2)})`);
+    // Plain-text <t> body → no runs surface.
+    assert(a1.runs === null, `26d: plain-text comment should have no runs (got ${JSON.stringify(a1.runs)})`);
+
+    // DOM: each anchor cell has a .xlsx-comment-marker whose title attribute
+    // concatenates "author: text" and whose role is "note".
+    const markers = container.querySelectorAll('span.xlsx-comment-marker');
+    assert(markers.length === 2, `26e: expected 2 comment markers rendered (got ${markers.length})`);
+
+    const tbodyRows = container.querySelectorAll('section.xlsx tbody tr');
+    const tdAt = (rIdx, cIdx) => tbodyRows[rIdx].querySelectorAll('td')[cIdx];
+
+    const a1Marker = tdAt(0, 0).querySelector('span.xlsx-comment-marker');
+    assert(!!a1Marker, '26f: A1 should carry a comment marker');
+    assert(a1Marker.getAttribute('role') === 'note', `26g: A1 marker role=note (got ${a1Marker.getAttribute('role')})`);
+    const a1Title = a1Marker.getAttribute('title') ?? '';
+    assert(a1Title.includes('Alice') && a1Title.includes('look here'),
+        `26h: A1 title should contain author + text (got "${a1Title}")`);
+
+    const b2Marker = tdAt(1, 1).querySelector('span.xlsx-comment-marker');
+    assert(!!b2Marker, '26i: B2 should carry a comment marker');
+    const b2Title = b2Marker.getAttribute('title') ?? '';
+    assert(b2Title.includes('Bob') && b2Title.includes('total count'),
+        `26j: B2 title should contain author + text (got "${b2Title}")`);
+
+    // A1's text content keeps its original value plus the visible marker
+    // glyph — the cell content itself isn't destroyed.
+    assert(tdAt(0, 0).textContent.startsWith('hello'),
+        `26k: A1 cell text should still start with "hello" (got "${tdAt(0, 0).textContent}")`);
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

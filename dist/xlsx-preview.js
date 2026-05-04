@@ -90,7 +90,34 @@
             }
             for (const p of Object.keys(zip.files)) {
                 if (/^xl\/drawings\/.*\.xml$/i.test(p) ||
-                    /^xl\/drawings\/_rels\/.*\.xml\.rels$/i.test(p)) {
+                    /^xl\/drawings\/_rels\/.*\.xml\.rels$/i.test(p) ||
+                    /^xl\/drawings\/.*\.vml$/i.test(p)) {
+                    const xml = await readIfPresent(p);
+                    if (xml)
+                        wb.parts[p] = xml;
+                }
+            }
+            for (const p of Object.keys(zip.files)) {
+                if (/^xl\/comments\d*\.xml$/i.test(p)) {
+                    const xml = await readIfPresent(p);
+                    if (xml)
+                        wb.parts[p] = xml;
+                }
+            }
+            for (const p of Object.keys(zip.files)) {
+                if (/^xl\/charts\/.*\.xml$/i.test(p)) {
+                    const xml = await readIfPresent(p);
+                    if (xml)
+                        wb.parts[p] = xml;
+                }
+            }
+            for (const p of Object.keys(zip.files)) {
+                if (/^xl\/pivotTables\/.*\.xml$/i.test(p) ||
+                    /^xl\/pivotCache\/pivotCacheDefinition\d+\.xml$/i.test(p) ||
+                    /^xl\/slicers\/.*\.xml$/i.test(p) ||
+                    /^xl\/slicerCaches\/.*\.xml$/i.test(p) ||
+                    /^xl\/timelines\/.*\.xml$/i.test(p) ||
+                    /^xl\/timelineCaches\/.*\.xml$/i.test(p)) {
                     const xml = await readIfPresent(p);
                     if (xml)
                         wb.parts[p] = xml;
@@ -1005,6 +1032,8 @@
         rels: 'http://schemas.openxmlformats.org/package/2006/relationships',
         xdr: 'http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing',
         a: 'http://schemas.openxmlformats.org/drawingml/2006/main',
+        c: 'http://schemas.openxmlformats.org/drawingml/2006/chart',
+        cx: 'http://schemas.microsoft.com/office/drawing/2014/chartex',
     };
     class WorkbookParser {
         constructor(_options) {
@@ -1039,8 +1068,10 @@
                 if (!xml)
                     continue;
                 const tables = resolveTablesForSheet(xmlPath, parts);
-                const images = resolveImagesForSheet(xmlPath, parts, media);
-                sheets.push(parseSheet(name, xml, sharedStrings, tables, images));
+                const { images, charts } = resolveDrawingsForSheet(xmlPath, parts, media);
+                const pivots = resolvePivotsForSheet(xmlPath, parts);
+                const comments = resolveCommentsForSheet(xmlPath, parts);
+                sheets.push(parseSheet(name, xml, sharedStrings, tables, images, charts, pivots, comments));
             }
             return { sheets, styles, theme };
         }
@@ -1102,14 +1133,15 @@
         }
         return stack.join('/');
     }
-    function resolveImagesForSheet(sheetPath, parts, media) {
+    function resolveDrawingsForSheet(sheetPath, parts, media) {
         const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
         const relsXml = parts[relsPath];
         if (!relsXml)
-            return [];
+            return { images: [], charts: [] };
         const rels = parseRelationships(relsXml);
         const dir = sheetPath.replace(/\/[^/]+$/, '');
-        const out = [];
+        const images = [];
+        const charts = [];
         for (const [, rel] of rels) {
             if (!rel.type.endsWith('/drawing'))
                 continue;
@@ -1125,36 +1157,124 @@
                 continue;
             const drawingRels = parseRelationships(drawingRelsXml);
             const drawingDir = drawingPath.replace(/\/[^/]+$/, '');
-            out.push(...parseDrawing(drawingXml, drawingRels, drawingDir, media));
+            const parsed = parseDrawing(drawingXml, drawingRels, drawingDir, parts, media);
+            images.push(...parsed.images);
+            charts.push(...parsed.charts);
+        }
+        return { images, charts };
+    }
+    function resolvePivotsForSheet(sheetPath, parts) {
+        const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
+        const relsXml = parts[relsPath];
+        if (!relsXml)
+            return [];
+        const rels = parseRelationships(relsXml);
+        const dir = sheetPath.replace(/\/[^/]+$/, '');
+        const out = [];
+        for (const [, rel] of rels) {
+            if (!rel.type.endsWith('/pivotTable'))
+                continue;
+            const pivotPath = rel.target.startsWith('/')
+                ? rel.target.slice(1)
+                : normaliseRelPath(`${dir}/${rel.target}`);
+            const xml = parts[pivotPath];
+            if (!xml)
+                continue;
+            const parsed = parsePivotTable(xml);
+            if (parsed)
+                out.push(parsed);
         }
         return out;
     }
-    function parseDrawing(xml, rels, drawingDir, media) {
+    function parsePivotTable(xml) {
         const doc = parseXml(xml);
+        const def = doc.getElementsByTagNameNS(NS.main, 'pivotTableDefinition').item(0);
+        if (!def)
+            return null;
+        const name = def.getAttribute('name') ?? '';
+        const loc = def.getElementsByTagNameNS(NS.main, 'location').item(0);
+        if (!loc)
+            return null;
+        const ref = loc.getAttribute('ref');
+        if (!ref)
+            return null;
+        const parts = ref.split(':');
+        const a = parseCellRef(parts[0]);
+        const b = parts[1] ? parseCellRef(parts[1]) : a;
+        if (!a || !b)
+            return null;
+        return {
+            name,
+            col: Math.min(a.col, b.col),
+            row: Math.min(a.row, b.row),
+            endCol: Math.max(a.col, b.col),
+            endRow: Math.max(a.row, b.row),
+        };
+    }
+    function resolveCommentsForSheet(sheetPath, parts) {
+        const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
+        const relsXml = parts[relsPath];
+        if (!relsXml)
+            return [];
+        const rels = parseRelationships(relsXml);
+        const dir = sheetPath.replace(/\/[^/]+$/, '');
         const out = [];
+        for (const [, rel] of rels) {
+            if (!rel.type.endsWith('/comments'))
+                continue;
+            const target = rel.target.startsWith('/')
+                ? rel.target.slice(1)
+                : normaliseRelPath(`${dir}/${rel.target}`);
+            const xml = parts[target];
+            if (!xml)
+                continue;
+            out.push(...parseComments(xml));
+        }
+        return out;
+    }
+    function parseComments(xml) {
+        const doc = parseXml(xml);
+        const authors = [];
+        const authorEls = doc.getElementsByTagNameNS(NS.main, 'author');
+        for (let i = 0; i < authorEls.length; i++) {
+            authors.push(authorEls[i].textContent ?? '');
+        }
+        const out = [];
+        const commentEls = doc.getElementsByTagNameNS(NS.main, 'comment');
+        for (let i = 0; i < commentEls.length; i++) {
+            const c = commentEls[i];
+            const ref = c.getAttribute('ref');
+            if (!ref)
+                continue;
+            const parsed = parseCellRef(ref);
+            if (!parsed)
+                continue;
+            const authorIdAttr = c.getAttribute('authorId');
+            const authorIdx = authorIdAttr != null ? Number(authorIdAttr) : NaN;
+            const author = Number.isFinite(authorIdx) && authorIdx >= 0 && authorIdx < authors.length
+                ? authors[authorIdx]
+                : null;
+            const textEl = c.getElementsByTagNameNS(NS.main, 'text').item(0);
+            const body = textEl ? parseSi(textEl) : { text: '', runs: null };
+            out.push({
+                col: parsed.col,
+                row: parsed.row,
+                author: author && author.length > 0 ? author : null,
+                text: body.text,
+                runs: body.runs,
+            });
+        }
+        return out;
+    }
+    function parseDrawing(xml, rels, drawingDir, parts, media) {
+        const doc = parseXml(xml);
+        const images = [];
+        const charts = [];
         const anchors = [
             ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'twoCellAnchor')),
             ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'oneCellAnchor')),
         ];
         for (const anchor of anchors) {
-            const pic = anchor.getElementsByTagNameNS(NS.xdr, 'pic').item(0);
-            if (!pic)
-                continue;
-            const blip = pic.getElementsByTagNameNS(NS.a, 'blip').item(0);
-            if (!blip)
-                continue;
-            const embed = blip.getAttributeNS(NS.rel, 'embed');
-            if (!embed)
-                continue;
-            const rel = rels.get(embed);
-            if (!rel)
-                continue;
-            const mediaPath = rel.target.startsWith('/')
-                ? rel.target.slice(1)
-                : normaliseRelPath(`${drawingDir}/${rel.target}`);
-            const dataUrl = media[mediaPath];
-            if (!dataUrl)
-                continue;
             const from = anchor.getElementsByTagNameNS(NS.xdr, 'from').item(0);
             const to = anchor.getElementsByTagNameNS(NS.xdr, 'to').item(0);
             const col = anchorCellValue(from, 'col');
@@ -1163,25 +1283,104 @@
             const endRow = to ? anchorCellValue(to, 'row') : null;
             const colOff = anchorCellValue(from, 'colOff');
             const rowOff = anchorCellValue(from, 'rowOff');
-            const ext = anchor.getElementsByTagNameNS(NS.xdr, 'ext').item(0);
-            const widthEmu = ext ? Number(ext.getAttribute('cx')) : null;
-            const heightEmu = ext ? Number(ext.getAttribute('cy')) : null;
-            const cNvPr = pic.getElementsByTagNameNS(NS.xdr, 'cNvPr').item(0);
-            const alt = cNvPr?.getAttribute('descr') ?? cNvPr?.getAttribute('title') ?? null;
-            out.push({
-                col: col ?? 0,
-                row: row ?? 0,
-                endCol,
-                endRow,
-                colOff: colOff ?? 0,
-                rowOff: rowOff ?? 0,
-                dataUrl,
-                widthEmu: Number.isFinite(widthEmu) ? widthEmu : null,
-                heightEmu: Number.isFinite(heightEmu) ? heightEmu : null,
-                alt,
-            });
+            const pic = anchor.getElementsByTagNameNS(NS.xdr, 'pic').item(0);
+            if (pic) {
+                const blip = pic.getElementsByTagNameNS(NS.a, 'blip').item(0);
+                const embed = blip?.getAttributeNS(NS.rel, 'embed');
+                const rel = embed ? rels.get(embed) : undefined;
+                if (rel) {
+                    const mediaPath = rel.target.startsWith('/')
+                        ? rel.target.slice(1)
+                        : normaliseRelPath(`${drawingDir}/${rel.target}`);
+                    const dataUrl = media[mediaPath];
+                    if (dataUrl) {
+                        const ext = anchor.getElementsByTagNameNS(NS.xdr, 'ext').item(0);
+                        const widthEmu = ext ? Number(ext.getAttribute('cx')) : null;
+                        const heightEmu = ext ? Number(ext.getAttribute('cy')) : null;
+                        const cNvPr = pic.getElementsByTagNameNS(NS.xdr, 'cNvPr').item(0);
+                        const alt = cNvPr?.getAttribute('descr') ?? cNvPr?.getAttribute('title') ?? null;
+                        images.push({
+                            col: col ?? 0,
+                            row: row ?? 0,
+                            endCol,
+                            endRow,
+                            colOff: colOff ?? 0,
+                            rowOff: rowOff ?? 0,
+                            dataUrl,
+                            widthEmu: Number.isFinite(widthEmu) ? widthEmu : null,
+                            heightEmu: Number.isFinite(heightEmu) ? heightEmu : null,
+                            alt,
+                        });
+                    }
+                }
+            }
+            const chartEl = anchor.getElementsByTagNameNS(NS.c, 'chart').item(0)
+                ?? anchor.getElementsByTagNameNS(NS.cx, 'chart').item(0);
+            if (chartEl) {
+                const kind = chartEl.namespaceURI === NS.cx ? 'chartex' : 'classic';
+                const rId = chartEl.getAttributeNS(NS.rel, 'id');
+                let chartType = null;
+                if (rId) {
+                    const rel = rels.get(rId);
+                    if (rel) {
+                        const chartPath = rel.target.startsWith('/')
+                            ? rel.target.slice(1)
+                            : normaliseRelPath(`${drawingDir}/${rel.target}`);
+                        const chartXml = parts[chartPath];
+                        if (chartXml)
+                            chartType = peekChartType(chartXml, kind);
+                    }
+                }
+                charts.push({
+                    kind,
+                    chartType,
+                    col: col ?? 0,
+                    row: row ?? 0,
+                    endCol,
+                    endRow,
+                });
+            }
         }
-        return out;
+        return { images, charts };
+    }
+    function peekChartType(xml, kind) {
+        const doc = parseXml(xml);
+        if (kind === 'classic') {
+            const plotArea = doc.getElementsByTagNameNS(NS.c, 'plotArea').item(0);
+            if (!plotArea)
+                return null;
+            for (let i = 0; i < plotArea.childNodes.length; i++) {
+                const node = plotArea.childNodes[i];
+                if (node.nodeType !== 1)
+                    continue;
+                const el = node;
+                if (el.namespaceURI !== NS.c)
+                    continue;
+                if (/Ax$/.test(el.localName) || el.localName === 'numFmt')
+                    continue;
+                if (/Chart$/.test(el.localName) || el.localName === 'chartEx')
+                    return el.localName;
+            }
+            return null;
+        }
+        const series = doc.getElementsByTagNameNS(NS.cx, 'series').item(0);
+        const layoutId = series?.getAttribute('layoutId');
+        if (layoutId)
+            return layoutId;
+        const chart = doc.getElementsByTagNameNS(NS.cx, 'chart').item(0);
+        if (!chart)
+            return null;
+        for (let i = 0; i < chart.childNodes.length; i++) {
+            const node = chart.childNodes[i];
+            if (node.nodeType !== 1)
+                continue;
+            const el = node;
+            if (el.namespaceURI !== NS.cx)
+                continue;
+            if (el.localName !== 'plotArea' && el.localName !== 'title')
+                return el.localName;
+        }
+        return null;
     }
     function anchorCellValue(parent, tag) {
         if (!parent)
@@ -1305,7 +1504,7 @@
             name: firstAttr('rFont', 'val') ?? firstAttr('name', 'val'),
         };
     }
-    function parseSheet(name, xml, sharedStrings, tables = [], images = []) {
+    function parseSheet(name, xml, sharedStrings, tables = [], images = [], charts = [], pivots = [], comments = []) {
         const doc = parseXml(xml);
         const rowEls = doc.getElementsByTagNameNS(NS.main, 'row');
         const rows = [];
@@ -1361,10 +1560,29 @@
         const conditionalFormatting = parseConditionalFormatting(doc);
         const frozenPanes = parseFrozenPanes(doc);
         const autoFilter = parseAutoFilter(doc);
+        const extensions = collectExtensionUris(doc);
         return {
             name, rows, maxCol, maxRow, merges, columns, rowDimensions,
             conditionalFormatting, frozenPanes, autoFilter, tables, images,
+            charts, pivots, extensions, comments,
         };
+    }
+    function collectExtensionUris(doc) {
+        const counts = new Map();
+        const all = doc.getElementsByTagName('*');
+        for (let i = 0; i < all.length; i++) {
+            const el = all[i];
+            if (el.localName !== 'ext')
+                continue;
+            const uri = el.getAttribute('uri');
+            if (!uri)
+                continue;
+            counts.set(uri, (counts.get(uri) ?? 0) + 1);
+        }
+        const out = [];
+        for (const [uri, count] of counts)
+            out.push({ uri, count });
+        return out;
     }
     function parseFrozenPanes(doc) {
         const pane = doc.getElementsByTagNameNS(NS.main, 'pane').item(0);
@@ -1936,6 +2154,11 @@
 .${className} .xlsx-frozen-both { position: sticky; left: 0; top: 0; z-index: 3; background: inherit; }
 .${className} .xlsx-autofilter::after { content: " ▾"; color: #888; font-size: 0.85em; }
 .${className} .xlsx-table-caption { font-size: 0.85em; color: #666; margin: 0.25rem 0 0; }
+.${className} .xlsx-chart-placeholder {
+    border: 1px dashed #999; padding: 1em; margin: 0.5em 0;
+    color: #666; font-size: 0.9em; text-align: center;
+}
+.${className} .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
     `.trim();
         return style;
     }
@@ -2177,6 +2400,9 @@
         }
         const dxfByCell = resolveConditionalFormats(sheet, styles);
         const graphicalByCell = resolveGraphicalConditionalFormats(sheet, theme);
+        const commentByCell = new Map();
+        for (const cmt of sheet.comments)
+            commentByCell.set(`${cmt.row},${cmt.col}`, cmt);
         const rowDim = new Map();
         for (const d of sheet.rowDimensions)
             rowDim.set(d.row, d);
@@ -2208,6 +2434,9 @@
                 const gfx = graphicalByCell.get(`${r},${c}`);
                 if (gfx)
                     applyGraphicalCf(td, gfx);
+                const cmt = commentByCell.get(`${r},${c}`);
+                if (cmt)
+                    appendCommentMarker(td, cmt);
                 if (hiddenCols.has(c))
                     td.style.display = 'none';
                 if (frozen)
@@ -2259,7 +2488,32 @@
             fig.appendChild(el);
             section.appendChild(fig);
         }
+        for (const chart of sheet.charts) {
+            const ph = document.createElement('div');
+            ph.className = 'xlsx-chart-placeholder';
+            ph.setAttribute('data-chart-kind', chart.kind);
+            if (chart.chartType)
+                ph.setAttribute('data-chart-type', chart.chartType);
+            ph.setAttribute('data-anchor-col', String(chart.col));
+            ph.setAttribute('data-anchor-row', String(chart.row));
+            if (chart.endCol !== null)
+                ph.setAttribute('data-anchor-end-col', String(chart.endCol));
+            if (chart.endRow !== null)
+                ph.setAttribute('data-anchor-end-row', String(chart.endRow));
+            ph.textContent = `[chart: ${chart.chartType ?? chart.kind}]`;
+            section.appendChild(ph);
+        }
         return section;
+    }
+    function appendCommentMarker(td, comment) {
+        const marker = document.createElement('span');
+        marker.className = 'xlsx-comment-marker';
+        marker.setAttribute('role', 'note');
+        const author = comment.author && comment.author.length > 0 ? comment.author : null;
+        const title = author ? `${author}: ${comment.text}` : comment.text;
+        marker.setAttribute('title', title);
+        marker.textContent = '●';
+        td.appendChild(marker);
     }
     function tagFrozen(td, row, col, panes) {
         const inX = panes.xSplit !== null && col < panes.xSplit;

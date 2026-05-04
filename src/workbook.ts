@@ -107,11 +107,26 @@ export class Workbook {
             }
         }
 
-        // xl/drawings/drawingN.xml + their rels. Drawings anchor images and
-        // charts to cell positions on a sheet.
+        // xl/drawings/drawingN.xml + their rels. Drawings anchor images
+        // and charts to cell positions on a sheet. We also keep
+        // vmlDrawingN.vml here — it carries the comment-bubble layout for
+        // classic comments — but xlsxjs doesn't parse VML (comments render
+        // as inline markers, not floating boxes).
         for (const p of Object.keys(zip.files)) {
             if (/^xl\/drawings\/.*\.xml$/i.test(p) ||
-                /^xl\/drawings\/_rels\/.*\.xml\.rels$/i.test(p)) {
+                /^xl\/drawings\/_rels\/.*\.xml\.rels$/i.test(p) ||
+                /^xl\/drawings\/.*\.vml$/i.test(p)) {
+                const xml = await readIfPresent(p);
+                if (xml) wb.parts[p] = xml;
+            }
+        }
+
+        // xl/commentsN.xml — classic (non-threaded) comments. Bound to a
+        // sheet via its rels; the parser resolves the mapping. Threaded
+        // comments (xl/threadedComments/*) are a separate part type that
+        // xlsxjs does not yet surface.
+        for (const p of Object.keys(zip.files)) {
+            if (/^xl\/comments\d*\.xml$/i.test(p)) {
                 const xml = await readIfPresent(p);
                 if (xml) wb.parts[p] = xml;
             }

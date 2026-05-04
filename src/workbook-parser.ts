@@ -159,6 +159,17 @@ export interface TableDef {
     columns: { name: string }[];
 }
 
+// A classic comment attached to a single anchor cell. Parsed from
+// xl/comments{N}.xml and bound to a sheet via its rels. xlsxjs ignores
+// the VML bubble-layout (xl/drawings/vmlDrawing{N}.vml) — only the
+// cell anchor, author, and body matter for inline-marker rendering.
+export interface SheetComment {
+    col: number; row: number;    // 0-based anchor, derived from ref="B3"
+    author: string | null;
+    text: string;                // concatenated plain-text projection
+    runs: RichTextRun[] | null;  // preserved when the <text> body had runs
+}
+
 export interface Sheet {
     name: string;
     rows: Cell[][]; // sparse: rows[rowIndex] may be undefined
@@ -175,6 +186,7 @@ export interface Sheet {
     charts: SheetChart[];
     pivots: SheetPivot[];
     extensions: SheetExtensionUri[];
+    comments: SheetComment[];
 }
 
 export interface Workbook {
@@ -238,7 +250,8 @@ export class WorkbookParser {
             const tables = resolveTablesForSheet(xmlPath, parts);
             const { images, charts } = resolveDrawingsForSheet(xmlPath, parts, media);
             const pivots = resolvePivotsForSheet(xmlPath, parts);
-            sheets.push(parseSheet(name, xml, sharedStrings, tables, images, charts, pivots));
+            const comments = resolveCommentsForSheet(xmlPath, parts);
+            sheets.push(parseSheet(name, xml, sharedStrings, tables, images, charts, pivots, comments));
         }
 
         return { sheets, styles, theme };
@@ -385,6 +398,65 @@ function parsePivotTable(xml: string): SheetPivot | null {
         endCol: Math.max(a.col, b.col),
         endRow: Math.max(a.row, b.row),
     };
+}
+
+// Classic comments: xl/comments{N}.xml. Bound to a sheet through the
+// sheet's rels part (type ".../relationships/comments"). xlsxjs does not
+// parse the sibling VML drawing — the bubble layout is irrelevant to an
+// inline marker — only the anchor + author + text.
+function resolveCommentsForSheet(sheetPath: string, parts: Record<string, string>): SheetComment[] {
+    const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
+    const relsXml = parts[relsPath];
+    if (!relsXml) return [];
+    const rels = parseRelationships(relsXml);
+    const dir = sheetPath.replace(/\/[^/]+$/, '');
+    const out: SheetComment[] = [];
+    for (const [, rel] of rels) {
+        if (!rel.type.endsWith('/comments')) continue;
+        const target = rel.target.startsWith('/')
+            ? rel.target.slice(1)
+            : normaliseRelPath(`${dir}/${rel.target}`);
+        const xml = parts[target];
+        if (!xml) continue;
+        out.push(...parseComments(xml));
+    }
+    return out;
+}
+
+function parseComments(xml: string): SheetComment[] {
+    const doc = parseXml(xml);
+    // Authors: positional array indexed by authorId.
+    const authors: string[] = [];
+    const authorEls = doc.getElementsByTagNameNS(NS.main, 'author');
+    for (let i = 0; i < authorEls.length; i++) {
+        authors.push(authorEls[i].textContent ?? '');
+    }
+    const out: SheetComment[] = [];
+    const commentEls = doc.getElementsByTagNameNS(NS.main, 'comment');
+    for (let i = 0; i < commentEls.length; i++) {
+        const c = commentEls[i];
+        const ref = c.getAttribute('ref');
+        if (!ref) continue;
+        const parsed = parseCellRef(ref);
+        if (!parsed) continue;
+        const authorIdAttr = c.getAttribute('authorId');
+        const authorIdx = authorIdAttr != null ? Number(authorIdAttr) : NaN;
+        const author = Number.isFinite(authorIdx) && authorIdx >= 0 && authorIdx < authors.length
+            ? authors[authorIdx]
+            : null;
+        // The <text> child has the same shape as a shared-string <si>:
+        // plain <t>, or <r>/<rPr>/<t> runs. parseSi handles both.
+        const textEl = c.getElementsByTagNameNS(NS.main, 'text').item(0);
+        const body = textEl ? parseSi(textEl) : { text: '', runs: null };
+        out.push({
+            col: parsed.col,
+            row: parsed.row,
+            author: author && author.length > 0 ? author : null,
+            text: body.text,
+            runs: body.runs,
+        });
+    }
+    return out;
 }
 
 function parseDrawing(
@@ -657,6 +729,7 @@ function parseSheet(
     images: SheetImage[] = [],
     charts: SheetChart[] = [],
     pivots: SheetPivot[] = [],
+    comments: SheetComment[] = [],
 ): Sheet {
     const doc = parseXml(xml);
     const rowEls = doc.getElementsByTagNameNS(NS.main, 'row');
@@ -719,7 +792,7 @@ function parseSheet(
     return {
         name, rows, maxCol, maxRow, merges, columns, rowDimensions,
         conditionalFormatting, frozenPanes, autoFilter, tables, images,
-        charts, pivots, extensions,
+        charts, pivots, extensions, comments,
     };
 }
 
