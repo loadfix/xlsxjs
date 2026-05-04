@@ -50,8 +50,16 @@ the sheet's `<table>` so consumers can see the range/name in the DOM
 **Images**: drawings referenced via the sheet's rels are resolved;
 the embedded media binary is inlined as a `data:` URL on an `<img>`
 wrapped in a `<figure class="xlsx-image">` after the table. Anchor
-coordinates + offsets are surfaced on the figure as data-attributes so
-callers who want real in-flow positioning can overlay using those.
+coordinates + offsets are surfaced on the figure as data-attributes
+(including `data-anchor-mode`) so callers who want real in-flow
+positioning can overlay using those. All three DrawingML anchor modes
+are honoured: `twoCellAnchor` (size derived from `from`/`to` cells),
+`oneCellAnchor` (size from `<xdr:ext cx cy>`), and `absoluteAnchor`
+(pixel-absolute via `<xdr:pos>`, rendered with `position: absolute` +
+`left`/`top` in CSS pixels). The `decorative="1"` accessibility marker
+under `cNvPr/a:extLst` flips the image to `alt=""` + `aria-hidden="true"`
+so screen readers skip it. EMU→pixel conversion lives in
+`emuToPx()` (`src/utils.ts`, 9525 EMU per px at 96 DPI).
 
 **R1C1 notation**: `showFormulas: true` replaces cell text with the
 formula (prefixed with `=`). Set `formulaNotation: 'r1c1'` to render
@@ -119,7 +127,6 @@ Minimum check before every PR that touches source: `grep -n "<feature name>" REA
 - Gradient fills and diagonal / double borders.
 - Full expression-rule interpretation (currently only `=<cellRef> <op> <literal>`).
 - Full multi-cellStyle inheritance (e.g. cellStyle referencing another cellStyle).
-- Drawing layout for one-cell + absolute anchors (only twoCellAnchor sizing is fully honoured).
 
 ## Fixture generation
 

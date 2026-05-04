@@ -14,6 +14,7 @@ export { parseTheme, applyTint, resolveColor, indexedColor } from './theme';
 export { parseConditionalFormatting, evaluateRule, resolveCfvo, interpolateColorScale } from './conditional-format';
 export { formatNumber } from './number-format';
 export { a1ToR1c1, r1c1ToA1 } from './formula-notation';
+export { emuToPx } from './utils';
 
 export interface Options {
     className: string;

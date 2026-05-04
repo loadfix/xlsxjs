@@ -32,3 +32,12 @@ export function parseCellRef(ref: string): { col: number; row: number } | null {
     if (col < 0) return null;
     return { col, row: Number(m[2]) - 1 };
 }
+
+// English Metric Units → device-independent pixels at 96 DPI. Excel uses EMU
+// (914400 per inch, i.e. 9525 per pixel) for drawing extents and offsets.
+// Non-finite / negative inputs return 0 so callers can pipe the result
+// straight into a `px(...)` formatter without extra guards.
+export function emuToPx(emu: number): number {
+    if (!Number.isFinite(emu)) return 0;
+    return Math.round(emu / 9525);
+}

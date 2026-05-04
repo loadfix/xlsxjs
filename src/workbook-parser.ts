@@ -240,20 +240,36 @@ export interface SheetExtensionUri {
 }
 
 // A rendered image anchored inside a sheet. Coordinates are 0-based.
-// xlsxjs ships only the "twoCellAnchor" and "oneCellAnchor" positioning
-// — absolute pixel anchors are rare and reported with `col=0, row=0`.
+// xlsxjs distinguishes three DrawingML anchor modes:
+//   - 'twoCell'   : <xdr:from> + <xdr:to>. endCol/endRow + widthEmu/heightEmu
+//                   are populated (size may be derived from cells).
+//   - 'oneCell'   : <xdr:from> + <xdr:ext cx cy/>. endCol/endRow stay null;
+//                   widthEmu/heightEmu come from the anchor's <ext>.
+//   - 'absolute'  : <xdr:pos x y/> + <xdr:ext cx cy/>. col/row/endCol/endRow
+//                   are null (or 0 for col/row compatibility); absoluteX/Y
+//                   carry the pixel-absolute position in EMU.
 export interface SheetImage {
-    col: number; row: number;           // top-left anchor cell
+    col: number; row: number;           // top-left anchor cell (0 for absolute)
     endCol: number | null;              // bottom-right anchor cell (twoCellAnchor)
     endRow: number | null;
     // Offsets from the top-left anchor cell, in EMUs (English Metric Units;
-    // 914400 per inch, 9525 per pixel). Renderer converts to px.
+    // 914400 per inch, 9525 per pixel). Renderer converts to px via emuToPx.
     colOff: number; rowOff: number;
     // Data URL + intrinsic dimensions (or null if the drawing didn't declare them).
     dataUrl: string;
     widthEmu: number | null;
     heightEmu: number | null;
     alt: string | null;
+    // Which DrawingML anchor element wrapped this image.
+    anchorMode: 'twoCell' | 'oneCell' | 'absolute';
+    // Pixel-absolute position in EMU (absoluteAnchor only; null otherwise).
+    absoluteX: number | null;
+    absoluteY: number | null;
+    // True when the image carries a "decorative=1" marker in its cNvPr
+    // extLst (the modern accessibility hint, distinct from empty alt).
+    // Renderer surfaces this as alt="" + aria-hidden="true" so screen
+    // readers skip the image entirely.
+    decorative: boolean;
 }
 
 // A defined table (<table> inside xl/tables/tableN.xml, referenced from
@@ -834,21 +850,54 @@ function parseDrawing(
     const doc = parseXml(xml);
     const images: SheetImage[] = [];
     const charts: SheetChart[] = [];
-    // Both twoCellAnchor and oneCellAnchor carry child <pic> / <graphicFrame>
-    // elements. We walk each anchor in order, checking both.
-    const anchors = [
-        ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'twoCellAnchor')),
-        ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'oneCellAnchor')),
+    // DrawingML anchors come in three flavours; each carries <pic> /
+    // <graphicFrame> children we care about. We tag the mode here so the
+    // model + renderer can apply the right sizing/positioning path.
+    const labelled: { el: Element; mode: 'twoCell' | 'oneCell' | 'absolute' }[] = [
+        ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'twoCellAnchor'))
+            .map((el) => ({ el, mode: 'twoCell' as const })),
+        ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'oneCellAnchor'))
+            .map((el) => ({ el, mode: 'oneCell' as const })),
+        ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'absoluteAnchor'))
+            .map((el) => ({ el, mode: 'absolute' as const })),
     ];
-    for (const anchor of anchors) {
+    for (const { el: anchor, mode } of labelled) {
         const from = anchor.getElementsByTagNameNS(NS.xdr, 'from').item(0);
-        const to = anchor.getElementsByTagNameNS(NS.xdr, 'to').item(0);
-        const col = anchorCellValue(from, 'col');
-        const row = anchorCellValue(from, 'row');
+        const to = mode === 'twoCell'
+            ? anchor.getElementsByTagNameNS(NS.xdr, 'to').item(0)
+            : null;
+        const col = from ? anchorCellValue(from, 'col') : null;
+        const row = from ? anchorCellValue(from, 'row') : null;
         const endCol = to ? anchorCellValue(to, 'col') : null;
         const endRow = to ? anchorCellValue(to, 'row') : null;
-        const colOff = anchorCellValue(from, 'colOff');
-        const rowOff = anchorCellValue(from, 'rowOff');
+        const colOff = from ? anchorCellValue(from, 'colOff') : null;
+        const rowOff = from ? anchorCellValue(from, 'rowOff') : null;
+
+        // <xdr:ext cx cy/> is a direct child of one-cell and absolute anchors.
+        // It sizes the drawing in EMU. Two-cell anchors don't carry it (size
+        // is derived from the anchor cells); we still tolerate one if it
+        // appears in a tolerant producer's output, but only look shallow so
+        // the a:ext inside pic/spPr/a:xfrm isn't accidentally matched (it's
+        // in the `a` namespace, so getElementsByTagNameNS(xdr, 'ext') won't
+        // catch it — but we're conservative for future-proofing).
+        const ext = findDirectChildNS(anchor, NS.xdr, 'ext');
+        const extCx = ext ? Number(ext.getAttribute('cx')) : NaN;
+        const extCy = ext ? Number(ext.getAttribute('cy')) : NaN;
+        const widthEmu = Number.isFinite(extCx) ? extCx : null;
+        const heightEmu = Number.isFinite(extCy) ? extCy : null;
+
+        // <xdr:pos x y/> is a direct child of absoluteAnchor only.
+        let absoluteX: number | null = null;
+        let absoluteY: number | null = null;
+        if (mode === 'absolute') {
+            const pos = findDirectChildNS(anchor, NS.xdr, 'pos');
+            if (pos) {
+                const x = Number(pos.getAttribute('x'));
+                const y = Number(pos.getAttribute('y'));
+                if (Number.isFinite(x)) absoluteX = x;
+                if (Number.isFinite(y)) absoluteY = y;
+            }
+        }
 
         const pic = anchor.getElementsByTagNameNS(NS.xdr, 'pic').item(0);
         if (pic) {
@@ -861,15 +910,18 @@ function parseDrawing(
                     : normaliseRelPath(`${drawingDir}/${rel.target}`);
                 const dataUrl = media[mediaPath];
                 if (dataUrl) {
-                    // Extent (explicit size for oneCellAnchor / absolute). Not
-                    // always present on twoCellAnchor; renderer falls back to
-                    // anchor-based sizing.
-                    const ext = anchor.getElementsByTagNameNS(NS.xdr, 'ext').item(0);
-                    const widthEmu = ext ? Number(ext.getAttribute('cx')) : null;
-                    const heightEmu = ext ? Number(ext.getAttribute('cy')) : null;
                     // Alt text lives under pic/nvPicPr/cNvPr.
                     const cNvPr = pic.getElementsByTagNameNS(NS.xdr, 'cNvPr').item(0);
                     const alt = cNvPr?.getAttribute('descr') ?? cNvPr?.getAttribute('title') ?? null;
+                    // Decorative flag. The accessibility marker lives inside
+                    // <xdr:cNvPr><a:extLst><a:ext uri="…"><… decorative="1"/></a:ext></a:extLst>.
+                    // Different producers use different URIs (Office 365 uses
+                    // {C183D7F6-B498-43B3-948B-1728B52AA6E4} with an
+                    // <adec:decorative val="1"/> child). Rather than match a
+                    // fixed URI, scan every descendant of the cNvPr's extLst
+                    // for any element carrying a `decorative="1"` (or
+                    // `val="1"` on an element named "decorative") attribute.
+                    const decorative = cNvPr ? detectDecorative(cNvPr) : false;
                     images.push({
                         col: col ?? 0,
                         row: row ?? 0,
@@ -878,9 +930,13 @@ function parseDrawing(
                         colOff: colOff ?? 0,
                         rowOff: rowOff ?? 0,
                         dataUrl,
-                        widthEmu: Number.isFinite(widthEmu as number) ? (widthEmu as number) : null,
-                        heightEmu: Number.isFinite(heightEmu as number) ? (heightEmu as number) : null,
+                        widthEmu,
+                        heightEmu,
                         alt,
+                        anchorMode: mode,
+                        absoluteX,
+                        absoluteY,
+                        decorative,
                     });
                 }
             }
@@ -963,6 +1019,44 @@ function anchorCellValue(parent: Element | null, tag: string): number | null {
     if (!el) return null;
     const n = Number(el.textContent);
     return Number.isFinite(n) ? n : null;
+}
+
+// Shallow lookup: only walk the direct element children of `parent`, so a
+// same-named descendant in a different subtree isn't accidentally returned.
+// Useful for the anchor-level <xdr:ext>/<xdr:pos> where a tree-wide
+// getElementsByTagNameNS would also pick up a nested a-namespace <ext>
+// that leaked into the xdr namespace (we've seen producers mis-declare
+// namespaces).
+function findDirectChildNS(parent: Element, ns: string, localName: string): Element | null {
+    for (let i = 0; i < parent.childNodes.length; i++) {
+        const node = parent.childNodes[i];
+        if (node.nodeType !== 1) continue;
+        const el = node as Element;
+        if (el.namespaceURI === ns && el.localName === localName) return el;
+    }
+    return null;
+}
+
+// Accessibility: DrawingML's "decorative" flag lives inside a cNvPr extLst.
+// Office uses {C183D7F6-B498-43B3-948B-1728B52AA6E4} with an
+// <adec:decorative val="1"/> child; other producers attach the attribute
+// under different URIs. Rather than pin to a specific extension URI we
+// accept any descendant that either:
+//   - has a localName of "decorative" with val/value="1" (or "true"), OR
+//   - carries a `decorative="1"`/`decorative="true"` attribute directly.
+function detectDecorative(cNvPr: Element): boolean {
+    const extLst = cNvPr.getElementsByTagNameNS(NS.a, 'extLst').item(0);
+    if (!extLst) return false;
+    const truthy = (v: string | null) => v === '1' || v === 'true';
+    const all = extLst.getElementsByTagName('*');
+    for (let i = 0; i < all.length; i++) {
+        const el = all[i];
+        if (el.localName === 'decorative' && (truthy(el.getAttribute('val')) || truthy(el.getAttribute('value')))) {
+            return true;
+        }
+        if (truthy(el.getAttribute('decorative'))) return true;
+    }
+    return false;
 }
 
 function parseTable(xml: string): TableDef | null {
