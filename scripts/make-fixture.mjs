@@ -1273,6 +1273,94 @@ await writeFixture('merged', {
     console.log(`wrote ${out} (${buf.length} bytes)`);
 }
 
+// ── shape-presets ─────────────────────────────────────────────────────────
+// A broader set of xdr:sp / xdr:cxnSp entries that exercise the prstGeom
+// palette the renderer maps to inline SVGs. Six shapes in total: rect,
+// ellipse, line (connector), triangle, rightArrow, and flowChartDecision.
+// Each shape occupies a 2×2 cell block. The fixture has no styles / shared
+// strings beyond a single anchor cell.
+{
+    const outDir = resolve(repo, 'tests/render-test/shape-presets');
+    mkdirSync(outDir, { recursive: true });
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+  <Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
+</Types>`);
+    zip.file('_rels/.rels', rootRels);
+    zip.file('xl/_rels/workbook.xml.rels', workbookRels);
+    zip.file('xl/workbook.xml', workbookXml('Presets'));
+    zip.file('xl/sharedStrings.xml', sharedStringsXml(['presets']));
+    zip.file('xl/worksheets/_rels/sheet1.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="/xl/drawings/drawing1.xml"/>
+</Relationships>`);
+    zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+           xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheetData>
+    <row r="1"><c r="A1" t="s"><v>0</v></c></row>
+  </sheetData>
+  <drawing r:id="rId1"/>
+</worksheet>`);
+    // Six shapes laid out in two rows of three 2×2 blocks. Each uses a
+    // twoCellAnchor so endCol/endRow are present.
+    function shapeSp(id, fromCol, fromRow, toCol, toRow, preset, name) {
+        if (preset === 'line') {
+            return `<xdr:twoCellAnchor>
+    <xdr:from><xdr:col>${fromCol}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${fromRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:to><xdr:col>${toCol}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${toRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+    <xdr:cxnSp macro="">
+      <xdr:nvCxnSpPr>
+        <xdr:cNvPr id="${id}" name="${name}"/>
+        <xdr:cNvCxnSpPr/>
+      </xdr:nvCxnSpPr>
+      <xdr:spPr>
+        <a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+        <a:prstGeom prst="line"><a:avLst/></a:prstGeom>
+      </xdr:spPr>
+    </xdr:cxnSp>
+    <xdr:clientData/>
+  </xdr:twoCellAnchor>`;
+        }
+        return `<xdr:twoCellAnchor>
+    <xdr:from><xdr:col>${fromCol}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${fromRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:to><xdr:col>${toCol}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${toRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+    <xdr:sp macro="" textlink="">
+      <xdr:nvSpPr>
+        <xdr:cNvPr id="${id}" name="${name}"/>
+        <xdr:cNvSpPr/>
+      </xdr:nvSpPr>
+      <xdr:spPr>
+        <a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+        <a:prstGeom prst="${preset}"><a:avLst/></a:prstGeom>
+      </xdr:spPr>
+    </xdr:sp>
+    <xdr:clientData/>
+  </xdr:twoCellAnchor>`;
+    }
+    zip.file('xl/drawings/drawing1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  ${shapeSp(1, 0, 0, 2, 2, 'rect',              'Rect 1')}
+  ${shapeSp(2, 3, 0, 5, 2, 'ellipse',           'Ellipse 1')}
+  ${shapeSp(3, 6, 0, 8, 2, 'line',              'Line 1')}
+  ${shapeSp(4, 0, 3, 2, 5, 'triangle',          'Triangle 1')}
+  ${shapeSp(5, 3, 3, 5, 5, 'rightArrow',        'Arrow 1')}
+  ${shapeSp(6, 6, 3, 8, 5, 'flowChartDecision', 'Decision 1')}
+</xdr:wsDr>`);
+    const buf = await zip.generateAsync({ type: 'nodebuffer' });
+    const out = resolve(outDir, 'workbook.xlsx');
+    writeFileSync(out, buf);
+    console.log(`wrote ${out} (${buf.length} bytes)`);
+}
+
 // ── cellstyle-chain ───────────────────────────────────────────────────────
 // Exercises multi-step cellStyleXfs inheritance. A cellXf points at a named
 // style which itself points at *another* named style — Excel permits this,

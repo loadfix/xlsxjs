@@ -41,6 +41,7 @@ const fixtures = [
     'phonetics',
     'python-xlsx',
     'richtext',
+    'shape-presets',
     'shapes-and-textboxes',
     'sheet-protection-and-alt',
     'sheet-view-state',

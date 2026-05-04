@@ -12,6 +12,7 @@ import { resolveColor, type Theme } from './theme';
 import { formatNumber } from './number-format';
 import { a1ToR1c1 } from './formula-notation';
 import { renderIcon } from './icons';
+import { renderShapePreset } from './shape-presets';
 import { evaluateRule, resolveCfvo, interpolateColorScale, type ConditionalFormatting, type CfContext, type CellRange, type CfRule } from './conditional-format';
 
 // Excel column "width" is in units of the default font's "0" character. For
@@ -67,13 +68,22 @@ function renderStyle(className: string): HTMLStyleElement {
     border: 1px solid #e0e0e0; border-radius: 2px;
     padding: 0.5em; margin: 0.5em 0;
     color: #555; font-size: 0.9em;
+    position: relative;
 }
+.${className} .xlsx-shape[data-preset] { border-color: transparent; }
 .${className} .xlsx-shape[data-kind="connector"] {
     border-style: dashed; color: #888;
 }
-.${className} .xlsx-shape pre {
+.${className} .xlsx-shape[data-kind="connector"][data-preset] { border-style: none; }
+.${className} .xlsx-shape > svg {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    pointer-events: none; z-index: 0;
+}
+.${className} .xlsx-shape > pre {
     margin: 0; white-space: pre-line;
     font-family: inherit; font-size: inherit;
+    position: relative; z-index: 1;
 }
 .${className} .xlsx-spill-anchor { outline: 1px dashed #0066cc; outline-offset: -1px; }
 .${className} .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
@@ -684,6 +694,20 @@ function renderShape(shape: SheetShape): HTMLElement {
     aside.setAttribute('data-anchor-row', String(shape.row));
     if (shape.endCol !== null) aside.setAttribute('data-anchor-end-col', String(shape.endCol));
     if (shape.endRow !== null) aside.setAttribute('data-anchor-end-row', String(shape.endRow));
+
+    // Inline SVG glyph for the Excel prstGeom preset, when we have a
+    // mapping. The SVG comes from `renderShapePreset` — it's self-generated
+    // (no attacker content) so setting it via innerHTML on a throw-away
+    // container is safe; we then move the <svg> child out so the parent
+    // structure stays flat (<aside> > <svg>, <aside> > <pre>).
+    const svg = renderShapePreset(shape.preset, { width: 100, height: 100, stroke: '#888' });
+    if (svg) {
+        const tmp = document.createElement('div');
+        tmp.innerHTML = svg;
+        const svgEl = tmp.firstElementChild;
+        if (svgEl) aside.appendChild(svgEl);
+    }
+
     if (shape.text && shape.text.length > 0) {
         const pre = document.createElement('pre');
         pre.textContent = shape.text;
