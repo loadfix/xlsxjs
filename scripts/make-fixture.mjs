@@ -452,3 +452,77 @@ await writeFixture('merged', {
   </mergeCells>
 </worksheet>`,
 });
+
+// ── alignment-flags ───────────────────────────────────────────────────────
+// Hand-built XLSX exercising the extended <alignment/> surface. Six cells
+// each pick up a distinct flag through their own cellXf:
+//   A1 (s=1) wrapText=1      — multi-line string wraps inside the cell
+//   A2 (s=2) textRotation=90 — rotated header
+//   A3 (s=3) textRotation=255 — stacked vertical (CJK convention)
+//   A4 (s=4) indent=3 + horizontal=left     — paddingLeft ≈ 1.5em
+//   A5 (s=5) readingOrder=2 + horizontal=right — direction:rtl
+//   A6 (s=6) shrinkToFit=1   — tagged with .xlsx-shrink-to-fit
+//   A7 (s=7) horizontal=distributed, vertical=justify — widened enums
+{
+    const outDir = resolve(repo, 'tests/render-test/alignment-flags');
+    mkdirSync(outDir, { recursive: true });
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>`);
+    zip.file('_rels/.rels', rootRels);
+    zip.file('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`);
+    zip.file('xl/workbook.xml', workbookXml('Align'));
+    zip.file('xl/sharedStrings.xml', sharedStringsXml([
+        'line one\nline two',  // 0: wrapText
+        'ROT90',               // 1: textRotation=90
+        'STACK',               // 2: textRotation=255
+        'indented',            // 3: indent=3
+        'rtl text',            // 4: readingOrder=2
+        'shrinkme text that is quite long',  // 5: shrinkToFit
+        'distrib',             // 6: distributed/justify
+    ]));
+    zip.file('xl/styles.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellXfs count="8">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment wrapText="1"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment textRotation="90"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment textRotation="255"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment horizontal="left" indent="3"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment horizontal="right" readingOrder="2"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment shrinkToFit="1"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment horizontal="distributed" vertical="justify"/></xf>
+  </cellXfs>
+</styleSheet>`);
+    zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="A1" t="s" s="1"><v>0</v></c></row>
+    <row r="2"><c r="A2" t="s" s="2"><v>1</v></c></row>
+    <row r="3"><c r="A3" t="s" s="3"><v>2</v></c></row>
+    <row r="4"><c r="A4" t="s" s="4"><v>3</v></c></row>
+    <row r="5"><c r="A5" t="s" s="5"><v>4</v></c></row>
+    <row r="6"><c r="A6" t="s" s="6"><v>5</v></c></row>
+    <row r="7"><c r="A7" t="s" s="7"><v>6</v></c></row>
+  </sheetData>
+</worksheet>`);
+    const buf = await zip.generateAsync({ type: 'nodebuffer' });
+    const out = resolve(outDir, 'workbook.xlsx');
+    writeFileSync(out, buf);
+    console.log(`wrote ${out} (${buf.length} bytes)`);
+}

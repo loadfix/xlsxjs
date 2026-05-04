@@ -792,6 +792,94 @@ async function renderFixture(path, options) {
     assert(title.indexOf('Alice') < title.indexOf('Bob'), `27r: parent (Alice) should precede reply (Bob) in title`);
 }
 
+// ── 28. Alignment flags: wrapText + textRotation parse + apply ───────────
+{
+    const { wb, container } = await renderFixture('alignment-flags');
+    const styles = wb.parsed.styles;
+    // 8 cellXfs (index 0 = default, 1..7 carry each new flag).
+    assert(styles.cellXfs.length === 8, `28a: expected 8 cellXfs (got ${styles.cellXfs.length})`);
+
+    // Parser: wrapText flag on xf[1].
+    assert(styles.cellXfs[1].alignment.wrapText === true, `28b: xf[1] wrapText (got ${styles.cellXfs[1].alignment.wrapText})`);
+    // textRotation=90 on xf[2], textRotation=255 (stacked) on xf[3].
+    assert(styles.cellXfs[2].alignment.textRotation === 90, `28c: xf[2] textRotation 90 (got ${styles.cellXfs[2].alignment.textRotation})`);
+    assert(styles.cellXfs[3].alignment.textRotation === 255, `28d: xf[3] textRotation 255 (stacked) (got ${styles.cellXfs[3].alignment.textRotation})`);
+
+    // DOM: A1 wrapText → white-space:normal + word-break.
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    const tdAt = (r) => rows[r].querySelectorAll('td')[0];
+    const a1 = tdAt(0);
+    assert(a1.style.whiteSpace === 'normal', `28e: wrapText td should set white-space:normal (got "${a1.style.whiteSpace}")`);
+    assert(a1.style.wordBreak === 'break-word', `28f: wrapText td should set word-break (got "${a1.style.wordBreak}")`);
+
+    // A2 textRotation=90 → transform:rotate(-90deg) + inline-block.
+    const a2 = tdAt(1);
+    assert(/rotate\(-90deg\)/.test(a2.style.transform), `28g: rotated td should carry rotate(-90deg) (got "${a2.style.transform}")`);
+
+    // A3 textRotation=255 → writing-mode:vertical-lr.
+    const a3 = tdAt(2);
+    assert(a3.style.writingMode === 'vertical-lr', `28h: stacked td should set writing-mode:vertical-lr (got "${a3.style.writingMode}")`);
+}
+
+// ── 29. Alignment flags: indent + readingOrder + shrinkToFit ──────────────
+{
+    const { wb, container } = await renderFixture('alignment-flags');
+    const styles = wb.parsed.styles;
+    // Parser: indent, readingOrder, shrinkToFit flags.
+    assert(styles.cellXfs[4].alignment.indent === 3, `29a: xf[4] indent 3 (got ${styles.cellXfs[4].alignment.indent})`);
+    assert(styles.cellXfs[4].alignment.horizontal === 'left', `29b: xf[4] horizontal left (got ${styles.cellXfs[4].alignment.horizontal})`);
+    assert(styles.cellXfs[5].alignment.readingOrder === 2, `29c: xf[5] readingOrder=2 (got ${styles.cellXfs[5].alignment.readingOrder})`);
+    assert(styles.cellXfs[6].alignment.shrinkToFit === true, `29d: xf[6] shrinkToFit (got ${styles.cellXfs[6].alignment.shrinkToFit})`);
+
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    const tdAt = (r) => rows[r].querySelectorAll('td')[0];
+
+    // A4: indent=3 with horizontal=left → paddingLeft ≈ 1.5em.
+    const a4 = tdAt(3);
+    // jsdom normalises '1.50em' to '1.5em' — accept either form.
+    assert(a4.style.paddingLeft === '1.5em' || a4.style.paddingLeft === '1.50em',
+        `29e: indent td paddingLeft should be ~1.5em (got "${a4.style.paddingLeft}")`);
+    assert(a4.style.textAlign === 'left', `29f: horizontal left should land on text-align (got "${a4.style.textAlign}")`);
+
+    // A5: readingOrder=2 → direction:rtl, and horizontal=right stays right.
+    const a5 = tdAt(4);
+    assert(a5.style.direction === 'rtl', `29g: readingOrder=2 should set direction:rtl (got "${a5.style.direction}")`);
+    assert(a5.style.textAlign === 'right', `29h: horizontal right stays right under RTL (got "${a5.style.textAlign}")`);
+
+    // A6: shrinkToFit → .xlsx-shrink-to-fit class.
+    const a6 = tdAt(5);
+    assert(a6.classList.contains('xlsx-shrink-to-fit'), `29i: shrinkToFit td should have .xlsx-shrink-to-fit (got classes: "${a6.className}")`);
+}
+
+// ── 30. Alignment flags: widened horizontal + vertical enums ──────────────
+{
+    const { wb, container } = await renderFixture('alignment-flags');
+    const styles = wb.parsed.styles;
+
+    // Parser: the widened enums are preserved verbatim on the model.
+    assert(styles.cellXfs[7].alignment.horizontal === 'distributed',
+        `30a: xf[7] horizontal=distributed parsed (got ${styles.cellXfs[7].alignment.horizontal})`);
+    assert(styles.cellXfs[7].alignment.vertical === 'justify',
+        `30b: xf[7] vertical=justify parsed (got ${styles.cellXfs[7].alignment.vertical})`);
+
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    const a7 = rows[6].querySelectorAll('td')[0];
+    // distributed → text-align:justify + text-align-last:justify.
+    assert(a7.style.textAlign === 'justify',
+        `30c: distributed horizontal → text-align:justify (got "${a7.style.textAlign}")`);
+    assert(a7.style.textAlignLast === 'justify',
+        `30d: distributed horizontal → text-align-last:justify (got "${a7.style.textAlignLast}")`);
+    // vertical=justify → vertical-align:middle (CSS has no direct equivalent).
+    assert(a7.style.verticalAlign === 'middle',
+        `30e: vertical=justify should approximate as middle (got "${a7.style.verticalAlign}")`);
+
+    // And the default xf[0] carries neutral alignment defaults.
+    assert(styles.cellXfs[0].alignment.wrapText === false, '30f: default alignment wrapText=false');
+    assert(styles.cellXfs[0].alignment.indent === 0, '30g: default alignment indent=0');
+    assert(styles.cellXfs[0].alignment.textRotation === null, '30h: default alignment textRotation=null');
+    assert(styles.cellXfs[0].alignment.readingOrder === 0, '30i: default alignment readingOrder=0');
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
