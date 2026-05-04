@@ -59,10 +59,31 @@ const tallies = {
     unresolvedColors: 0,
     unknownPatternFills: new Map(),
     droppedPartPrefixes: new Map(),
+    extLstUris: new Map(),
     errors: [],
 };
 
 function bump(map, key) { map.set(key, (map.get(key) ?? 0) + 1); }
+
+// Short human-readable hint for a handful of well-known extLst GUIDs. No
+// authority beyond the ECMA / MS-XLSX supplemental docs; unknown URIs get
+// the empty string and stand on their own in the output.
+function extLstHint(uri) {
+    const u = uri.toLowerCase();
+    const KNOWN = {
+        '{05c60535-1f16-4fd2-b633-f4f36f0b64e0}': ' (x14 sparklineGroups)',
+        '{a8765ba9-456a-4dab-b4f3-acf838c121de}': ' (x14 slicers list)',
+        '{b025f937-c7b1-47d3-b67f-a62eff666e3e}': ' (x14 conditional formatting)',
+        '{78c0d931-6437-407d-a8ee-f0aad7539e65}': ' (x14 cfRules / dataValidations)',
+        '{962ef5d1-5ca2-4c93-8ef4-dbf5c05439d2}': ' (x14 pivotTableDefinition)',
+        '{747a6164-185a-40dc-8aa5-f01512510d54}': ' (xpdl pivotTableDefinition16)',
+        '{ff2b5ef4-fff2-40b4-be49-f238e27fc236}': ' (a:creationId)',
+        '{3a4cf648-6ae1-4b4f-8754-859edd4b35fd}': ' (x14 conditionalFormattings/dataValidations)',
+        '{bdbb8cdc-fa1e-496e-a857-3c3f30c029c3}': ' (x15 dxf extensions)',
+        '{ce76fd50-0c6c-46f6-b6b0-6d8b72ce1c2f}': ' (x14 slicerStyles)',
+    };
+    return KNOWN[u] ?? '';
+}
 
 const reports = [];
 
@@ -96,7 +117,7 @@ for (const file of files) {
     // Walk the parsed workbook and collect stats.
     const parsed = wb.parsed;
     report.sheetCount = parsed.sheets.length;
-    let cells = 0, richCells = 0, formulaCells = 0, merges = 0, images = 0, tables = 0;
+    let cells = 0, richCells = 0, formulaCells = 0, merges = 0, images = 0, tables = 0, charts = 0, pivots = 0;
     const cfTypeCounts = new Map();
     const unknownIconSetsHere = new Set();
     let numericCfHits = 0;
@@ -112,6 +133,11 @@ for (const file of files) {
         merges += sheet.merges.length;
         images += sheet.images.length;
         tables += sheet.tables.length;
+        charts += sheet.charts.length;
+        pivots += sheet.pivots.length;
+        for (const e of sheet.extensions) {
+            tallies.extLstUris.set(e.uri, (tallies.extLstUris.get(e.uri) ?? 0) + e.count);
+        }
         for (const block of sheet.conditionalFormatting) {
             for (const rule of block.rules) {
                 bump(cfTypeCounts, rule.type);
@@ -134,6 +160,8 @@ for (const file of files) {
     report.merges = merges;
     report.images = images;
     report.tables = tables;
+    report.charts = charts;
+    report.pivots = pivots;
     report.cfTypes = Object.fromEntries(cfTypeCounts);
     report.unknownIconSets = [...unknownIconSetsHere];
 
@@ -213,7 +241,7 @@ for (const r of reports) {
     console.log(`• ${r.file} (${r.bytes.toLocaleString()} B)`);
     console.log(`    parse: ${r.parse}    render: ${r.render ?? '—'}`);
     if (r.parse !== 'ok' || r.render !== 'ok') continue;
-    console.log(`    sheets=${r.sheetCount}  cells=${r.cells}  rich=${r.richCells}  formulas=${r.formulaCells}  merges=${r.merges}  images=${r.images}  tables=${r.tables}`);
+    console.log(`    sheets=${r.sheetCount}  cells=${r.cells}  rich=${r.richCells}  formulas=${r.formulaCells}  merges=${r.merges}  images=${r.images}  tables=${r.tables}  charts=${r.charts}  pivots=${r.pivots}`);
     if (Object.keys(r.cfTypes).length) console.log(`    cf rules: ${JSON.stringify(r.cfTypes)}`);
     if (r.unknownIconSets?.length) console.log(`    ⚠  unknown iconSet(s): ${r.unknownIconSets.join(', ')}`);
     if (r.unknownPatternFills) console.log(`    ⚠  non-solid fills: ${JSON.stringify(r.unknownPatternFills)}`);
@@ -239,6 +267,19 @@ printMap('unsupported cf rule types',  tallies.unsupportedCfRuleTypes);
 printMap('unknown iconSet names',      tallies.unknownIconSets);
 printMap('unsupported pattern fills',  tallies.unknownPatternFills);
 printMap('dropped part directories',   tallies.droppedPartPrefixes);
+
+// Sheet-level <extLst> URIs, across every sheet of every file. URIs are
+// guid-like strings so we print them in full — the count column + a short
+// heuristic hint is enough to eyeball which extensions are common (x14
+// sparklines, xda dynamic-array spill, dataValidations extensions, etc.).
+if (tallies.extLstUris.size) {
+    console.log('\nmost common extLst URIs:');
+    const entries = [...tallies.extLstUris.entries()].sort((a, b) => b[1] - a[1]);
+    for (const [uri, count] of entries.slice(0, 20)) {
+        console.log(`  ${String(count).padStart(4)}  ${uri}${extLstHint(uri)}`);
+    }
+    if (entries.length > 20) console.log(`  …and ${entries.length - 20} more`);
+}
 if (tallies.unresolvedColors) {
     console.log(`unresolved theme colour refs: ${tallies.unresolvedColors} (summed across styles / files)`);
 }

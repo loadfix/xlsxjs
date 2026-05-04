@@ -53,6 +53,10 @@ function renderStyle(className: string): HTMLStyleElement {
 .${className} .xlsx-frozen-both { position: sticky; left: 0; top: 0; z-index: 3; background: inherit; }
 .${className} .xlsx-autofilter::after { content: " ▾"; color: #888; font-size: 0.85em; }
 .${className} .xlsx-table-caption { font-size: 0.85em; color: #666; margin: 0.25rem 0 0; }
+.${className} .xlsx-chart-placeholder {
+    border: 1px dashed #999; padding: 1em; margin: 0.5em 0;
+    color: #666; font-size: 0.9em; text-align: center;
+}
     `.trim();
     return style;
 }
@@ -420,6 +424,23 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, o
         el.style.maxWidth = '100%';
         fig.appendChild(el);
         section.appendChild(fig);
+    }
+
+    // Chart placeholders. We don't render chart content (the chart XML
+    // describes a plot, not a renderable bitmap), but we surface a dashed
+    // placeholder so consumers can see a chart lives at this anchor — and so
+    // diff tools notice drift against an Excel re-save.
+    for (const chart of sheet.charts) {
+        const ph = document.createElement('div');
+        ph.className = 'xlsx-chart-placeholder';
+        ph.setAttribute('data-chart-kind', chart.kind);
+        if (chart.chartType) ph.setAttribute('data-chart-type', chart.chartType);
+        ph.setAttribute('data-anchor-col', String(chart.col));
+        ph.setAttribute('data-anchor-row', String(chart.row));
+        if (chart.endCol !== null) ph.setAttribute('data-anchor-end-col', String(chart.endCol));
+        if (chart.endRow !== null) ph.setAttribute('data-anchor-end-row', String(chart.endRow));
+        ph.textContent = `[chart: ${chart.chartType ?? chart.kind}]`;
+        section.appendChild(ph);
     }
     return section;
 }
