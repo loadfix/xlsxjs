@@ -1,0 +1,50 @@
+{
+  "name": "xlsx-preview",
+  "version": "0.0.1",
+  "license": "Apache-2.0",
+  "keywords": [
+    "excel",
+    "xlsx",
+    "spreadsheet"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/example/xlsxjs.git"
+  },
+  "dependencies": {
+    "jszip": ">=3.0.0"
+  },
+  "devDependencies": {
+    "rollup": "^4.9.1",
+    "@rollup/plugin-terser": "^0.4.4",
+    "@rollup/plugin-typescript": "^12.1.4",
+    "jasmine-core": "^5.1.0",
+    "jsdom": "^29.1.1",
+    "karma": "^6.3.9",
+    "karma-chrome-launcher": "^3.1.0",
+    "karma-jasmine": "^5.0.0",
+    "tslib": "^2.4.0",
+    "typescript": "^5.0.3"
+  },
+  "scripts": {
+    "build": "rollup --config rollup.config.mjs",
+    "build-prod": "rollup --config rollup.config.mjs --environment BUILD:production",
+    "watch": "rollup --config rollup.config.mjs --watch",
+    "serve": "node scripts/dev-server.mjs",
+    "dev": "npm run build && npm run serve",
+    "e2e": "karma start karma.conf.cjs --single-run",
+    "e2e-watch": "karma start karma.conf.cjs",
+    "test:render": "npm run build && node scripts/test-render.mjs"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/xlsx-preview.mjs",
+      "require": "./dist/xlsx-preview.js",
+      "types": "./dist/xlsx-preview.d.ts"
+    }
+  },
+  "types": "dist/xlsx-preview.d.ts"
+}

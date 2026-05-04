@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>xlsxjs demo</title>
+    <script crossorigin src="https://unpkg.com/jszip/dist/jszip.min.js"></script>
+    <script src="dist/xlsx-preview.js"></script>
+    <style>
+        body { margin: 0; font-family: system-ui, sans-serif; }
+        .toolbar { display: flex; gap: 0.5rem; padding: 0.5rem; background: #f5f5f5; border-bottom: 1px solid #ddd; }
+        #container { padding: 1rem; }
+    </style>
+</head>
+<body>
+    <div class="toolbar">
+        <input id="files" type="file" accept=".xlsx" />
+    </div>
+    <div id="container"></div>
+
+    <script>
+        let currentWorkbook = null;
+        const xlsxOptions = Object.assign({}, xlsx.defaultOptions);
+        const container = document.querySelector('#container');
+        const fileInput = document.querySelector('#files');
+
+        async function renderXlsx(file) {
+            currentWorkbook = file;
+            if (!file) return;
+            const res = await xlsx.renderAsync(file, container, null, xlsxOptions);
+            console.log(res);
+        }
+
+        fileInput.addEventListener('change', () => renderXlsx(fileInput.files[0]));
+        container.addEventListener('dragover', (ev) => ev.preventDefault());
+        container.addEventListener('drop', (ev) => {
+            ev.preventDefault();
+            renderXlsx(ev.dataTransfer.files[0]);
+        });
+    </script>
+</body>
+</html>

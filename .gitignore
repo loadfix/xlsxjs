@@ -1,0 +1,8 @@
+node_modules
+.vs
+bin
+obj
+xlsx.js.map
+*.log
+.screenshots
+.playwright-mcp
