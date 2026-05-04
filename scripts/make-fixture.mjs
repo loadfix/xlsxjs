@@ -960,3 +960,65 @@ await writeFixture('merged', {
     writeFileSync(out, buf);
     console.log(`wrote ${out} (${buf.length} bytes)`);
 }
+
+// ── numfmt-r2 ─────────────────────────────────────────────────────────────
+// Hand-built XLSX exercising the number-format round-2 surface:
+//   A1 (s=1) numFmtId=164 "[Red]#,##0"          value=100   → "100", red text
+//   A2 (s=2) numFmtId=165 "[>100][Red]#,##0;[<0][Blue]#,##0;#,##0"
+//                                                 value=150   → "150", red
+//   A3 (s=2) same predicate format               value=-50   → "-50", blue
+//   A4 (s=2) same predicate format               value=25    → "25",  default
+// The cellXf chain uses applyNumberFormat="1" so the format code wins.
+{
+    const outDir = resolve(repo, 'tests/render-test/numfmt-r2');
+    mkdirSync(outDir, { recursive: true });
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>`);
+    zip.file('_rels/.rels', rootRels);
+    zip.file('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`);
+    zip.file('xl/workbook.xml', workbookXml('NumFmtR2'));
+    // Two custom numFmts:
+    //   164: [Red]#,##0                                    — cell-level colour
+    //   165: [>100][Red]#,##0;[<0][Blue]#,##0;#,##0       — conditional
+    // formatCode attribute uses &gt; / &lt; since the XML attribute value
+    // can't carry the raw < / > characters.
+    zip.file('xl/styles.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <numFmts count="2">
+    <numFmt numFmtId="164" formatCode="[Red]#,##0"/>
+    <numFmt numFmtId="165" formatCode="[&gt;100][Red]#,##0;[&lt;0][Blue]#,##0;#,##0"/>
+  </numFmts>
+  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellXfs count="3">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+    <xf numFmtId="164" fontId="0" fillId="0" borderId="0" applyNumberFormat="1"/>
+    <xf numFmtId="165" fontId="0" fillId="0" borderId="0" applyNumberFormat="1"/>
+  </cellXfs>
+</styleSheet>`);
+    zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="A1" s="1"><v>100</v></c></row>
+    <row r="2"><c r="A2" s="2"><v>150</v></c></row>
+    <row r="3"><c r="A3" s="2"><v>-50</v></c></row>
+    <row r="4"><c r="A4" s="2"><v>25</v></c></row>
+  </sheetData>
+</worksheet>`);
+    const buf = await zip.generateAsync({ type: 'nodebuffer' });
+    const out = resolve(outDir, 'workbook.xlsx');
+    writeFileSync(out, buf);
+    console.log(`wrote ${out} (${buf.length} bytes)`);
+}

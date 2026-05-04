@@ -1560,6 +1560,135 @@ async function renderFixture(path, options) {
         `52j: C1 (-2) should NOT be re-formatted (got "${c1.textContent}")`);
 }
 
+// ── 53. Format-code colour modifiers: [Red], [Blue], [Color N] ───────────
+// formatNumber's FormatResult now carries an optional `color: '#rrggbb'`
+// picked off the section's bracket prefix. Positive-only `[Red]…` colours
+// every section; split-form `0;[Red]-0` only colours negative numbers.
+{
+    const fn = globalThis.xlsx.formatNumber;
+    const redPos = fn('100', '[Red]#,##0');
+    assert(redPos.text === '100', `53a: [Red]#,##0 of 100 should be "100" (got "${redPos.text}")`);
+    assert(redPos.color === '#ff0000', `53b: [Red] should resolve to #ff0000 (got ${redPos.color})`);
+
+    // Split format: positive section has no colour, negative carries [Red].
+    // The matched section dictates the colour.
+    const negOnly = fn('-100', '[Blue]0;[Red]-0');
+    assert(negOnly.color === '#ff0000',
+        `53c: [Red] on negative section should fire for -100 (got ${negOnly.color})`);
+    const posOnly = fn('100', '[Blue]0;[Red]-0');
+    assert(posOnly.color === '#0000ff',
+        `53d: [Blue] on positive section should fire for 100 (got ${posOnly.color})`);
+
+    // [Color N] uses the indexed palette (1-based in Excel). Index 3 in the
+    // legacy palette (ECMA-376) is #ff0000, so [Color 3] → red.
+    const palette = fn('1', '[Color 3]0');
+    assert(palette.color === '#ff0000',
+        `53e: [Color 3] should resolve via indexed palette to red (got ${palette.color})`);
+
+    // Plain numeric format leaves color null.
+    const noColor = fn('1', '#,##0');
+    assert(noColor.color === null, `53f: plain format should have color null (got ${noColor.color})`);
+
+    // Renderer path: the numfmt-r2 fixture's A1 uses [Red]#,##0; the td's
+    // style.color must land on #ff0000 (jsdom may normalise to rgb(…)).
+    const { container } = await renderFixture('numfmt-r2');
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    const a1 = rows[0].querySelectorAll('td')[0];
+    assert(a1.textContent === '100', `53g: A1 text should be "100" (got "${a1.textContent}")`);
+    assert(/rgb\(255,\s*0,\s*0\)/.test(a1.style.color) || a1.style.color === '#ff0000',
+        `53h: A1 td.style.color should be red (got "${a1.style.color}")`);
+}
+
+// ── 54. Conditional section predicates: [>N], [<N], [=N] ─────────────────
+// The first bracket of a section can be a predicate that decides which
+// section fires. Predicates win over the positional (positive/negative/zero)
+// default when ANY section carries one.
+{
+    const fn = globalThis.xlsx.formatNumber;
+
+    // Three-way split with [>3]"big"; [<3]"small"; "ok" fallback.
+    const code = '[>3]"big";[<3]"small";"ok"';
+    assert(fn('5', code).text === 'big', `54a: 5 matches [>3] (got "${fn('5', code).text}")`);
+    assert(fn('1', code).text === 'small', `54b: 1 matches [<3] (got "${fn('1', code).text}")`);
+    assert(fn('3', code).text === 'ok', `54c: 3 falls through to fallback (got "${fn('3', code).text}")`);
+
+    // Equality + comparison ops.
+    assert(fn('10', '[=10]"match";0').text === 'match', `54d: [=10] match`);
+    assert(fn('11', '[=10]"match";0').text === '11', `54e: [=10] miss → 11`);
+    assert(fn('5', '[>=5]"hi";"lo"').text === 'hi', `54f: [>=5] inclusive`);
+    assert(fn('4', '[<>5]"not5";"is5"').text === 'not5', `54g: [<>5] excluded match`);
+    // Predicate section preserves colour.
+    const colored = fn('150', '[>100][Red]#,##0;[<0][Blue]#,##0;#,##0');
+    assert(colored.text === '150', `54h: predicate + color section text (got "${colored.text}")`);
+    assert(colored.color === '#ff0000', `54i: predicate section colour (got ${colored.color})`);
+    // Fallback section: value 50 should land on "#,##0" with no colour.
+    const fallback = fn('50', '[>100][Red]#,##0;[<0][Blue]#,##0;#,##0');
+    assert(fallback.text === '50', `54j: fallback text (got "${fallback.text}")`);
+    assert(fallback.color === null, `54k: fallback colour null (got ${fallback.color})`);
+    // Negative section.
+    const negSect = fn('-50', '[>100][Red]#,##0;[<0][Blue]#,##0;#,##0');
+    assert(negSect.color === '#0000ff', `54l: negative predicate section blue (got ${negSect.color})`);
+
+    // Renderer: numfmt-r2 A2 (value 150) → red; A3 (−50) → blue; A4 (25) default.
+    const { container } = await renderFixture('numfmt-r2');
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    const a2 = rows[1].querySelectorAll('td')[0];
+    const a3 = rows[2].querySelectorAll('td')[0];
+    const a4 = rows[3].querySelectorAll('td')[0];
+    assert(/rgb\(255,\s*0,\s*0\)/.test(a2.style.color) || a2.style.color === '#ff0000',
+        `54m: A2 (150) should be red (got "${a2.style.color}")`);
+    assert(/rgb\(0,\s*0,\s*255\)/.test(a3.style.color) || a3.style.color === '#0000ff',
+        `54n: A3 (−50) should be blue (got "${a3.style.color}")`);
+    assert(a4.style.color === '', `54o: A4 (25) should have no format-code colour (got "${a4.style.color}")`);
+}
+
+// ── 55. Fraction formats: # ?/? and # ??/?? best-fit fractions ────────────
+// Single-digit denominators allow up to 9; double-digit up to 99. Exact
+// rationals render cleanly; irrationals land on the best continued-fraction
+// approximation within the denominator cap.
+{
+    const fn = globalThis.xlsx.formatNumber;
+    assert(fn('0.25', '# ?/?').text === '0 1/4',
+        `55a: 0.25 under # ?/? → "0 1/4" (got "${fn('0.25', '# ?/?').text}")`);
+    assert(fn('0.5', '# ?/?').text === '0 1/2',
+        `55b: 0.5 under # ?/? → "0 1/2" (got "${fn('0.5', '# ?/?').text}")`);
+    // 0.333 nearest under `??` denom is 1/3.
+    assert(fn('0.333', '# ??/??').text === '0 1/3',
+        `55c: 0.333 under # ??/?? → "0 1/3" (got "${fn('0.333', '# ??/??').text}")`);
+    // Whole + fraction: 2.75 = 2 3/4.
+    assert(fn('2.75', '# ?/?').text === '2 3/4',
+        `55d: 2.75 under # ?/? → "2 3/4" (got "${fn('2.75', '# ?/?').text}")`);
+    // Exact integer renders without fraction.
+    assert(fn('3', '# ?/?').text === '3',
+        `55e: integer under fraction code → "3" (got "${fn('3', '# ?/?').text}")`);
+    // Negative: magnitude fraction, leading minus.
+    assert(fn('-0.5', '# ?/?').text === '-0 1/2',
+        `55f: -0.5 under # ?/? (got "${fn('-0.5', '# ?/?').text}")`);
+}
+
+// ── 56. Scientific + engineering notation ─────────────────────────────────
+// Classic scientific: mantissa with one integer digit. Engineering: mantissa
+// with up to 3 integer digits, exponent snapped to a multiple of 3.
+{
+    const fn = globalThis.xlsx.formatNumber;
+    assert(fn('12345.678', '0.00E+00').text === '1.23E+04',
+        `56a: 12345.678 under 0.00E+00 → "1.23E+04" (got "${fn('12345.678', '0.00E+00').text}")`);
+    assert(fn('12345.678', '##0.0E+0').text === '12.3E+3',
+        `56b: 12345.678 under ##0.0E+0 → "12.3E+3" (got "${fn('12345.678', '##0.0E+0').text}")`);
+    // Small number: 0.00045 → "4.50E-04".
+    assert(fn('0.00045', '0.00E+00').text === '4.50E-04',
+        `56c: 0.00045 under 0.00E+00 → "4.50E-04" (got "${fn('0.00045', '0.00E+00').text}")`);
+    // Exact 1 → "1.00E+00".
+    assert(fn('1', '0.00E+00').text === '1.00E+00',
+        `56d: 1 under 0.00E+00 → "1.00E+00" (got "${fn('1', '0.00E+00').text}")`);
+    // Zero → "0.00E+00" (special-cased).
+    assert(fn('0', '0.00E+00').text === '0.00E+00',
+        `56e: 0 under 0.00E+00 → "0.00E+00" (got "${fn('0', '0.00E+00').text}")`);
+    // E- explicit-negative format: exponent sign only when negative.
+    assert(fn('12345', '0.0E-0').text === '1.2E4',
+        `56f: 12345 under 0.0E-0 → positive exponent renders with no sign (got "${fn('12345', '0.0E-0').text}")`);
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
