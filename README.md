@@ -2,7 +2,7 @@
 
 Browser-side XLSX → HTML renderer, written from scratch in TypeScript and following the architecture of the sibling [docxjs](https://github.com/loadfix/docxjs) library (TypeScript + rollup + karma, JSZip for package I/O). Not affiliated with SheetJS or other libraries that share the xlsx name.
 
-Opens an `.xlsx`, walks every sheet, and emits an HTML table per sheet with column-letter headers, row-number gutters, cell formatting from `xl/styles.xml` (fonts, fills, borders, alignment — including `wrapText`, `shrinkToFit`, `indent`, `textRotation` (incl. stacked), `readingOrder`, and the widened horizontal/vertical enums — number formats), merged cells, frozen panes, autoFilter markers, parsed tables, conditional formatting (including colour scales, data bars, and icon sets), embedded images, classic + threaded comments, and per-sheet display state (visibility, RTL direction, grid-line / header toggles, zoom, and tab colour).
+Opens an `.xlsx`, walks every sheet, and emits an HTML table per sheet with column-letter headers, row-number gutters, cell formatting from `xl/styles.xml` (fonts, fills, borders, alignment — including `wrapText`, `shrinkToFit`, `indent`, `textRotation` (incl. stacked), `readingOrder`, and the widened horizontal/vertical enums — number formats), merged cells, frozen or split panes, autoFilter markers, parsed tables, conditional formatting (including colour scales, data bars, and icon sets), embedded images, classic + threaded comments, per-sheet display state (visibility, RTL direction, grid-line / header toggles, zoom, and tab colour), and page-layout metadata (manual row/column page breaks, `_xlnm.Print_Area` resolution, and three-zone `<headerFooter>` text).
 
 ## Installation
 

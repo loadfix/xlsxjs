@@ -1022,3 +1022,54 @@ await writeFixture('merged', {
     writeFileSync(out, buf);
     console.log(`wrote ${out} (${buf.length} bytes)`);
 }
+
+// ── page-layout ───────────────────────────────────────────────────────────
+// Exercises the page-layout metadata surface: manual row/column page
+// breaks, the `_xlnm.Print_Area` defined name resolving to a cell range,
+// and a <headerFooter> with &L/&C/&R zones plus substitution codes.
+// Two manual row breaks (XML ids 10 and 20 → 0-based indices 9 and 19)
+// and one manual col break (id 5 → idx 4). Print area "Sheet1!$A$1:$C$5"
+// resolves to {col:0, row:0, endCol:2, endRow:4}. The header's &D code
+// is substituted with today's date; &P stays literal (no pagination).
+{
+    const outDir = resolve(repo, 'tests/render-test/page-layout');
+    mkdirSync(outDir, { recursive: true });
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', contentTypes);
+    zip.file('_rels/.rels', rootRels);
+    zip.file('xl/_rels/workbook.xml.rels', workbookRels);
+    zip.file('xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+  <definedNames>
+    <definedName name="_xlnm.Print_Area" localSheetId="0">Sheet1!$A$1:$C$5</definedName>
+  </definedNames>
+</workbook>`);
+    zip.file('xl/sharedStrings.xml', sharedStringsXml(['a', 'b', 'c']));
+    zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c></row>
+    <row r="2"><c r="A2"><v>1</v></c><c r="B2"><v>2</v></c><c r="C2"><v>3</v></c></row>
+    <row r="3"><c r="A3"><v>4</v></c><c r="B3"><v>5</v></c><c r="C3"><v>6</v></c></row>
+  </sheetData>
+  <headerFooter>
+    <oddHeader>&amp;LMy Report&amp;C&amp;D&amp;RPage &amp;P</oddHeader>
+    <oddFooter>&amp;CFooter</oddFooter>
+  </headerFooter>
+  <rowBreaks count="2" manualBreakCount="2">
+    <brk id="10" man="1"/>
+    <brk id="20" man="1"/>
+  </rowBreaks>
+  <colBreaks count="1" manualBreakCount="1">
+    <brk id="5" man="1"/>
+  </colBreaks>
+</worksheet>`);
+    const buf = await zip.generateAsync({ type: 'nodebuffer' });
+    const out = resolve(outDir, 'workbook.xlsx');
+    writeFileSync(out, buf);
+    console.log(`wrote ${out} (${buf.length} bytes)`);
+}

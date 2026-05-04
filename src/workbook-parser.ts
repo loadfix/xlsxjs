@@ -146,14 +146,56 @@ export interface DefinedName {
 }
 
 // Frozen / split pane metadata from <sheetViews><sheetView><pane ...>. xlsxjs
-// renders frozen panes as sticky <th>/<td> borders; splits without freeze
-// are not represented visually.
+// renders frozen panes as sticky <th>/<td> borders; a plain `state="split"`
+// (scroll split without freeze) carries the same visual treatment, but
+// `kind` distinguishes the two so consumers can tell them apart.
 export interface FrozenPanes {
+    // 'frozen' for state="frozen" or "frozenSplit"; 'split' for state="split"
+    // (scroll split without freezing). Renderer treats both identically.
+    kind: 'frozen' | 'split';
     // 0-based column index at which horizontal freeze begins, or null when
     // no horizontal freeze. A value of 3 means cols 0..2 are frozen.
     xSplit: number | null;
     // Same for rows.
     ySplit: number | null;
+}
+
+// Page-break metadata from <rowBreaks>/<colBreaks>. Only manual breaks
+// (man="1") are captured — automatic breaks are Excel's pagination hints,
+// not author intent. Indices are 0-based.
+export interface PageBreaks {
+    rows: number[];
+    cols: number[];
+}
+
+// A resolved print area range from a `_xlnm.Print_Area` defined name. The
+// defined name's `formula` is parsed into cell-range coordinates here so
+// consumers don't need to re-parse the reference string. Multiple entries
+// arise when a single Print_Area formula carries a comma-separated list
+// of ranges (rare, but legal per ECMA-376).
+export interface PrintAreaRange {
+    col: number;
+    row: number;
+    endCol: number;
+    endRow: number;
+}
+
+// Header/footer zones split out of the &L / &C / &R codes in a single
+// header or footer string. Substitution codes (&P, &N, &D, &T, &F, &A)
+// are resolved eagerly during parsing using the sheet / workbook context;
+// &P and &N remain literal since xlsxjs does not paginate.
+export interface HeaderFooterZones {
+    left: string;
+    center: string;
+    right: string;
+}
+
+// Sheet <headerFooter> metadata. Only oddHeader/oddFooter are surfaced —
+// even / first-page variants are schema-legal but rarely used in practice
+// and a viewer that doesn't paginate can't select between them anyway.
+export interface HeaderFooter {
+    oddHeader: HeaderFooterZones | null;
+    oddFooter: HeaderFooterZones | null;
 }
 
 // <autoFilter ref="A1:D10"/> — the range that has filter dropdowns. We
@@ -326,6 +368,16 @@ export interface Sheet {
     outline: SheetOutline;
     hyperlinks: Hyperlink[];
     dataValidationLists: DataValidationList[];
+    // Manual row/column page breaks (0-based indices). Empty arrays when the
+    // sheet declares no <rowBreaks>/<colBreaks> or every break is automatic.
+    pageBreaks: PageBreaks;
+    // Print ranges resolved from `_xlnm.Print_Area` defined names scoped to
+    // this sheet (via `localSheetId`). Null when the workbook declares no
+    // print area for the sheet.
+    printArea: PrintAreaRange[] | null;
+    // <headerFooter> metadata. Null when the sheet has no headerFooter entry
+    // (or neither oddHeader nor oddFooter carries any substituted content).
+    headerFooter: HeaderFooter | null;
 }
 
 export interface Workbook {
@@ -413,7 +465,7 @@ export class WorkbookParser {
             const comments = resolveCommentsForSheet(xmlPath, parts);
             const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
             const hyperlinkTargets = resolveHyperlinkTargets(xmlPath, parts);
-            sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments, hyperlinkTargets));
+            sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments, hyperlinkTargets, i, definedNames));
         }
 
         return { sheets, styles, theme, persons, date1904, definedNames };
@@ -1071,6 +1123,8 @@ function parseSheet(
     comments: SheetComment[] = [],
     threadedComments: ThreadedCommentEntry[] = [],
     hyperlinkTargets: Map<string, string> = new Map(),
+    sheetIndex: number = 0,
+    definedNames: DefinedName[] = [],
 ): Sheet {
     const doc = parseXml(xml);
     const rowEls = doc.getElementsByTagNameNS(NS.main, 'row');
@@ -1137,6 +1191,9 @@ function parseSheet(
     const outline = parseSheetOutline(doc);
     const hyperlinks = parseHyperlinks(doc, hyperlinkTargets);
     const dataValidationLists = parseDataValidationLists(doc);
+    const pageBreaks = parsePageBreaks(doc);
+    const printArea = resolvePrintArea(sheetIndex, definedNames);
+    const headerFooter = parseHeaderFooter(doc, name);
 
     // Extend maxCol/maxRow to cover hyperlink and data-validation ranges even
     // when the underlying cells are empty — the ▾ indicator / anchor still
@@ -1154,7 +1211,7 @@ function parseSheet(
         name, state, rows, maxCol, maxRow, merges, columns, rowDimensions,
         conditionalFormatting, frozenPanes, autoFilter, tables, images,
         charts, pivots, extensions, comments, threadedComments, view, outline,
-        hyperlinks, dataValidationLists,
+        hyperlinks, dataValidationLists, pageBreaks, printArea, headerFooter,
     };
 }
 
@@ -1337,15 +1394,195 @@ function parseFrozenPanes(doc: Document): FrozenPanes | null {
     const pane = doc.getElementsByTagNameNS(NS.main, 'pane').item(0);
     if (!pane) return null;
     const state = pane.getAttribute('state');
-    // Only render freeze / frozenSplit states; a plain "split" is a split
-    // without freezing and we don't support that visually.
-    if (state !== 'frozen' && state !== 'frozenSplit') return null;
+    // `frozen` / `frozenSplit` are freezes; plain `split` is a scroll split
+    // without freezing. Renderer treats both identically (sticky cells via
+    // the existing .xlsx-frozen-* classes); `kind` preserves the distinction
+    // on the model so consumers can tell one from the other.
+    let kind: 'frozen' | 'split';
+    if (state === 'frozen' || state === 'frozenSplit') kind = 'frozen';
+    else if (state === 'split') kind = 'split';
+    else return null;
     const xSplit = Number(pane.getAttribute('xSplit'));
     const ySplit = Number(pane.getAttribute('ySplit'));
     const x = Number.isFinite(xSplit) && xSplit > 0 ? xSplit : null;
     const y = Number.isFinite(ySplit) && ySplit > 0 ? ySplit : null;
     if (x === null && y === null) return null;
-    return { xSplit: x, ySplit: y };
+    return { kind, xSplit: x, ySplit: y };
+}
+
+// Parse <rowBreaks>/<colBreaks>. Each holds <brk id="N" man="1"> entries;
+// `id` is the 1-based row or column after which the page break lies, so we
+// subtract one to store 0-based indices. Automatic breaks (man absent or
+// "0") are Excel's auto-pagination hints and skipped here — we only want
+// manual breaks placed by the author.
+function parsePageBreaks(doc: Document): PageBreaks {
+    const rows: number[] = [];
+    const cols: number[] = [];
+    const rowWrap = doc.getElementsByTagNameNS(NS.main, 'rowBreaks').item(0);
+    if (rowWrap) {
+        const brks = rowWrap.getElementsByTagNameNS(NS.main, 'brk');
+        for (let i = 0; i < brks.length; i++) {
+            const el = brks[i];
+            if (el.getAttribute('man') !== '1') continue;
+            const id = Number(el.getAttribute('id'));
+            if (!Number.isFinite(id) || id <= 0) continue;
+            rows.push(id - 1);
+        }
+    }
+    const colWrap = doc.getElementsByTagNameNS(NS.main, 'colBreaks').item(0);
+    if (colWrap) {
+        const brks = colWrap.getElementsByTagNameNS(NS.main, 'brk');
+        for (let i = 0; i < brks.length; i++) {
+            const el = brks[i];
+            if (el.getAttribute('man') !== '1') continue;
+            const id = Number(el.getAttribute('id'));
+            if (!Number.isFinite(id) || id <= 0) continue;
+            cols.push(id - 1);
+        }
+    }
+    return { rows, cols };
+}
+
+// Parse <headerFooter><oddHeader>…</oddHeader><oddFooter>…</oddFooter>.
+// The header/footer string is split into left/center/right zones by the
+// `&L` / `&C` / `&R` section codes; substitution codes (&D, &T, &F, &A,
+// &P, &N) are resolved eagerly using the sheet context so the returned
+// zones are ready to render. `sheetName` seeds &A; there is no workbook
+// file name accessible to a browser-side viewer, so &F stays literal.
+function parseHeaderFooter(doc: Document, sheetName: string): HeaderFooter | null {
+    const hf = doc.getElementsByTagNameNS(NS.main, 'headerFooter').item(0);
+    if (!hf) return null;
+    const oddHeader = hf.getElementsByTagNameNS(NS.main, 'oddHeader').item(0);
+    const oddFooter = hf.getElementsByTagNameNS(NS.main, 'oddFooter').item(0);
+    const parseOne = (el: Element | null): HeaderFooterZones | null => {
+        if (!el) return null;
+        const raw = el.textContent ?? '';
+        if (raw === '') return null;
+        const zones = splitHeaderFooterZones(raw);
+        return {
+            left: substituteHeaderFooterCodes(zones.left, sheetName),
+            center: substituteHeaderFooterCodes(zones.center, sheetName),
+            right: substituteHeaderFooterCodes(zones.right, sheetName),
+        };
+    };
+    const header = parseOne(oddHeader);
+    const footer = parseOne(oddFooter);
+    if (!header && !footer) return null;
+    return { oddHeader: header, oddFooter: footer };
+}
+
+// Split a header/footer string into its left/center/right zones. Excel
+// delimits zones with `&L`, `&C`, `&R` (uppercase). A string with no zone
+// markers defaults to the center zone. Zone markers can appear in any
+// order and more than once; the last occurrence wins per Excel's
+// behaviour. Double-ampersand (`&&`) is a literal `&` — we leave it
+// in place so the substitution pass can see the escape.
+function splitHeaderFooterZones(raw: string): HeaderFooterZones {
+    const out: HeaderFooterZones = { left: '', center: '', right: '' };
+    let zone: 'left' | 'center' | 'right' = 'center';
+    let i = 0;
+    while (i < raw.length) {
+        if (raw[i] === '&' && i + 1 < raw.length) {
+            const next = raw[i + 1];
+            if (next === 'L') { zone = 'left'; i += 2; continue; }
+            if (next === 'C') { zone = 'center'; i += 2; continue; }
+            if (next === 'R') { zone = 'right'; i += 2; continue; }
+            // Keep every other &X sequence verbatim so the substitution
+            // pass can resolve it; `&&` falls into this branch too.
+            out[zone] += raw[i] + raw[i + 1];
+            i += 2;
+            continue;
+        }
+        out[zone] += raw[i];
+        i += 1;
+    }
+    return out;
+}
+
+// Resolve the substitution codes inside one header/footer zone. Codes
+// supported:
+//   &D — current date        →  ISO yyyy-mm-dd from `new Date()`
+//   &T — current time        →  HH:MM:SS from `new Date()`
+//   &F — workbook file name  →  literal "&F" (not known to the viewer)
+//   &A — sheet name          →  the passed-in sheetName
+//   &P — current page        →  literal "(page)"   (no pagination)
+//   &N — total pages         →  literal "(total)"  (no pagination)
+//   && — escaped ampersand   →  single "&"
+// Every other `&X` sequence is left verbatim so consumers who want to
+// interpret them themselves can.
+function substituteHeaderFooterCodes(text: string, sheetName: string): string {
+    let out = '';
+    let i = 0;
+    const now = new Date();
+    const pad = (n: number) => (n < 10 ? `0${n}` : String(n));
+    const dateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    const timeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+    while (i < text.length) {
+        if (text[i] === '&' && i + 1 < text.length) {
+            const next = text[i + 1];
+            if (next === '&') { out += '&'; i += 2; continue; }
+            if (next === 'D') { out += dateStr; i += 2; continue; }
+            if (next === 'T') { out += timeStr; i += 2; continue; }
+            if (next === 'F') { out += '&F'; i += 2; continue; }
+            if (next === 'A') { out += sheetName; i += 2; continue; }
+            if (next === 'P') { out += '(page)'; i += 2; continue; }
+            if (next === 'N') { out += '(total)'; i += 2; continue; }
+            // Unknown code — preserve verbatim.
+            out += text[i] + text[i + 1];
+            i += 2;
+            continue;
+        }
+        out += text[i];
+        i += 1;
+    }
+    return out;
+}
+
+// Resolve `_xlnm.Print_Area` defined names scoped to a particular sheet.
+// Excel persists the print area as a defined name whose formula is one or
+// more cell references (e.g. "Sheet1!$A$1:$C$5"). We parse the range part
+// of each reference into cell coordinates; the sheet-name prefix is not
+// validated — the defined name's localSheetId already binds it to this
+// sheet. Unparseable refs are skipped rather than failing the whole list
+// so a malformed producer doesn't lose the valid entries.
+function resolvePrintArea(sheetIndex: number, definedNames: DefinedName[]): PrintAreaRange[] | null {
+    const hits = definedNames.filter(
+        (n) => n.name === '_xlnm.Print_Area' && n.localSheetId === sheetIndex,
+    );
+    if (hits.length === 0) return null;
+    const out: PrintAreaRange[] = [];
+    for (const n of hits) {
+        // A print area can be a comma-separated list of refs (rare but legal).
+        // Each ref is "[SheetName!]$A$1:$B$2" or "[SheetName!]$A$1".
+        const parts = n.formula.split(',');
+        for (const part of parts) {
+            const range = parsePrintAreaRef(part.trim());
+            if (range) out.push(range);
+        }
+    }
+    return out.length > 0 ? out : null;
+}
+
+// Parse a single print-area reference like "Sheet1!$A$1:$C$5" or the
+// degenerate single-cell form "Sheet1!$A$1". The sheet-name prefix (before
+// a `!`, optionally single-quoted) is stripped; the absolute-ref dollar
+// signs are ignored. Returns null when either endpoint fails to parse.
+function parsePrintAreaRef(ref: string): PrintAreaRange | null {
+    let body = ref;
+    const bangIdx = body.lastIndexOf('!');
+    if (bangIdx >= 0) body = body.slice(bangIdx + 1);
+    const clean = body.replace(/\$/g, '');
+    const [tl, br] = clean.split(':');
+    const a = parseCellRef(tl);
+    if (!a) return null;
+    const b = br ? parseCellRef(br) : a;
+    if (!b) return null;
+    return {
+        col: Math.min(a.col, b.col),
+        row: Math.min(a.row, b.row),
+        endCol: Math.max(a.col, b.col),
+        endRow: Math.max(a.row, b.row),
+    };
 }
 
 function parseAutoFilter(doc: Document): AutoFilter | null {

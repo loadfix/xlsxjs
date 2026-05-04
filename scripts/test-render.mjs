@@ -1689,6 +1689,101 @@ async function renderFixture(path, options) {
         `56f: 12345 under 0.0E-0 → positive exponent renders with no sign (got "${fn('12345', '0.0E-0').text}")`);
 }
 
+// ── 57. Page-layout: manual row/col breaks parse + data attrs on section ──
+{
+    const { wb, container } = await renderFixture('page-layout');
+    const sheet = wb.parsed.sheets[0];
+
+    // Parser: two row breaks (ids 10, 20 → 0-based 9, 19), one col break
+    // (id 5 → 0-based 4). Automatic breaks aren't present in this fixture
+    // but the parser would filter them out.
+    assert(Array.isArray(sheet.pageBreaks?.rows), '57a: pageBreaks.rows should be an array');
+    assert(sheet.pageBreaks.rows.includes(9),
+        `57b: pageBreaks.rows should contain 9 (got ${JSON.stringify(sheet.pageBreaks.rows)})`);
+    assert(sheet.pageBreaks.rows.includes(19),
+        `57c: pageBreaks.rows should contain 19 (got ${JSON.stringify(sheet.pageBreaks.rows)})`);
+    assert(sheet.pageBreaks.cols.includes(4),
+        `57d: pageBreaks.cols should contain 4 (got ${JSON.stringify(sheet.pageBreaks.cols)})`);
+
+    // DOM: data-page-break-rows / data-page-break-cols on the section.
+    const section = container.querySelector('section.xlsx');
+    const rowAttr = section.getAttribute('data-page-break-rows');
+    assert(rowAttr !== null && /\b9\b/.test(rowAttr),
+        `57e: section should carry data-page-break-rows with 9 (got "${rowAttr}")`);
+    assert(/\b19\b/.test(rowAttr ?? ''),
+        `57f: section should carry data-page-break-rows with 19 (got "${rowAttr}")`);
+    const colAttr = section.getAttribute('data-page-break-cols');
+    assert(colAttr !== null && /\b4\b/.test(colAttr),
+        `57g: section should carry data-page-break-cols with 4 (got "${colAttr}")`);
+}
+
+// ── 58. Page-layout: Print_Area defined name resolves to a cell range ─────
+{
+    const { wb } = await renderFixture('page-layout');
+    const sheet = wb.parsed.sheets[0];
+
+    // The fixture declares a localSheetId=0 `_xlnm.Print_Area` whose formula
+    // is "Sheet1!$A$1:$C$5" — should resolve to a single PrintAreaRange with
+    // col=0, row=0, endCol=2, endRow=4.
+    assert(Array.isArray(sheet.printArea),
+        `58a: printArea should be an array (got ${JSON.stringify(sheet.printArea)})`);
+    assert(sheet.printArea.length === 1, `58b: printArea should have 1 entry (got ${sheet.printArea.length})`);
+    const pa = sheet.printArea[0];
+    assert(pa.col === 0 && pa.row === 0 && pa.endCol === 2 && pa.endRow === 4,
+        `58c: printArea should resolve to {col:0,row:0,endCol:2,endRow:4} (got ${JSON.stringify(pa)})`);
+}
+
+// ── 59. Page-layout: header/footer zones + substituted &D + DOM render ────
+{
+    const { wb, container } = await renderFixture('page-layout');
+    const sheet = wb.parsed.sheets[0];
+
+    // Parser: oddHeader split into left/center/right; center carries today's
+    // date (from the &D code). oddFooter center-only.
+    assert(sheet.headerFooter !== null, '59a: headerFooter should be parsed');
+    assert(sheet.headerFooter.oddHeader !== null, '59b: oddHeader should be present');
+    assert(sheet.headerFooter.oddHeader.left === 'My Report',
+        `59c: oddHeader.left should be "My Report" (got ${JSON.stringify(sheet.headerFooter.oddHeader.left)})`);
+    // &D → today's ISO date: YYYY-MM-DD.
+    const today = new Date();
+    const pad = (n) => (n < 10 ? `0${n}` : String(n));
+    const iso = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+    assert(sheet.headerFooter.oddHeader.center.includes(iso),
+        `59d: oddHeader.center should include today's date "${iso}" (got ${JSON.stringify(sheet.headerFooter.oddHeader.center)})`);
+    // &P stays literal (no pagination) — renderer emits "(page)".
+    assert(sheet.headerFooter.oddHeader.right.includes('(page)'),
+        `59e: oddHeader.right should include literal "(page)" for &P (got ${JSON.stringify(sheet.headerFooter.oddHeader.right)})`);
+    // oddFooter: only the center zone is non-empty.
+    assert(sheet.headerFooter.oddFooter !== null, '59f: oddFooter should be present');
+    assert(sheet.headerFooter.oddFooter.center === 'Footer',
+        `59g: oddFooter.center should be "Footer" (got ${JSON.stringify(sheet.headerFooter.oddFooter.center)})`);
+
+    // DOM: header + footer div emitted after the table.
+    const headerDiv = container.querySelector('div.xlsx-header');
+    const footerDiv = container.querySelector('div.xlsx-footer');
+    assert(!!headerDiv, '59h: a .xlsx-header div should be rendered');
+    assert(!!footerDiv, '59i: a .xlsx-footer div should be rendered');
+    const headerZones = headerDiv.querySelectorAll('[data-zone]');
+    assert(headerZones.length === 3, `59j: header should have 3 zone divs (got ${headerZones.length})`);
+    const byZone = (parent) => Array.from(parent.querySelectorAll('[data-zone]')).reduce(
+        (acc, z) => { acc[z.getAttribute('data-zone')] = z; return acc; }, {});
+    const hz = byZone(headerDiv);
+    assert(hz.left.textContent === 'My Report', `59k: header left textContent (got "${hz.left.textContent}")`);
+    assert(hz.center.textContent.includes(iso), `59l: header center textContent should include date (got "${hz.center.textContent}")`);
+}
+
+// ── 60. Split panes without freeze: kind='split' surfaces on FrozenPanes ──
+// Regression guard for the widened FrozenPanes.kind field. The existing
+// "tables" fixture uses `state="frozen"` → kind='frozen' + existing
+// sticky-cell classes still apply (see scenario 22).
+{
+    const { wb } = await renderFixture('tables');
+    const sheet = wb.parsed.sheets[0];
+    assert(sheet.frozenPanes !== null, '60a: frozenPanes should be parsed on tables fixture');
+    assert(sheet.frozenPanes.kind === 'frozen',
+        `60b: frozen-state fixture should set kind='frozen' (got ${JSON.stringify(sheet.frozenPanes.kind)})`);
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

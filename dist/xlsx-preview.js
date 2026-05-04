@@ -1427,7 +1427,7 @@
                 const comments = resolveCommentsForSheet(xmlPath, parts);
                 const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
                 const hyperlinkTargets = resolveHyperlinkTargets(xmlPath, parts);
-                sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments, hyperlinkTargets));
+                sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, pivots, comments, threadedComments, hyperlinkTargets, i, definedNames));
             }
             return { sheets, styles, theme, persons, date1904, definedNames };
         }
@@ -2006,7 +2006,7 @@
             name: firstAttr('rFont', 'val') ?? firstAttr('name', 'val'),
         };
     }
-    function parseSheet(name, state, xml, sharedStrings, tables = [], images = [], charts = [], pivots = [], comments = [], threadedComments = [], hyperlinkTargets = new Map()) {
+    function parseSheet(name, state, xml, sharedStrings, tables = [], images = [], charts = [], pivots = [], comments = [], threadedComments = [], hyperlinkTargets = new Map(), sheetIndex = 0, definedNames = []) {
         const doc = parseXml(xml);
         const rowEls = doc.getElementsByTagNameNS(NS.main, 'row');
         const rows = [];
@@ -2071,6 +2071,9 @@
         const outline = parseSheetOutline(doc);
         const hyperlinks = parseHyperlinks(doc, hyperlinkTargets);
         const dataValidationLists = parseDataValidationLists(doc);
+        const pageBreaks = parsePageBreaks(doc);
+        const printArea = resolvePrintArea(sheetIndex, definedNames);
+        const headerFooter = parseHeaderFooter(doc, name);
         for (const h of hyperlinks) {
             if (h.col > maxCol)
                 maxCol = h.col;
@@ -2087,7 +2090,7 @@
             name, state, rows, maxCol, maxRow, merges, columns, rowDimensions,
             conditionalFormatting, frozenPanes, autoFilter, tables, images,
             charts, pivots, extensions, comments, threadedComments, view, outline,
-            hyperlinks, dataValidationLists,
+            hyperlinks, dataValidationLists, pageBreaks, printArea, headerFooter,
         };
     }
     function parseSheetView(doc) {
@@ -2239,7 +2242,12 @@
         if (!pane)
             return null;
         const state = pane.getAttribute('state');
-        if (state !== 'frozen' && state !== 'frozenSplit')
+        let kind;
+        if (state === 'frozen' || state === 'frozenSplit')
+            kind = 'frozen';
+        else if (state === 'split')
+            kind = 'split';
+        else
             return null;
         const xSplit = Number(pane.getAttribute('xSplit'));
         const ySplit = Number(pane.getAttribute('ySplit'));
@@ -2247,7 +2255,183 @@
         const y = Number.isFinite(ySplit) && ySplit > 0 ? ySplit : null;
         if (x === null && y === null)
             return null;
-        return { xSplit: x, ySplit: y };
+        return { kind, xSplit: x, ySplit: y };
+    }
+    function parsePageBreaks(doc) {
+        const rows = [];
+        const cols = [];
+        const rowWrap = doc.getElementsByTagNameNS(NS.main, 'rowBreaks').item(0);
+        if (rowWrap) {
+            const brks = rowWrap.getElementsByTagNameNS(NS.main, 'brk');
+            for (let i = 0; i < brks.length; i++) {
+                const el = brks[i];
+                if (el.getAttribute('man') !== '1')
+                    continue;
+                const id = Number(el.getAttribute('id'));
+                if (!Number.isFinite(id) || id <= 0)
+                    continue;
+                rows.push(id - 1);
+            }
+        }
+        const colWrap = doc.getElementsByTagNameNS(NS.main, 'colBreaks').item(0);
+        if (colWrap) {
+            const brks = colWrap.getElementsByTagNameNS(NS.main, 'brk');
+            for (let i = 0; i < brks.length; i++) {
+                const el = brks[i];
+                if (el.getAttribute('man') !== '1')
+                    continue;
+                const id = Number(el.getAttribute('id'));
+                if (!Number.isFinite(id) || id <= 0)
+                    continue;
+                cols.push(id - 1);
+            }
+        }
+        return { rows, cols };
+    }
+    function parseHeaderFooter(doc, sheetName) {
+        const hf = doc.getElementsByTagNameNS(NS.main, 'headerFooter').item(0);
+        if (!hf)
+            return null;
+        const oddHeader = hf.getElementsByTagNameNS(NS.main, 'oddHeader').item(0);
+        const oddFooter = hf.getElementsByTagNameNS(NS.main, 'oddFooter').item(0);
+        const parseOne = (el) => {
+            if (!el)
+                return null;
+            const raw = el.textContent ?? '';
+            if (raw === '')
+                return null;
+            const zones = splitHeaderFooterZones(raw);
+            return {
+                left: substituteHeaderFooterCodes(zones.left, sheetName),
+                center: substituteHeaderFooterCodes(zones.center, sheetName),
+                right: substituteHeaderFooterCodes(zones.right, sheetName),
+            };
+        };
+        const header = parseOne(oddHeader);
+        const footer = parseOne(oddFooter);
+        if (!header && !footer)
+            return null;
+        return { oddHeader: header, oddFooter: footer };
+    }
+    function splitHeaderFooterZones(raw) {
+        const out = { left: '', center: '', right: '' };
+        let zone = 'center';
+        let i = 0;
+        while (i < raw.length) {
+            if (raw[i] === '&' && i + 1 < raw.length) {
+                const next = raw[i + 1];
+                if (next === 'L') {
+                    zone = 'left';
+                    i += 2;
+                    continue;
+                }
+                if (next === 'C') {
+                    zone = 'center';
+                    i += 2;
+                    continue;
+                }
+                if (next === 'R') {
+                    zone = 'right';
+                    i += 2;
+                    continue;
+                }
+                out[zone] += raw[i] + raw[i + 1];
+                i += 2;
+                continue;
+            }
+            out[zone] += raw[i];
+            i += 1;
+        }
+        return out;
+    }
+    function substituteHeaderFooterCodes(text, sheetName) {
+        let out = '';
+        let i = 0;
+        const now = new Date();
+        const pad = (n) => (n < 10 ? `0${n}` : String(n));
+        const dateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+        const timeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+        while (i < text.length) {
+            if (text[i] === '&' && i + 1 < text.length) {
+                const next = text[i + 1];
+                if (next === '&') {
+                    out += '&';
+                    i += 2;
+                    continue;
+                }
+                if (next === 'D') {
+                    out += dateStr;
+                    i += 2;
+                    continue;
+                }
+                if (next === 'T') {
+                    out += timeStr;
+                    i += 2;
+                    continue;
+                }
+                if (next === 'F') {
+                    out += '&F';
+                    i += 2;
+                    continue;
+                }
+                if (next === 'A') {
+                    out += sheetName;
+                    i += 2;
+                    continue;
+                }
+                if (next === 'P') {
+                    out += '(page)';
+                    i += 2;
+                    continue;
+                }
+                if (next === 'N') {
+                    out += '(total)';
+                    i += 2;
+                    continue;
+                }
+                out += text[i] + text[i + 1];
+                i += 2;
+                continue;
+            }
+            out += text[i];
+            i += 1;
+        }
+        return out;
+    }
+    function resolvePrintArea(sheetIndex, definedNames) {
+        const hits = definedNames.filter((n) => n.name === '_xlnm.Print_Area' && n.localSheetId === sheetIndex);
+        if (hits.length === 0)
+            return null;
+        const out = [];
+        for (const n of hits) {
+            const parts = n.formula.split(',');
+            for (const part of parts) {
+                const range = parsePrintAreaRef(part.trim());
+                if (range)
+                    out.push(range);
+            }
+        }
+        return out.length > 0 ? out : null;
+    }
+    function parsePrintAreaRef(ref) {
+        let body = ref;
+        const bangIdx = body.lastIndexOf('!');
+        if (bangIdx >= 0)
+            body = body.slice(bangIdx + 1);
+        const clean = body.replace(/\$/g, '');
+        const [tl, br] = clean.split(':');
+        const a = parseCellRef(tl);
+        if (!a)
+            return null;
+        const b = br ? parseCellRef(br) : a;
+        if (!b)
+            return null;
+        return {
+            col: Math.min(a.col, b.col),
+            row: Math.min(a.row, b.row),
+            endCol: Math.max(a.col, b.col),
+            endRow: Math.max(a.row, b.row),
+        };
     }
     function parseAutoFilter(doc) {
         const af = doc.getElementsByTagNameNS(NS.main, 'autoFilter').item(0);
@@ -3130,6 +3314,10 @@
 .${className} col.xlsx-outline-1 { border-left: 2px solid #ddd; }
 .${className} col.xlsx-outline-2 { border-left: 3px solid #ccc; }
 .${className} col.xlsx-outline-3 { border-left: 4px solid #bbb; }
+.${className} .xlsx-header, .${className} .xlsx-footer {
+    display: grid; grid-template-columns: 1fr 1fr 1fr;
+    font-size: 0.85em; color: #666; margin: 0.5em 0;
+}
     `.trim();
         return style;
     }
@@ -3339,6 +3527,12 @@
     function renderSheet(sheet, styles, theme, date1904, options) {
         const section = h('section', { class: options.className, 'data-sheet-name': sheet.name });
         applySheetView(section, sheet.view, theme);
+        if (sheet.pageBreaks.rows.length > 0) {
+            section.setAttribute('data-page-break-rows', sheet.pageBreaks.rows.join(','));
+        }
+        if (sheet.pageBreaks.cols.length > 0) {
+            section.setAttribute('data-page-break-cols', sheet.pageBreaks.cols.join(','));
+        }
         section.appendChild(h('div', { class: 'xlsx-sheet-name' }, [sheet.name]));
         const table = h('table');
         if (sheet.maxCol < 0) {
@@ -3549,7 +3743,27 @@
             ph.textContent = `[chart: ${chart.chartType ?? chart.kind}]`;
             section.appendChild(ph);
         }
+        if (sheet.headerFooter?.oddHeader) {
+            section.appendChild(renderHeaderFooter('xlsx-header', sheet.headerFooter.oddHeader));
+        }
+        if (sheet.headerFooter?.oddFooter) {
+            section.appendChild(renderHeaderFooter('xlsx-footer', sheet.headerFooter.oddFooter));
+        }
         return section;
+    }
+    function renderHeaderFooter(className, zones) {
+        const div = document.createElement('div');
+        div.className = className;
+        const addZone = (name, text) => {
+            const z = document.createElement('div');
+            z.setAttribute('data-zone', name);
+            z.textContent = text;
+            div.appendChild(z);
+        };
+        addZone('left', zones.left);
+        addZone('center', zones.center);
+        addZone('right', zones.right);
+        return div;
     }
     function appendCommentMarker(td, comment) {
         const marker = document.createElement('span');
