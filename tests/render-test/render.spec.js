@@ -40,6 +40,7 @@ const fixtures = [
     'multisheet',
     'named-styles',
     'numfmt-r2',
+    'ole-cfb',
     'ole-embeddings',
     'outlines-and-names',
     'page-layout',
