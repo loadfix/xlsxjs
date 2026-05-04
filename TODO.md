@@ -9,17 +9,28 @@ plus pre-existing known gaps. Organised by effort tier, not by visibility.
 - **Shapes, connectors, text boxes** (`feat/shapes-textboxes`) — the drawing
   parser now walks `<xdr:sp>` and `<xdr:cxnSp>` siblings of `<xdr:pic>` /
   `<xdr:graphicFrame>`. Each one lands on `Sheet.shapes: SheetShape[]`
-  with `kind: 'shape' | 'connector'`, the `<a:prstGeom prst=…>` preset
-  (`rect`, `line`, `ellipse`, `flowChartProcess`, …), a flattened text
-  body (`<a:p>` paragraphs joined with `\n`, `<a:t>` concatenated
-  within a paragraph), and the `<xdr:cNvPr>` name / descr (alt falls
-  back to title). The renderer emits one `<aside class="xlsx-shape">`
-  per shape after the `<figure class="xlsx-image">` blocks, with
-  `data-kind` / `data-preset` / `data-name` / anchor data-attrs and a
-  `<pre>` for the text body when present; form-control `<xdr:sp>`
-  wrapped in `<mc:AlternateContent>` still surface through the outer
-  shape (VML layout is intentionally skipped). Harness scenarios 61–62;
-  fixture at `tests/render-test/shapes-and-textboxes/`.
+  with `kind: 'shape' | 'connector'`, the `<a:prstGeom prst=…>` preset,
+  a flattened text body (`<a:p>` paragraphs joined with `\n`), and the
+  `<xdr:cNvPr>` name / descr (alt falls back to title). The renderer
+  emits one `<aside class="xlsx-shape">` per shape after the
+  `<figure class="xlsx-image">` blocks, with `data-kind` / `data-preset`
+  / `data-name` / anchor data-attrs and a `<pre>` for the text body.
+  Harness scenarios 61–62; fixture at `tests/render-test/shapes-and-textboxes/`.
+
+- **Drawing anchors (oneCell + absolute) + decorative alt + `emuToPx`**
+  (`feat/drawing-anchors-plus`) — `SheetImage` now carries
+  `anchorMode: 'twoCell' | 'oneCell' | 'absolute'` plus `absoluteX` /
+  `absoluteY` (EMU, populated only for `absoluteAnchor`) and
+  `decorative: boolean`. The parser reads `<xdr:ext cx cy/>` for
+  one-cell anchors (the real size source, not cell-derived), and
+  `<xdr:pos x y/>` for absolute anchors. Decorative flag is recovered
+  leniently from any descendant of `cNvPr/a:extLst`. Renderer: each
+  `<figure>` gains `data-anchor-mode`; absolute anchors get
+  `position:absolute` + pixel `left`/`top`; decorative images render
+  with `alt=""` + `aria-hidden="true"`. `/9525` division is
+  consolidated into a new `emuToPx(emu)` helper in `src/utils.ts`,
+  re-exported from `src/xlsx-preview.ts`. Harness scenarios 63–64;
+  fixture at `tests/render-test/drawing-anchors-plus/`.
 
 - **Page layout metadata** (`feat/page-layout`) — manual row/column page
   breaks (`<rowBreaks>`/`<colBreaks>` with `man="1"`) land on
@@ -151,8 +162,6 @@ plus pre-existing known gaps. Organised by effort tier, not by visibility.
   3Symbols2 (we expose the set name; consumers can render their own).
 - [ ] In-flow image positioning (images render after the table, not overlaid
   on the cell grid).
-- [ ] Drawing one-cell + absolute anchors (only twoCellAnchor sizing is
-  fully honoured).
 
 ## Smoke-test improvements (to keep the triage signal useful)
 
@@ -254,6 +263,6 @@ already tracked elsewhere in this file is excluded.*
 
 ### Internationalisation & accessibility
 - **Phonetic ruby (furigana)** (`si/rPh`, `worksheet/phoneticPr`) — ruby text above Japanese characters; the `<rPh>` runs are dropped when we flatten an `<si>`.
-- **Alt text on images** (`xdr:pic/xdr:nvPicPr/xdr:cNvPr/@descr`) — parsed today but also emitted as the `<img alt>` only when `descr` is present; the newer `a:extLst` "decorative" marker is not honoured.
+- **Alt text on images** — resolved: `SheetImage.alt` is the `descr`/`title` attribute, and the decorative accessibility marker (from `cNvPr/a:extLst`) flips `decorative=true` so the rendered `<img>` gets `alt=""` + `aria-hidden="true"`. See `feat/drawing-anchors-plus`.
 - **Alt text on tables / charts** (`table/@altText`, `table/@altTextSummary`) — accessibility label on defined tables; not exposed on `TableDef`.
 - **Major/minor font scheme resolution** (`xl/theme/theme1.xml` `a:fontScheme/a:majorFont`/`a:minorFont`) — styles referencing `@scheme='major'|'minor'` on a font fall back to the default family because we don't read the theme's font pair.

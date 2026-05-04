@@ -4,7 +4,7 @@
 
 import type { Workbook, Sheet, SheetView, Cell, MergedRange, RichTextRun, FrozenPanes, SheetComment, SheetShape, ThreadedCommentEntry, Hyperlink, PhoneticRun } from './workbook-parser';
 import { isSafeHyperlinkHref } from './workbook-parser';
-import { indexToColumnLetters } from './utils';
+import { indexToColumnLetters, emuToPx } from './utils';
 import { h } from './html';
 import type { Options } from './xlsx-preview';
 import { lookupNumberFormat, resolveEffectiveXf, sanitizeFontFamily, type Styles, type CellXf, type FontStyle, type FillStyle, type BorderStyle, type Dxf } from './styles';
@@ -559,25 +559,41 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
         section.appendChild(caption);
     }
 
-    // Images. Each gets its own <figure> with an absolutely-positioned <img>
-    // whose size is derived from the image's extent (EMUs). We don't attempt
-    // to place it inside the table — positioning images against a browser
-    // table layout is fragile — but we do annotate the anchor on the DOM so
-    // consumers who want to overlay can read off the coordinates.
+    // Images. Each gets its own <figure> with an <img> whose size is derived
+    // from the image's extent (EMUs). We don't attempt to place it inside the
+    // table — positioning images against a browser table layout is fragile —
+    // but we do annotate the anchor on the DOM so consumers who want to
+    // overlay can read off the coordinates. absoluteAnchor images get a
+    // position:absolute + left/top in CSS pixels so a caller who gives the
+    // section a position:relative ancestor gets free pixel-absolute layout.
     for (const img of sheet.images) {
         const fig = document.createElement('figure');
         fig.className = 'xlsx-image';
+        fig.setAttribute('data-anchor-mode', img.anchorMode);
         fig.setAttribute('data-anchor-col', String(img.col));
         fig.setAttribute('data-anchor-row', String(img.row));
         if (img.endCol !== null) fig.setAttribute('data-anchor-end-col', String(img.endCol));
         if (img.endRow !== null) fig.setAttribute('data-anchor-end-row', String(img.endRow));
         fig.style.margin = '0.5rem 0';
+        if (img.anchorMode === 'absolute') {
+            fig.style.position = 'absolute';
+            if (img.absoluteX !== null) fig.style.left = `${emuToPx(img.absoluteX)}px`;
+            if (img.absoluteY !== null) fig.style.top = `${emuToPx(img.absoluteY)}px`;
+        }
         const el = document.createElement('img');
         el.src = img.dataUrl;
-        if (img.alt) el.alt = img.alt;
+        // Accessibility. A decorative image gets an explicit empty alt +
+        // aria-hidden so screen readers skip it entirely; otherwise we pass
+        // through the producer's descr/title when present.
+        if (img.decorative) {
+            el.alt = '';
+            el.setAttribute('aria-hidden', 'true');
+        } else if (img.alt) {
+            el.alt = img.alt;
+        }
         if (img.widthEmu && img.heightEmu) {
-            el.width = Math.round(img.widthEmu / 9525);
-            el.height = Math.round(img.heightEmu / 9525);
+            el.width = emuToPx(img.widthEmu);
+            el.height = emuToPx(img.heightEmu);
         }
         el.style.maxWidth = '100%';
         fig.appendChild(el);

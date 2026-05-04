@@ -1951,6 +1951,95 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 63. Drawing anchors: oneCell + absolute + emuToPx helper ─────────────
+{
+    const { wb, container } = await renderFixture('drawing-anchors-plus');
+    const sheet = wb.parsed.sheets[0];
+    assert(sheet.images.length === 3, `63a: three anchored images (got ${sheet.images.length})`);
+
+    const byMode = sheet.images.reduce((acc, im) => { acc[im.anchorMode] = im; return acc; }, {});
+    assert(byMode.oneCell, '63b: a oneCellAnchor image should be present');
+    assert(byMode.twoCell, '63c: a twoCellAnchor image should be present');
+    assert(byMode.absolute, '63d: an absoluteAnchor image should be present');
+
+    // oneCellAnchor at B2 with cx=cy=914400 (1" → 96 px).
+    const one = byMode.oneCell;
+    assert(one.col === 1 && one.row === 1, `63e: oneCell anchor should be at B2 (got ${one.col},${one.row})`);
+    assert(one.endCol === null && one.endRow === null,
+        `63f: oneCell endCol/endRow should be null (got ${one.endCol},${one.endRow})`);
+    assert(one.widthEmu === 914400 && one.heightEmu === 914400,
+        `63g: oneCell widthEmu/heightEmu should be 914400 (got ${one.widthEmu}/${one.heightEmu})`);
+    assert(one.absoluteX === null && one.absoluteY === null,
+        '63h: oneCell absoluteX/Y should be null');
+
+    // absoluteAnchor carries pos + ext.
+    const abs = byMode.absolute;
+    assert(abs.absoluteX === 1905000 && abs.absoluteY === 952500,
+        `63i: absoluteAnchor position (EMU) should be (1905000,952500) (got ${abs.absoluteX},${abs.absoluteY})`);
+    assert(abs.endCol === null && abs.endRow === null,
+        '63j: absoluteAnchor endCol/endRow should be null');
+
+    // DOM: three figures, each with data-anchor-mode. The absolute one
+    // gets position:absolute + left/top in px.
+    const figs = [...container.querySelectorAll('figure.xlsx-image')];
+    assert(figs.length === 3, `63k: three rendered figures (got ${figs.length})`);
+    const modes = figs.map((f) => f.getAttribute('data-anchor-mode')).sort();
+    assert(JSON.stringify(modes) === JSON.stringify(['absolute', 'oneCell', 'twoCell']),
+        `63l: data-anchor-mode should enumerate the three modes (got ${JSON.stringify(modes)})`);
+    const absFig = figs.find((f) => f.getAttribute('data-anchor-mode') === 'absolute');
+    assert(absFig.style.position === 'absolute', '63m: absolute figure should have CSS position:absolute');
+    // 1905000 / 9525 = 200; 952500 / 9525 = 100.
+    assert(absFig.style.left === '200px', `63n: absolute figure left should be 200px (got ${absFig.style.left})`);
+    assert(absFig.style.top === '100px', `63o: absolute figure top should be 100px (got ${absFig.style.top})`);
+    const oneFig = figs.find((f) => f.getAttribute('data-anchor-mode') === 'oneCell');
+    const oneImg = oneFig.querySelector('img');
+    assert(oneImg.width === 96 && oneImg.height === 96,
+        `63p: oneCell img size (914400 EMU) should render as 96×96 px (got ${oneImg.width}×${oneImg.height})`);
+
+    // emuToPx re-exported from the UMD should match the renderer's output.
+    const { emuToPx } = globalThis.xlsx;
+    assert(typeof emuToPx === 'function', '63q: emuToPx should be exported from the UMD');
+    assert(emuToPx(914400) === 96, `63r: emuToPx(914400) === 96 (got ${emuToPx(914400)})`);
+    assert(emuToPx(9525) === 1, `63s: emuToPx(9525) === 1 (got ${emuToPx(9525)})`);
+    assert(emuToPx(0) === 0, `63t: emuToPx(0) === 0 (got ${emuToPx(0)})`);
+}
+
+// ── 64. Decorative images: alt="" + aria-hidden="true" ───────────────────
+{
+    const { wb, container } = await renderFixture('drawing-anchors-plus');
+    const sheet = wb.parsed.sheets[0];
+
+    // The twoCellAnchor image carries <adec:decorative val="1"/> in its
+    // cNvPr extLst — it should flip decorative=true on the model.
+    const deco = sheet.images.find((im) => im.decorative);
+    assert(!!deco, `64a: one image should be flagged decorative (got ${sheet.images.map((i) => i.decorative).join(',')})`);
+    assert(deco.anchorMode === 'twoCell', `64b: decorative image in fixture is the twoCellAnchor (got ${deco.anchorMode})`);
+
+    // The non-decorative images keep their descr as alt.
+    const nonDeco = sheet.images.filter((im) => !im.decorative);
+    assert(nonDeco.length === 2, `64c: two non-decorative images (got ${nonDeco.length})`);
+    assert(nonDeco.every((im) => typeof im.alt === 'string' && im.alt.length > 0),
+        `64d: non-decorative images should carry alt text (got ${JSON.stringify(nonDeco.map((i) => i.alt))})`);
+
+    // DOM: the decorative <img> has alt="" and aria-hidden="true". Matching
+    // by data-anchor-mode lets us key it without depending on source order.
+    const figs = [...container.querySelectorAll('figure.xlsx-image')];
+    const decoFig = figs.find((f) => f.getAttribute('data-anchor-mode') === 'twoCell');
+    const decoImg = decoFig.querySelector('img');
+    assert(decoImg.getAttribute('alt') === '',
+        `64e: decorative img should render alt="" (got ${JSON.stringify(decoImg.getAttribute('alt'))})`);
+    assert(decoImg.getAttribute('aria-hidden') === 'true',
+        `64f: decorative img should carry aria-hidden="true" (got ${JSON.stringify(decoImg.getAttribute('aria-hidden'))})`);
+
+    // The other figures should NOT have aria-hidden set.
+    const other = figs.filter((f) => f !== decoFig);
+    for (const f of other) {
+        const im = f.querySelector('img');
+        assert(im.getAttribute('aria-hidden') === null,
+            `64g: non-decorative img should not carry aria-hidden (mode=${f.getAttribute('data-anchor-mode')})`);
+    }
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

@@ -34,7 +34,7 @@ The public surface is:
   path: parse + render in one call.
 - `defaultOptions` — the options object used when none is passed.
 - Test-visible helpers: `formatNumber`, `parseStyles`, `sanitizeHexColor`,
-  `a1ToR1c1`, `r1c1ToA1`.
+  `a1ToR1c1`, `r1c1ToA1`, `emuToPx`.
 
 Options of note:
 

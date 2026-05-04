@@ -197,6 +197,11 @@
             return null;
         return { col, row: Number(m[2]) - 1 };
     }
+    function emuToPx(emu) {
+        if (!Number.isFinite(emu))
+            return 0;
+        return Math.round(emu / 9525);
+    }
 
     const NS_MAIN$1 = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
     function defaultAlignment() {
@@ -1779,19 +1784,43 @@
         const images = [];
         const charts = [];
         const shapes = [];
-        const anchors = [
-            ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'twoCellAnchor')),
-            ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'oneCellAnchor')),
+        const labelled = [
+            ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'twoCellAnchor'))
+                .map((el) => ({ el, mode: 'twoCell' })),
+            ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'oneCellAnchor'))
+                .map((el) => ({ el, mode: 'oneCell' })),
+            ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'absoluteAnchor'))
+                .map((el) => ({ el, mode: 'absolute' })),
         ];
-        for (const anchor of anchors) {
+        for (const { el: anchor, mode } of labelled) {
             const from = anchor.getElementsByTagNameNS(NS.xdr, 'from').item(0);
-            const to = anchor.getElementsByTagNameNS(NS.xdr, 'to').item(0);
-            const col = anchorCellValue(from, 'col');
-            const row = anchorCellValue(from, 'row');
+            const to = mode === 'twoCell'
+                ? anchor.getElementsByTagNameNS(NS.xdr, 'to').item(0)
+                : null;
+            const col = from ? anchorCellValue(from, 'col') : null;
+            const row = from ? anchorCellValue(from, 'row') : null;
             const endCol = to ? anchorCellValue(to, 'col') : null;
             const endRow = to ? anchorCellValue(to, 'row') : null;
-            const colOff = anchorCellValue(from, 'colOff');
-            const rowOff = anchorCellValue(from, 'rowOff');
+            const colOff = from ? anchorCellValue(from, 'colOff') : null;
+            const rowOff = from ? anchorCellValue(from, 'rowOff') : null;
+            const ext = findDirectChildNS(anchor, NS.xdr, 'ext');
+            const extCx = ext ? Number(ext.getAttribute('cx')) : NaN;
+            const extCy = ext ? Number(ext.getAttribute('cy')) : NaN;
+            const widthEmu = Number.isFinite(extCx) ? extCx : null;
+            const heightEmu = Number.isFinite(extCy) ? extCy : null;
+            let absoluteX = null;
+            let absoluteY = null;
+            if (mode === 'absolute') {
+                const pos = findDirectChildNS(anchor, NS.xdr, 'pos');
+                if (pos) {
+                    const x = Number(pos.getAttribute('x'));
+                    const y = Number(pos.getAttribute('y'));
+                    if (Number.isFinite(x))
+                        absoluteX = x;
+                    if (Number.isFinite(y))
+                        absoluteY = y;
+                }
+            }
             const pic = anchor.getElementsByTagNameNS(NS.xdr, 'pic').item(0);
             if (pic) {
                 const blip = pic.getElementsByTagNameNS(NS.a, 'blip').item(0);
@@ -1803,11 +1832,9 @@
                         : normaliseRelPath(`${drawingDir}/${rel.target}`);
                     const dataUrl = media[mediaPath];
                     if (dataUrl) {
-                        const ext = anchor.getElementsByTagNameNS(NS.xdr, 'ext').item(0);
-                        const widthEmu = ext ? Number(ext.getAttribute('cx')) : null;
-                        const heightEmu = ext ? Number(ext.getAttribute('cy')) : null;
                         const cNvPr = pic.getElementsByTagNameNS(NS.xdr, 'cNvPr').item(0);
                         const alt = cNvPr?.getAttribute('descr') ?? cNvPr?.getAttribute('title') ?? null;
+                        const decorative = cNvPr ? detectDecorative(cNvPr) : false;
                         images.push({
                             col: col ?? 0,
                             row: row ?? 0,
@@ -1816,9 +1843,13 @@
                             colOff: colOff ?? 0,
                             rowOff: rowOff ?? 0,
                             dataUrl,
-                            widthEmu: Number.isFinite(widthEmu) ? widthEmu : null,
-                            heightEmu: Number.isFinite(heightEmu) ? heightEmu : null,
+                            widthEmu,
+                            heightEmu,
                             alt,
+                            anchorMode: mode,
+                            absoluteX,
+                            absoluteY,
+                            decorative,
                         });
                     }
                 }
@@ -1948,6 +1979,33 @@
             return null;
         const n = Number(el.textContent);
         return Number.isFinite(n) ? n : null;
+    }
+    function findDirectChildNS(parent, ns, localName) {
+        for (let i = 0; i < parent.childNodes.length; i++) {
+            const node = parent.childNodes[i];
+            if (node.nodeType !== 1)
+                continue;
+            const el = node;
+            if (el.namespaceURI === ns && el.localName === localName)
+                return el;
+        }
+        return null;
+    }
+    function detectDecorative(cNvPr) {
+        const extLst = cNvPr.getElementsByTagNameNS(NS.a, 'extLst').item(0);
+        if (!extLst)
+            return false;
+        const truthy = (v) => v === '1' || v === 'true';
+        const all = extLst.getElementsByTagName('*');
+        for (let i = 0; i < all.length; i++) {
+            const el = all[i];
+            if (el.localName === 'decorative' && (truthy(el.getAttribute('val')) || truthy(el.getAttribute('value')))) {
+                return true;
+            }
+            if (truthy(el.getAttribute('decorative')))
+                return true;
+        }
+        return false;
     }
     function parseTable(xml) {
         const doc = parseXml(xml);
@@ -3836,6 +3894,7 @@
         for (const img of sheet.images) {
             const fig = document.createElement('figure');
             fig.className = 'xlsx-image';
+            fig.setAttribute('data-anchor-mode', img.anchorMode);
             fig.setAttribute('data-anchor-col', String(img.col));
             fig.setAttribute('data-anchor-row', String(img.row));
             if (img.endCol !== null)
@@ -3843,13 +3902,25 @@
             if (img.endRow !== null)
                 fig.setAttribute('data-anchor-end-row', String(img.endRow));
             fig.style.margin = '0.5rem 0';
+            if (img.anchorMode === 'absolute') {
+                fig.style.position = 'absolute';
+                if (img.absoluteX !== null)
+                    fig.style.left = `${emuToPx(img.absoluteX)}px`;
+                if (img.absoluteY !== null)
+                    fig.style.top = `${emuToPx(img.absoluteY)}px`;
+            }
             const el = document.createElement('img');
             el.src = img.dataUrl;
-            if (img.alt)
+            if (img.decorative) {
+                el.alt = '';
+                el.setAttribute('aria-hidden', 'true');
+            }
+            else if (img.alt) {
                 el.alt = img.alt;
+            }
             if (img.widthEmu && img.heightEmu) {
-                el.width = Math.round(img.widthEmu / 9525);
-                el.height = Math.round(img.heightEmu / 9525);
+                el.width = emuToPx(img.widthEmu);
+                el.height = emuToPx(img.heightEmu);
             }
             el.style.maxWidth = '100%';
             fig.appendChild(el);
@@ -4418,6 +4489,7 @@
     exports.a1ToR1c1 = a1ToR1c1;
     exports.applyTint = applyTint;
     exports.defaultOptions = defaultOptions;
+    exports.emuToPx = emuToPx;
     exports.evaluateRule = evaluateRule;
     exports.formatNumber = formatNumber;
     exports.indexedColor = indexedColor;
