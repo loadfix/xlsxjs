@@ -343,6 +343,12 @@ export interface SheetSlicer {
     // "all selected", but surfacing an empty selection list is the honest
     // read-only representation).
     selectedItems: string[];
+    // Every plain-text item the cache enumerated (both selected and
+    // unselected, in @x index order). Empty when the cache either
+    // didn't list items at all or listed only unparseable entries. Used by
+    // the interactive renderer to emit chips for every option, not just
+    // the currently-selected ones.
+    allItems: string[];
 }
 
 // An Excel 2013+ timeline (date slicer) surfaced from xl/timelines/
@@ -371,6 +377,12 @@ export interface SheetTimeline {
     showTimeLevel: boolean;         // default true
     showHorizontalScrollbar: boolean; // default true
     style: string | null;           // <timeline style="…"/>
+    // Absolute slider bounds surfaced from the timeline cache's
+    // `<state><bounds startDate=… endDate=…/>` block. Interactive consumers
+    // use these to pin the slider min/max; null when the cache didn't
+    // enumerate bounds. Both endpoints are raw ISO-like strings, same shape
+    // as `selectedRange`.
+    bounds: { min: string; max: string } | null;
 }
 
 // Count of sheet-level <extLst><ext uri="…"> entries. Surfaced so the smoke
@@ -1603,10 +1615,12 @@ function parseSlicerFile(xml: string, slicerCacheByName: Map<string, string>): S
         const cacheXml = slicerCacheByName.get(cache);
         let sourceName: string | null = null;
         let selectedItems: string[] = [];
+        let allItems: string[] = [];
         if (cacheXml) {
             const details = readSlicerCache(cacheXml);
             sourceName = details.sourceName;
             selectedItems = details.selectedItems;
+            allItems = details.allItems;
         }
         out.push({
             name,
@@ -1618,6 +1632,7 @@ function parseSlicerFile(xml: string, slicerCacheByName: Map<string, string>): S
             showCaption,
             rowHeight,
             selectedItems,
+            allItems,
         });
     }
     return out;
@@ -1666,7 +1681,12 @@ function parseTimelineFile(xml: string, timelineCacheByName: Map<string, string>
 
         const cacheXml = timelineCacheByName.get(cache);
         let sourceName: string | null = null;
-        if (cacheXml) sourceName = readTimelineCache(cacheXml);
+        let bounds: { min: string; max: string } | null = null;
+        if (cacheXml) {
+            const details = readTimelineCache(cacheXml);
+            sourceName = details.sourceName;
+            bounds = details.bounds;
+        }
         out.push({
             name,
             caption: caption || null,
@@ -1679,6 +1699,7 @@ function parseTimelineFile(xml: string, timelineCacheByName: Map<string, string>
             showTimeLevel,
             showHorizontalScrollbar,
             style,
+            bounds,
         });
     }
     return out;
@@ -1690,7 +1711,7 @@ function parseTimelineFile(xml: string, timelineCacheByName: Map<string, string>
 // @sourceName, OR put the source name in an inner <pivotTable name="…"/>
 // reference — we only promise the outer @sourceName form here and return
 // null when that's missing.
-function readSlicerCache(xml: string): { sourceName: string | null; selectedItems: string[] } {
+function readSlicerCache(xml: string): { sourceName: string | null; selectedItems: string[]; allItems: string[] } {
     const doc = parseXml(xml);
     let sourceName: string | null = null;
     const all = doc.getElementsByTagName('*');
@@ -1702,6 +1723,7 @@ function readSlicerCache(xml: string): { sourceName: string | null; selectedItem
         }
     }
     const selectedItems: string[] = [];
+    const allItems: string[] = [];
     // Each <tabular> block carries an <items> list with <i x="…" s="1"/>
     // entries. The `@s="1"` flag marks a selected item; the displayed
     // text lives either as @n ("name") on the item or via a parent map.
@@ -1719,29 +1741,43 @@ function readSlicerCache(xml: string): { sourceName: string | null; selectedItem
             if (node.nodeType !== 1) continue;
             const item = node as Element;
             if (item.localName !== 'i') continue;
+            const name = item.getAttribute('n') ?? item.textContent;
+            if (!name || name.length === 0) continue;
+            allItems.push(name);
             const selected = item.getAttribute('s');
             // Excel writes `s="1"` for selected items (explicitly filtered
             // in) and either omits the attribute or writes `s="0"` for
             // unselected. We treat only the truthy form as a positive
             // selection signal.
-            if (selected !== '1' && selected !== 'true') continue;
-            const name = item.getAttribute('n') ?? item.textContent;
-            if (name && name.length > 0) selectedItems.push(name);
+            if (selected === '1' || selected === 'true') selectedItems.push(name);
         }
     }
-    return { sourceName, selectedItems };
+    return { sourceName, selectedItems, allItems };
 }
 
-function readTimelineCache(xml: string): string | null {
+function readTimelineCache(xml: string): { sourceName: string | null; bounds: { min: string; max: string } | null } {
     const doc = parseXml(xml);
+    let sourceName: string | null = null;
+    let bounds: { min: string; max: string } | null = null;
     const all = doc.getElementsByTagName('*');
     for (let i = 0; i < all.length; i++) {
         const el = all[i];
         if (el.localName === 'timelineCacheDefinition') {
-            return el.getAttribute('sourceName');
+            sourceName = el.getAttribute('sourceName');
+        }
+        // Bounds can live as `<bounds startDate=… endDate=…/>` under
+        // `<state>`, or as `<cache startDate=… endDate=…/>` under the
+        // `<pivotTables>` block in older producers. We prefer the named
+        // `<bounds>` element and only emit when both endpoints resolve.
+        if (el.localName === 'bounds') {
+            const minAttr = el.getAttribute('startDate');
+            const maxAttr = el.getAttribute('endDate');
+            if (minAttr && maxAttr) {
+                bounds = { min: minAttr, max: maxAttr };
+            }
         }
     }
-    return null;
+    return { sourceName, bounds };
 }
 
 function firstDescendantByLocalName(root: Element, localName: string): Element | null {

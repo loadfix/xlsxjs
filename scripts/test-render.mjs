@@ -3926,6 +3926,150 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 101. interactive slicers + timeline: opt-in swaps the aside body ────
+// With Options.interactiveSlicers=true the slicer's flat selected-item
+// <ul> is replaced by a set of `<button class="xlsx-slicer-chip">` toggle
+// chips (one per item the cache enumerated). Pressed state mirrors the
+// "selected" flag; clicking a chip flips aria-pressed + dispatches an
+// `xlsx:slicer-change` CustomEvent on the aside. The timeline aside also
+// picks up a `.xlsx-timeline-slider` div with two <input type="range">
+// handles when the cache supplied bounds (the Wave 8 fixture does, via
+// `<state><bounds startDate=… endDate=…/>`).
+{
+    const { container } = await renderFixture('slicers-timelines', { interactiveSlicers: true });
+
+    const slicerAside = container.querySelector('section.xlsx aside.xlsx-slicer');
+    assert(slicerAside !== null, '101a: interactive slicer aside should still exist');
+
+    // Detect-only body should be gone.
+    assert(slicerAside?.querySelector('ul') === null,
+        '101b: interactive slicer aside should not contain the detect-only <ul>');
+
+    // One chip per item in the cache (North, South, East).
+    const chips = slicerAside?.querySelectorAll('button.xlsx-slicer-chip') ?? [];
+    assert(chips.length === 3,
+        `101c: expected 3 <button class="xlsx-slicer-chip"> (one per cache item; got ${chips.length})`);
+
+    // Pre-selected items (North + South) carry aria-pressed="true";
+    // unselected (East) carries aria-pressed="false".
+    const byLabel = new Map();
+    for (const btn of chips) byLabel.set(btn.textContent, btn);
+    const north = byLabel.get('North');
+    const south = byLabel.get('South');
+    const east = byLabel.get('East');
+    assert(north?.getAttribute('aria-pressed') === 'true',
+        `101d: North chip should be aria-pressed="true" (got ${JSON.stringify(north?.getAttribute('aria-pressed'))})`);
+    assert(south?.getAttribute('aria-pressed') === 'true',
+        `101e: South chip should be aria-pressed="true" (got ${JSON.stringify(south?.getAttribute('aria-pressed'))})`);
+    assert(east?.getAttribute('aria-pressed') === 'false',
+        `101f: East chip should be aria-pressed="false" (got ${JSON.stringify(east?.getAttribute('aria-pressed'))})`);
+    assert(north?.getAttribute('type') === 'button',
+        `101g: chip should carry type="button" (got ${JSON.stringify(north?.getAttribute('type'))})`);
+
+    // Clicking a chip flips its aria-pressed and fires an
+    // xlsx:slicer-change CustomEvent on the aside. detail.selectedItems
+    // reflects the post-click state. Capture the event via
+    // aside.addEventListener. bubbles=true so it would reach container too.
+    const events = [];
+    slicerAside.addEventListener('xlsx:slicer-change', (e) => events.push(e));
+
+    // Click North (currently pressed) → it becomes unpressed.
+    north?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    assert(north?.getAttribute('aria-pressed') === 'false',
+        `101h: after click, North chip should flip to aria-pressed="false" (got ${JSON.stringify(north?.getAttribute('aria-pressed'))})`);
+    assert(events.length === 1,
+        `101i: one xlsx:slicer-change event should fire per click (got ${events.length})`);
+    const d1 = events[0]?.detail;
+    assert(d1?.slicer === 'SlicerRegion',
+        `101j: event detail.slicer should be "SlicerRegion" (got ${JSON.stringify(d1?.slicer)})`);
+    assert(Array.isArray(d1?.selectedItems) && !d1.selectedItems.includes('North'),
+        `101k: after unpressing North, detail.selectedItems should drop "North" (got ${JSON.stringify(d1?.selectedItems)})`);
+    assert(d1.selectedItems.includes('South'),
+        `101l: after unpressing North, South should still be selected (got ${JSON.stringify(d1?.selectedItems)})`);
+
+    // Click East (currently unpressed) → it becomes pressed. The event
+    // payload now carries South + East.
+    east?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    assert(east?.getAttribute('aria-pressed') === 'true',
+        `101m: after click, East chip should flip to aria-pressed="true" (got ${JSON.stringify(east?.getAttribute('aria-pressed'))})`);
+    assert(events.length === 2,
+        `101n: a second xlsx:slicer-change event should fire (got ${events.length})`);
+    const d2 = events[1]?.detail;
+    assert(Array.isArray(d2?.selectedItems) && d2.selectedItems.includes('East') && d2.selectedItems.includes('South'),
+        `101o: after pressing East, detail.selectedItems should include East + South (got ${JSON.stringify(d2?.selectedItems)})`);
+    assert(!d2.selectedItems.includes('North'),
+        `101p: detail.selectedItems should still exclude North (got ${JSON.stringify(d2?.selectedItems)})`);
+
+    // Timeline: the Wave 8 fixture carries bounds in the cache's
+    // <state><bounds/>, so the interactive renderer emits a slider div
+    // with two <input type="range"> handles and an <xlsx-timeline-label>.
+    const timelineAside = container.querySelector('section.xlsx aside.xlsx-timeline');
+    assert(timelineAside !== null, '101q: interactive timeline aside should still exist');
+    const sliderDiv = timelineAside?.querySelector('div.xlsx-timeline-slider');
+    assert(sliderDiv !== null,
+        '101r: timeline aside should contain a <div class="xlsx-timeline-slider"> when bounds were parsed');
+    const handles = sliderDiv?.querySelectorAll('input[type="range"]') ?? [];
+    assert(handles.length === 2,
+        `101s: slider should contain 2 <input type="range"> handles (got ${handles.length})`);
+
+    const sliderLabel = timelineAside?.querySelector('span.xlsx-timeline-label');
+    assert(sliderLabel !== null,
+        '101t: timeline aside should contain a .xlsx-timeline-label under interactive mode');
+    const initialLabel = sliderLabel?.textContent ?? '';
+    // Label uses `new Date(ms).toISOString()` which forces UTC; the bounds
+    // are ISO-like (no `Z`) so they reach the renderer as local-time. The
+    // label should still contain a 2022-or-2023 date + the arrow separator.
+    assert(/202[23]/.test(initialLabel) && initialLabel.includes('→'),
+        `101u: initial label should cover the bounds with an arrow separator (got ${JSON.stringify(initialLabel)})`);
+
+    // Drag the end handle back; an input event fires an
+    // xlsx:timeline-change CustomEvent on the aside.
+    const tlEvents = [];
+    timelineAside.addEventListener('xlsx:timeline-change', (e) => tlEvents.push(e));
+    const startHandle = handles[0];
+    const endHandle = handles[1];
+    const midMs = String(Math.floor((Number(endHandle.min) + Number(endHandle.max)) / 2));
+    endHandle.value = midMs;
+    endHandle.dispatchEvent(new window.Event('input', { bubbles: true }));
+    assert(tlEvents.length === 1,
+        `101v: an xlsx:timeline-change event should fire (got ${tlEvents.length})`);
+    const td = tlEvents[0]?.detail;
+    assert(td?.timeline === 'TimelineDate',
+        `101w: event detail.timeline should be "TimelineDate" (got ${JSON.stringify(td?.timeline)})`);
+    assert(td?.start instanceof Date && td?.end instanceof Date,
+        `101x: detail.start/.end should be Date instances (got ${JSON.stringify({ s: td?.start && td.start.constructor?.name, e: td?.end && td.end.constructor?.name })})`);
+    assert(td.start.getTime() <= td.end.getTime(),
+        `101y: detail.start should be <= detail.end after input`);
+    // Sanity-check handle tagging for consumers who want to key off the
+    // individual handles rather than reading both values per event.
+    assert(startHandle.getAttribute('data-handle') === 'start',
+        `101z: first handle should be tagged data-handle="start"`);
+}
+
+// ── 102. interactive slicers: default-off keeps Wave 8 DOM byte-stable ──
+// Regression guard — rendering the slicers-timelines fixture with default
+// options must NOT emit the interactive chips / slider elements. The
+// golden snapshot also pins byte-stability, but this scenario pins the
+// DOM-shape contract for forward compatibility.
+{
+    const { container } = await renderFixture('slicers-timelines');
+    const slicerAside = container.querySelector('section.xlsx aside.xlsx-slicer');
+    assert(slicerAside !== null, '102a: detect-only slicer aside should still exist');
+    assert(slicerAside?.querySelector('button.xlsx-slicer-chip') === null,
+        '102b: default-off slicer aside should NOT contain any xlsx-slicer-chip buttons');
+    assert(slicerAside?.querySelector('ul') !== null,
+        '102c: default-off slicer aside should still contain the <ul> summary');
+
+    const timelineAside = container.querySelector('section.xlsx aside.xlsx-timeline');
+    assert(timelineAside !== null, '102d: detect-only timeline aside should still exist');
+    assert(timelineAside?.querySelector('div.xlsx-timeline-slider') === null,
+        '102e: default-off timeline aside should NOT contain .xlsx-timeline-slider');
+    assert(timelineAside?.querySelector('input[type="range"]') === null,
+        '102f: default-off timeline aside should NOT contain <input type="range"> handles');
+    assert(timelineAside?.querySelector('span.xlsx-timeline-label') === null,
+        '102g: default-off timeline aside should NOT carry the interactive label span class');
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

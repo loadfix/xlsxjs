@@ -127,6 +127,50 @@ test.describe('Interactive form controls', () => {
     });
 });
 
+test.describe('Interactive slicers', () => {
+    test('renders chips + timeline slider when interactiveSlicers is set', async ({ page }) => {
+        await page.goto('/tests/harness.html');
+
+        const result = await page.evaluate(async () => {
+            const buf = await fetch('/tests/render-test/slicers-timelines/workbook.xlsx').then((r) => r.arrayBuffer());
+            const host = document.createElement('div');
+            document.body.appendChild(host);
+            // @ts-ignore
+            await xlsx.renderAsync(buf, host, null, { interactiveSlicers: true });
+            const slicerAside = host.querySelector('aside.xlsx-slicer');
+            const chips = slicerAside ? slicerAside.querySelectorAll('button.xlsx-slicer-chip') : [];
+            const timelineAside = host.querySelector('aside.xlsx-timeline');
+            const slider = timelineAside ? timelineAside.querySelector('div.xlsx-timeline-slider') : null;
+            const handles = slider ? slider.querySelectorAll('input[type="range"]') : [];
+            // Click the East chip (should start aria-pressed="false") and
+            // capture the dispatched xlsx:slicer-change event.
+            let eventDetail = null;
+            if (slicerAside) {
+                slicerAside.addEventListener('xlsx:slicer-change', (e) => { eventDetail = e.detail; });
+                const east = [...chips].find((c) => c.textContent === 'East');
+                if (east) east.click();
+            }
+            return {
+                chipCount: chips.length,
+                chipLabels: [...chips].map((c) => c.textContent),
+                pressed: [...chips].map((c) => c.getAttribute('aria-pressed')),
+                hasSlider: !!slider,
+                handleCount: handles.length,
+                eventSlicerName: eventDetail ? eventDetail.slicer : null,
+                eventSelectedItems: eventDetail ? eventDetail.selectedItems : null,
+            };
+        });
+        expect(result.chipCount).toBe(3);
+        expect(result.chipLabels).toEqual(['North', 'South', 'East']);
+        // After clicking East, it should be pressed + North/South unchanged.
+        expect(result.pressed).toEqual(['true', 'true', 'true']);
+        expect(result.hasSlider).toBe(true);
+        expect(result.handleCount).toBe(2);
+        expect(result.eventSlicerName).toBe('SlicerRegion');
+        expect(result.eventSelectedItems).toContain('East');
+    });
+});
+
 test.describe('Library surface', () => {
     test('exposes parseAsync, renderWorkbook, renderAsync globals', async ({ page }) => {
         await page.goto('/tests/harness.html');

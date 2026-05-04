@@ -826,10 +826,10 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
     // security contract as shapes — attacker-controlled strings reach the
     // DOM only via textContent / setAttribute.
     for (const slicer of sheet.slicers) {
-        section.appendChild(renderSlicer(slicer));
+        section.appendChild(renderSlicer(slicer, options));
     }
     for (const timeline of sheet.timelines) {
-        section.appendChild(renderTimeline(timeline));
+        section.appendChild(renderTimeline(timeline, options));
     }
 
     // Unanchored embeddings. Anchor-less <oleObject> rels (e.g. producers that
@@ -1435,11 +1435,19 @@ export function applyFormControlUpdate(
 }
 
 // Build an `<aside class="xlsx-slicer">` carrying the slicer's caption +
-// current selection. xlsxjs does NOT render the clickable slicer UI —
-// this is a read-only summary. All attacker-controlled strings reach
-// the DOM via textContent / setAttribute only. aria-hidden="false" so
-// screen readers pick the aside up (future wave will lay it out in-flow).
-function renderSlicer(slicer: SheetSlicer): HTMLElement {
+// current selection. xlsxjs does NOT render the clickable slicer UI by
+// default — this is a read-only summary. All attacker-controlled strings
+// reach the DOM via textContent / setAttribute only. aria-hidden="false"
+// so screen readers pick the aside up.
+//
+// Opt-in interactive mode (Options.interactiveSlicers) swaps the flat
+// selected-item <ul> for a set of `<button class="xlsx-slicer-chip">`
+// toggle chips covering every item the cache enumerated. Each chip tracks
+// its pressed state via aria-pressed; clicking a chip flips its state and
+// dispatches an `xlsx:slicer-change` CustomEvent on the aside so
+// consumers can drive their own pivot filter. xlsxjs does NOT
+// re-materialise pivot data.
+function renderSlicer(slicer: SheetSlicer, options: Options): HTMLElement {
     const aside = document.createElement('aside');
     aside.className = 'xlsx-slicer';
     aside.setAttribute('aria-hidden', 'false');
@@ -1454,6 +1462,11 @@ function renderSlicer(slicer: SheetSlicer): HTMLElement {
     header.textContent = slicer.caption ?? slicer.name;
     aside.appendChild(header);
 
+    if (options.interactiveSlicers) {
+        populateInteractiveSlicer(aside, slicer);
+        return aside;
+    }
+
     // Selected-item list. Empty array stays rendered as an empty <ul> so
     // the DOM shape is stable whether Excel wrote "all selected"
     // (no explicit items) or an explicit selection set.
@@ -1467,12 +1480,71 @@ function renderSlicer(slicer: SheetSlicer): HTMLElement {
     return aside;
 }
 
+// Interactive slicer body. For each item the cache enumerated (all items
+// when available, else just the selected ones), emit a
+// `<button class="xlsx-slicer-chip">` with aria-pressed tracking whether
+// the item is currently part of the selection. Clicking a chip toggles
+// its aria-pressed and dispatches an `xlsx:slicer-change` CustomEvent on
+// the aside carrying the slicer's name + the current selection snapshot.
+// All item labels reach the DOM via textContent / setAttribute only.
+function populateInteractiveSlicer(aside: HTMLElement, slicer: SheetSlicer): void {
+    // Prefer the full item list so unselected chips surface too; fall back
+    // to selectedItems when the cache did not enumerate items (which
+    // leaves us with chips only for the current selection).
+    const itemsSource = slicer.allItems.length > 0 ? slicer.allItems : slicer.selectedItems;
+    // Selected-lookup uses a Set so repeated lookups are O(1) even on
+    // large item lists. Set is also safe for attacker-controlled strings —
+    // unlike plain objects, it can't trip prototype keys.
+    const selectedSet = new Set(slicer.selectedItems);
+    const state = new Map<HTMLButtonElement, string>();
+
+    const dispatch = () => {
+        const current: string[] = [];
+        for (const [btn, label] of state) {
+            if (btn.getAttribute('aria-pressed') === 'true') current.push(label);
+        }
+        // Event name is a hard-coded string literal. The detail carries
+        // the slicer's name (from setAttribute-safe metadata) plus a fresh
+        // array snapshot so listeners can't mutate our internal state.
+        const win = (aside.ownerDocument?.defaultView ?? (typeof window !== 'undefined' ? window : null)) as (Window & typeof globalThis) | null;
+        const CE = win?.CustomEvent ?? (typeof CustomEvent !== 'undefined' ? CustomEvent : null);
+        if (!CE) return;
+        aside.dispatchEvent(new CE('xlsx:slicer-change', {
+            bubbles: true,
+            detail: { slicer: slicer.name, selectedItems: current },
+        }));
+    };
+
+    for (const label of itemsSource) {
+        const btn = document.createElement('button');
+        btn.setAttribute('type', 'button');
+        btn.className = 'xlsx-slicer-chip';
+        const pressed = selectedSet.has(label);
+        btn.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+        btn.textContent = label;
+        state.set(btn, label);
+        btn.addEventListener('click', () => {
+            const nextPressed = btn.getAttribute('aria-pressed') !== 'true';
+            btn.setAttribute('aria-pressed', nextPressed ? 'true' : 'false');
+            dispatch();
+        });
+        aside.appendChild(btn);
+    }
+}
+
 // Build an `<aside class="xlsx-timeline">` carrying the timeline's caption +
 // active level + selected date range. Same read-only contract as the slicer
 // aside. When a selected range is populated we emit a small
 // `<span>start → end</span>` label; otherwise the caption alone lands in
 // the header.
-function renderTimeline(timeline: SheetTimeline): HTMLElement {
+//
+// Opt-in interactive mode (Options.interactiveSlicers) additionally emits
+// a `<div class="xlsx-timeline-slider">` with two `<input type="range">`
+// handles bounded by the cache's min/max dates. Dragging either handle
+// updates a `<span class="xlsx-timeline-label">` label and dispatches an
+// `xlsx:timeline-change` CustomEvent on the aside. When the cache did NOT
+// enumerate bounds we fall back to the detect-only label only — no slider.
+function renderTimeline(timeline: SheetTimeline, options: Options): HTMLElement {
     const aside = document.createElement('aside');
     aside.className = 'xlsx-timeline';
     aside.setAttribute('aria-hidden', 'false');
@@ -1486,19 +1558,112 @@ function renderTimeline(timeline: SheetTimeline): HTMLElement {
     header.textContent = timeline.caption ?? timeline.name;
     aside.appendChild(header);
 
-    if (timeline.selectedRange) {
-        const { start, end } = timeline.selectedRange;
-        if (start || end) {
-            const label = document.createElement('span');
-            // We format the range with a plain " → " separator; start/end
-            // are the raw ISO-like strings Excel persisted, e.g.
-            // "2023-01-01T00:00:00". Consumers wanting a localised format
-            // can read the data-level + re-format from the parsed model.
-            label.textContent = `${start ?? ''} → ${end ?? ''}`;
-            aside.appendChild(label);
-        }
+    const range = timeline.selectedRange;
+    const rangeStart = range?.start ?? null;
+    const rangeEnd = range?.end ?? null;
+
+    if (options.interactiveSlicers && timeline.bounds) {
+        populateInteractiveTimeline(aside, timeline, timeline.bounds, rangeStart, rangeEnd);
+        return aside;
+    }
+
+    if (rangeStart || rangeEnd) {
+        const label = document.createElement('span');
+        // We format the range with a plain " → " separator; start/end
+        // are the raw ISO-like strings Excel persisted, e.g.
+        // "2023-01-01T00:00:00". Consumers wanting a localised format
+        // can read the data-level + re-format from the parsed model.
+        label.textContent = `${rangeStart ?? ''} → ${rangeEnd ?? ''}`;
+        aside.appendChild(label);
     }
     return aside;
+}
+
+// Interactive timeline body. Slider handles are two `<input type="range">`
+// elements whose min/max encode the cache's bounds as numeric epoch
+// milliseconds; the `.value` of each handle on init is the current
+// selected range (falling back to bounds when the selection is open). A
+// label beneath the sliders shows the currently-chosen ISO dates and is
+// refreshed whenever either handle fires `input`. We dispatch
+// `xlsx:timeline-change` on the aside with real Date objects — consumers
+// that need the original ISO strings can re-format from `.toISOString()`.
+function populateInteractiveTimeline(
+    aside: HTMLElement,
+    timeline: SheetTimeline,
+    bounds: { min: string; max: string },
+    rangeStart: string | null,
+    rangeEnd: string | null,
+): void {
+    const minMs = Date.parse(bounds.min);
+    const maxMs = Date.parse(bounds.max);
+    // Guard against unparseable bounds — we already know the cache had
+    // strings, but Date.parse can still return NaN for non-ISO forms. In
+    // that case fall through to the detect-only label so we don't crash.
+    if (!Number.isFinite(minMs) || !Number.isFinite(maxMs) || maxMs <= minMs) {
+        if (rangeStart || rangeEnd) {
+            const label = document.createElement('span');
+            label.textContent = `${rangeStart ?? ''} → ${rangeEnd ?? ''}`;
+            aside.appendChild(label);
+        }
+        return;
+    }
+
+    // Clamp the starting handle positions into [min, max]. An open-ended
+    // selection (null endpoint) pins the handle to the bound on that side.
+    const startMsRaw = rangeStart ? Date.parse(rangeStart) : minMs;
+    const endMsRaw = rangeEnd ? Date.parse(rangeEnd) : maxMs;
+    const startMs = Number.isFinite(startMsRaw) ? Math.max(minMs, Math.min(maxMs, startMsRaw)) : minMs;
+    const endMs = Number.isFinite(endMsRaw) ? Math.max(minMs, Math.min(maxMs, endMsRaw)) : maxMs;
+
+    const slider = document.createElement('div');
+    slider.className = 'xlsx-timeline-slider';
+
+    const minHandle = document.createElement('input');
+    minHandle.type = 'range';
+    minHandle.setAttribute('data-handle', 'start');
+    minHandle.min = String(minMs);
+    minHandle.max = String(maxMs);
+    minHandle.value = String(startMs);
+
+    const maxHandle = document.createElement('input');
+    maxHandle.type = 'range';
+    maxHandle.setAttribute('data-handle', 'end');
+    maxHandle.min = String(minMs);
+    maxHandle.max = String(maxMs);
+    maxHandle.value = String(endMs);
+
+    slider.appendChild(minHandle);
+    slider.appendChild(maxHandle);
+    aside.appendChild(slider);
+
+    const label = document.createElement('span');
+    label.className = 'xlsx-timeline-label';
+    const fmt = (ms: number): string => new Date(ms).toISOString();
+    label.textContent = `${fmt(startMs)} → ${fmt(endMs)}`;
+    aside.appendChild(label);
+
+    const onInput = () => {
+        let a = Number(minHandle.value);
+        let b = Number(maxHandle.value);
+        if (!Number.isFinite(a)) a = minMs;
+        if (!Number.isFinite(b)) b = maxMs;
+        // Keep the two handles ordered. When the start drags past the end
+        // (or vice versa) we swap for the event payload but leave the
+        // inputs at their as-dragged positions so the user sees what they
+        // did — jQuery UI's classic dual-slider behaviour.
+        const lo = Math.min(a, b);
+        const hi = Math.max(a, b);
+        label.textContent = `${fmt(lo)} → ${fmt(hi)}`;
+        const win = (aside.ownerDocument?.defaultView ?? (typeof window !== 'undefined' ? window : null)) as (Window & typeof globalThis) | null;
+        const CE = win?.CustomEvent ?? (typeof CustomEvent !== 'undefined' ? CustomEvent : null);
+        if (!CE) return;
+        aside.dispatchEvent(new CE('xlsx:timeline-change', {
+            bubbles: true,
+            detail: { timeline: timeline.name, start: new Date(lo), end: new Date(hi) },
+        }));
+    };
+    minHandle.addEventListener('input', onInput);
+    maxHandle.addEventListener('input', onInput);
 }
 
 // Build an <aside class="xlsx-embedding"> for one detected embedding. Name,

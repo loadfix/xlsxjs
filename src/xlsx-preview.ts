@@ -52,6 +52,17 @@ export interface Options {
     // so consumers can still inspect the control's metadata. Default off to
     // keep Wave-8 golden output byte-stable.
     interactiveFormControls: boolean;
+    // Opt-in interactive slicer + timeline widgets. When true, the detect-
+    // only `<ul>` body of `<aside class="xlsx-slicer">` is replaced by a
+    // row of `<button class="xlsx-slicer-chip">` toggle chips, and the
+    // detect-only range label of `<aside class="xlsx-timeline">` picks up
+    // a two-handle `<div class="xlsx-timeline-slider">` when the cache
+    // supplied concrete bounds. Clicking a chip or dragging a handle fires
+    // an `xlsx:slicer-change` / `xlsx:timeline-change` CustomEvent on the
+    // aside — xlsxjs does NOT re-materialise the underlying pivot table;
+    // consumers listen for the event to drive their own filter UI. Default
+    // off to keep Wave-8 golden output byte-stable.
+    interactiveSlicers: boolean;
     h: typeof h;
 }
 
@@ -64,6 +75,7 @@ export const defaultOptions: Options = {
     inlineEmbeddings: false,
     renderCharts: true,
     interactiveFormControls: false,
+    interactiveSlicers: false,
     h,
 };
 
