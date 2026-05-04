@@ -2,7 +2,8 @@
 
 What's still open. The "Resolved in fork" block at the bottom tracks
 features that have shipped on `master` and live in the harness / fixtures.
-Cleaned up 2026-05-04 to reflect reality after Waves 1–5.
+Cleaned up 2026-05-04 to reflect reality after Waves 1–5; 2026-05-02 sync
+added multi-step cellStyle chain + custom iconSet lists.
 
 ## Open — small items (one file each)
 
@@ -22,13 +23,6 @@ Cleaned up 2026-05-04 to reflect reality after Waves 1–5.
   read-only indicator. No rendering side effect (cells are already read-only).
 - [ ] **Alt text on tables** (`table/@altText`, `table/@altTextSummary`) —
   accessibility label on defined tables; extend `TableDef`.
-- [ ] **Custom icon-set rule lists** (`iconSet/@custom='1'` + `cfIcon`
-  children) — per-threshold icon overrides. We honour the default palette
-  for the named set but drop per-rule overrides.
-- [ ] **Multi-step cellStyle inheritance** — today `resolveEffectiveXf`
-  follows `cellXfs[i].xfId → cellStyleXfs[j]` one hop. Excel permits named
-  styles to chain (rare but legal); walk the chain until a default or a
-  cycle.
 
 ## Open — medium items (one slice each)
 
@@ -132,8 +126,13 @@ Cleaned up 2026-05-04 to reflect reality after Waves 1–5.
   `indexedColor(i)`; `ColorRef` gained an `indexed` variant.
 - ✅ **Multi-sheet + workbook rels** — `<sheet r:id>` resolution via
   `xl/_rels/workbook.xml.rels`.
-- ✅ **Named styles inheritance** (one hop) — `cellXf.xfId` →
-  `cellStyleXfs[j]` via `resolveEffectiveXf`.
+- ✅ **Named styles inheritance** — `cellXf.xfId` →
+  `cellStyleXfs[j]` via `resolveEffectiveXf`. Chain-walk (up to 8 hops,
+  cycle-safe) added so a named style referencing another named style
+  resolves end-to-end.
+- ✅ **Custom icon-set rule lists** — `iconSet/@custom='1'` + `cfIcon`
+  children parsed onto `IconSet.customIcons`; renderer swaps in the
+  per-position override.
 - ✅ **Row heights + hidden rows/columns** — `RowDimension`,
   `ColumnWidth.hidden`, rendered via `tr.style.height` + `display: none`.
 - ✅ **Graphical CF rules** — colourScale (2/3-stop interpolation),

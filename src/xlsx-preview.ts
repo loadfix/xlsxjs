@@ -9,7 +9,7 @@ export { parseThreadedComments, isSafeHyperlinkHref } from './workbook-parser';
 export type { Styles, CellXf, FontStyle, FillStyle, BorderStyle, Dxf, UnderlineStyle } from './styles';
 export type { Theme, ColorRef } from './theme';
 export type { ConditionalFormatting, CfRule, CfRuleType, CfOperator, CellRange, Cfvo, ColorScale, DataBar, IconSet } from './conditional-format';
-export { parseStyles, lookupNumberFormat, sanitizeHexColor, sanitizeFontFamily, parseColorElement } from './styles';
+export { parseStyles, lookupNumberFormat, sanitizeHexColor, sanitizeFontFamily, parseColorElement, resolveEffectiveXf } from './styles';
 export { parseTheme, applyTint, resolveColor, indexedColor } from './theme';
 export { parseConditionalFormatting, evaluateRule, resolveCfvo, interpolateColorScale } from './conditional-format';
 export { formatNumber } from './number-format';

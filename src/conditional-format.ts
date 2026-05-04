@@ -85,6 +85,12 @@ export interface IconSet {
     cfvos: Cfvo[];
     showValue: boolean;
     reverse: boolean;
+    // When @custom="1" on the <iconSet/>, Excel writes one <cfIcon/> per
+    // position whose (iconSet, iconId) pair overrides the default icon at
+    // that position. `customIcons[i]` is either {iconSet, iconId} to swap in
+    // a specific glyph or null to fall back to the default for that tier.
+    // null on the whole field means the rule is not custom.
+    customIcons: ({ iconSet: string; iconId: number } | null)[] | null;
 }
 
 export interface CfRule {
@@ -383,12 +389,34 @@ function parseCfRuleExtId(ruleEl: Element): string | null {
 
 function parseIconSet(ruleEl: Element): IconSet {
     const root = ruleEl.getElementsByTagNameNS(NS_MAIN, 'iconSet').item(0);
-    if (!root) return { iconSet: '3TrafficLights1', cfvos: [], showValue: true, reverse: false };
+    if (!root) return {
+        iconSet: '3TrafficLights1', cfvos: [], showValue: true, reverse: false,
+        customIcons: null,
+    };
+    const cfvos = parseCfvos(root);
+    const isCustom = root.getAttribute('custom') === '1';
+    // Per the schema, a custom iconSet carries one <cfIcon iconSet="…" iconId="N"/>
+    // child per cfvo position, in source order. Absent entries (fewer children
+    // than cfvos) default to null at that slot — the renderer falls back to
+    // the rule's declared set for untouched positions.
+    let customIcons: IconSet['customIcons'] = null;
+    if (isCustom) {
+        customIcons = new Array(cfvos.length).fill(null);
+        const iconEls = root.getElementsByTagNameNS(NS_MAIN, 'cfIcon');
+        for (let i = 0; i < iconEls.length && i < cfvos.length; i++) {
+            const set = iconEls[i].getAttribute('iconSet');
+            const idAttr = iconEls[i].getAttribute('iconId');
+            const id = idAttr != null ? Number(idAttr) : NaN;
+            if (!set || !Number.isFinite(id)) continue;
+            customIcons[i] = { iconSet: set, iconId: id };
+        }
+    }
     return {
         iconSet: root.getAttribute('iconSet') ?? '3TrafficLights1',
-        cfvos: parseCfvos(root),
+        cfvos,
         showValue: root.getAttribute('showValue') !== '0',
         reverse: root.getAttribute('reverse') === '1',
+        customIcons,
     };
 }
 

@@ -1273,16 +1273,12 @@ await writeFixture('merged', {
     console.log(`wrote ${out} (${buf.length} bytes)`);
 }
 
-// ── sheet-protection-and-alt ──────────────────────────────────────────────
-// Exercises the SheetProtection state + TableDef altText surface.
-//   - <sheetProtection sheet="1" selectLockedCells="1" formatCells="0"/>:
-//     enabled; selectLockedCells explicitly locked; formatCells explicitly
-//     unlocked; every absent toggle (sort, …) defaults to locked per ECMA.
-//   - The sheet carries one defined table with @altText="Q4 stock" and
-//     @altTextSummary="Weekly stock by SKU". The renderer should surface the
-//     altText on the caption's aria-label.
+// ── cellstyle-chain ───────────────────────────────────────────────────────
+// Exercises multi-step cellStyleXfs inheritance. A cellXf points at a named
+// style which itself points at *another* named style — Excel permits this,
+// resolveEffectiveXf must walk the chain.
 {
-    const outDir = resolve(repo, 'tests/render-test/sheet-protection-and-alt');
+    const outDir = resolve(repo, 'tests/render-test/cellstyle-chain');
     mkdirSync(outDir, { recursive: true });
     const zip = new JSZip();
     zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -1292,106 +1288,92 @@ await writeFixture('merged', {
   <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
   <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
   <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
-  <Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/>
-</Types>`);
-    zip.file('_rels/.rels', rootRels);
-    zip.file('xl/_rels/workbook.xml.rels', workbookRels);
-    zip.file('xl/workbook.xml', workbookXml('Inventory'));
-    zip.file('xl/sharedStrings.xml', sharedStringsXml([
-        'SKU', 'Name', 'Region', 'Stock',
-        'A-100', 'Widget', 'North',
-        'A-101', 'Gadget', 'South',
-    ]));
-    zip.file('xl/worksheets/_rels/sheet1.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/>
-</Relationships>`);
-    zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-           xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheetData>
-    <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c><c r="D1" t="s"><v>3</v></c></row>
-    <row r="2"><c r="A2" t="s"><v>4</v></c><c r="B2" t="s"><v>5</v></c><c r="C2" t="s"><v>6</v></c><c r="D2"><v>42</v></c></row>
-    <row r="3"><c r="A3" t="s"><v>7</v></c><c r="B3" t="s"><v>8</v></c><c r="C3" t="s"><v>9</v></c><c r="D3"><v>118</v></c></row>
-  </sheetData>
-  <sheetProtection sheet="1" selectLockedCells="1" formatCells="0"/>
-  <tableParts count="1"><tablePart r:id="rId1"/></tableParts>
-</worksheet>`);
-    zip.file('xl/tables/table1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-       id="1" name="Inventory" displayName="Inventory" ref="A1:D3"
-       altText="Q4 stock" altTextSummary="Weekly stock by SKU">
-  <autoFilter ref="A1:D3"/>
-  <tableColumns count="4">
-    <tableColumn id="1" name="SKU"/>
-    <tableColumn id="2" name="Name"/>
-    <tableColumn id="3" name="Region"/>
-    <tableColumn id="4" name="Stock"/>
-  </tableColumns>
-</table>`);
-    const buf = await zip.generateAsync({ type: 'nodebuffer' });
-    const out = resolve(outDir, 'workbook.xlsx');
-    writeFileSync(out, buf);
-    console.log(`wrote ${out} (${buf.length} bytes)`);
-}
-
-// ── cell-metadata ──────────────────────────────────────────────────────────
-// Exercises the xl/metadata.xml path. One cellMetadata block defines a
-// dynamic-array (XLDAPR) spill-anchor; A1 carries c/@cm="1" pointing at it,
-// B1 carries no metadata reference.
-{
-    const outDir = resolve(repo, 'tests/render-test/cell-metadata');
-    mkdirSync(outDir, { recursive: true });
-    const zip = new JSZip();
-    zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-  <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
-  <Override PartName="/xl/metadata.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheetMetadata+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
 </Types>`);
     zip.file('_rels/.rels', rootRels);
     zip.file('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
   <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>
-  <Relationship Id="rId3" Type="http://schemas.microsoft.com/office/2006/relationships/xlMetadata" Target="metadata.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
 </Relationships>`);
-    zip.file('xl/workbook.xml', workbookXml('Spill'));
-    zip.file('xl/sharedStrings.xml', sharedStringsXml(['anchor', 'plain']));
+    zip.file('xl/workbook.xml', workbookXml('Chain'));
+    zip.file('xl/sharedStrings.xml', sharedStringsXml(['chained cell']));
+    zip.file('xl/styles.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="3">
+    <font><sz val="11"/><name val="Calibri"/></font>
+    <font><i/><sz val="11"/><name val="Calibri"/></font>
+    <font><b/><sz val="11"/><name val="Calibri"/></font>
+  </fonts>
+  <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellStyleXfs count="3">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="2"/>
+    <xf numFmtId="0" fontId="2" fillId="0" borderId="0" applyFont="1"/>
+  </cellStyleXfs>
+  <cellXfs count="2">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="1"/>
+  </cellXfs>
+  <cellStyles count="3">
+    <cellStyle name="Normal" xfId="0" builtinId="0"/>
+    <cellStyle name="MidStyle" xfId="1"/>
+    <cellStyle name="DeepStyle" xfId="2"/>
+  </cellStyles>
+</styleSheet>`);
     zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <sheetData>
-    <row r="1">
-      <c r="A1" t="s" cm="1"><v>0</v></c>
-      <c r="B1" t="s"><v>1</v></c>
-    </row>
+    <row r="1"><c r="A1" t="s" s="1"><v>0</v></c></row>
   </sheetData>
 </worksheet>`);
-    zip.file('xl/metadata.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<metadata xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-          xmlns:xda="http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray">
-  <metadataTypes count="1">
-    <metadataType name="XLDAPR" minSupportedVersion="120000" copy="1" pasteAll="1"
-                  pasteValues="1" merge="1" splitFirst="1" rowColShift="1"
-                  clearFormats="1" clearComments="1" assign="1" coerce="1"
-                  cellMeta="1"/>
-  </metadataTypes>
-  <futureMetadata name="XLDAPR" count="1">
-    <bk>
-      <extLst>
-        <ext uri="{BDBB8CDC-FA1E-496E-A857-3C3F30C029C3}">
-          <xda:dynamicArrayProperties fDynamic="1" fCollapsed="0"/>
-        </ext>
-      </extLst>
-    </bk>
-  </futureMetadata>
-  <cellMetadata count="1">
-    <bk><rc t="1" v="0"/></bk>
-  </cellMetadata>
-</metadata>`);
+    const buf = await zip.generateAsync({ type: 'nodebuffer' });
+    const out = resolve(outDir, 'workbook.xlsx');
+    writeFileSync(out, buf);
+    console.log(`wrote ${out} (${buf.length} bytes)`);
+}
+
+// ── cf-custom-icons ───────────────────────────────────────────────────────
+// Exercises the custom iconSet override path.
+{
+    const outDir = resolve(repo, 'tests/render-test/cf-custom-icons');
+    mkdirSync(outDir, { recursive: true });
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>`);
+    zip.file('_rels/.rels', rootRels);
+    zip.file('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>`);
+    zip.file('xl/workbook.xml', workbookXml('CustomIcons'));
+    zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="A1"><v>10</v></c></row>
+    <row r="2"><c r="A2"><v>50</v></c></row>
+    <row r="3"><c r="A3"><v>90</v></c></row>
+  </sheetData>
+  <conditionalFormatting sqref="A1:A3">
+    <cfRule type="iconSet" priority="1">
+      <iconSet iconSet="3TrafficLights1" custom="1">
+        <cfvo type="percent" val="0"/>
+        <cfvo type="percent" val="33"/>
+        <cfvo type="percent" val="66"/>
+        <cfIcon iconSet="3Arrows" iconId="0"/>
+        <cfIcon iconSet="3TrafficLights1" iconId="1"/>
+        <cfIcon iconSet="3Symbols" iconId="2"/>
+      </iconSet>
+    </cfRule>
+  </conditionalFormatting>
+</worksheet>`);
     const buf = await zip.generateAsync({ type: 'nodebuffer' });
     const out = resolve(outDir, 'workbook.xlsx');
     writeFileSync(out, buf);

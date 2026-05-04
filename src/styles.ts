@@ -505,23 +505,53 @@ function parseAlignment(el: Element | null): Alignment {
 //   - numFmtId / fontId / fillId / borderId from cellXf when applyX=true,
 //     otherwise from the base.
 //   - alignment: cellXf when applyAlignment=true, otherwise base.
+//
+// A named style (cellStyleXf) may itself carry an `xfId` pointing at yet
+// another cellStyleXf — rare in practice, but legal per the schema. We
+// walk the chain iteratively so a pathological file can't blow the stack,
+// capping at MAX_XF_HOPS hops and bailing on any revisited index.
+const MAX_XF_HOPS = 8;
+
 export function resolveEffectiveXf(styles: Styles, cellXf: CellXf): CellXf {
-    if (cellXf.xfId < 0 || cellXf.xfId >= styles.cellStyleXfs.length) return cellXf;
-    const base = styles.cellStyleXfs[cellXf.xfId];
-    return {
-        numFmtId: cellXf.applyNumberFormat ? cellXf.numFmtId : (base.numFmtId || cellXf.numFmtId),
-        fontId:   cellXf.applyFont         ? cellXf.fontId   : (base.fontId   || cellXf.fontId),
-        fillId:   cellXf.applyFill         ? cellXf.fillId   : (base.fillId   || cellXf.fillId),
-        borderId: cellXf.applyBorder       ? cellXf.borderId : (base.borderId || cellXf.borderId),
-        xfId: cellXf.xfId,
-        // Effective xf always carries the "apply" flags as true when the
-        // resulting id is non-default — the renderer uses those to decide
-        // whether to call applyFont/applyFill/applyBorder at all.
-        applyNumberFormat: cellXf.applyNumberFormat || base.applyNumberFormat,
-        applyFont:         cellXf.applyFont         || base.applyFont,
-        applyFill:         cellXf.applyFill         || base.applyFill,
-        applyBorder:       cellXf.applyBorder       || base.applyBorder,
-        applyAlignment:    cellXf.applyAlignment    || base.applyAlignment,
-        alignment: cellXf.applyAlignment ? cellXf.alignment : base.alignment,
-    };
+    let effective = cellXf;
+    const seen = new Set<number>();
+    for (let hop = 0; hop < MAX_XF_HOPS; hop++) {
+        const nextId = effective.xfId;
+        if (nextId < 0 || nextId >= styles.cellStyleXfs.length) break;
+        // Cycle guard: if we've already merged with this cellStyleXf index,
+        // bail — the chain loops back on itself and there's nothing new to
+        // pick up.
+        if (seen.has(nextId)) break;
+        seen.add(nextId);
+        const base = styles.cellStyleXfs[nextId];
+        const merged: CellXf = {
+            numFmtId: effective.applyNumberFormat ? effective.numFmtId : (base.numFmtId || effective.numFmtId),
+            fontId:   effective.applyFont         ? effective.fontId   : (base.fontId   || effective.fontId),
+            fillId:   effective.applyFill         ? effective.fillId   : (base.fillId   || effective.fillId),
+            borderId: effective.applyBorder       ? effective.borderId : (base.borderId || effective.borderId),
+            // Advance the chain: the base's own xfId tells us whether another
+            // hop is needed on the next iteration. We preserve it here rather
+            // than pinning to the original cellXf.xfId so the loop can
+            // terminate when the chain reaches a terminal (-1) entry.
+            xfId: base.xfId,
+            // Effective xf always carries the "apply" flags as true when the
+            // resulting id is non-default — the renderer uses those to decide
+            // whether to call applyFont/applyFill/applyBorder at all.
+            applyNumberFormat: effective.applyNumberFormat || base.applyNumberFormat,
+            applyFont:         effective.applyFont         || base.applyFont,
+            applyFill:         effective.applyFill         || base.applyFill,
+            applyBorder:       effective.applyBorder       || base.applyBorder,
+            applyAlignment:    effective.applyAlignment    || base.applyAlignment,
+            alignment: effective.applyAlignment ? effective.alignment : base.alignment,
+        };
+        effective = merged;
+    }
+    // The returned xf keeps the *original* xfId so downstream code can
+    // still see which named style this cell was rooted at, matching the
+    // pre-chain contract. (The intermediate traversal used `base.xfId`
+    // internally to walk the chain.)
+    if (effective !== cellXf) {
+        effective = { ...effective, xfId: cellXf.xfId };
+    }
+    return effective;
 }

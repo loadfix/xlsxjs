@@ -564,23 +564,37 @@
             readingOrder,
         };
     }
+    const MAX_XF_HOPS = 8;
     function resolveEffectiveXf(styles, cellXf) {
-        if (cellXf.xfId < 0 || cellXf.xfId >= styles.cellStyleXfs.length)
-            return cellXf;
-        const base = styles.cellStyleXfs[cellXf.xfId];
-        return {
-            numFmtId: cellXf.applyNumberFormat ? cellXf.numFmtId : (base.numFmtId || cellXf.numFmtId),
-            fontId: cellXf.applyFont ? cellXf.fontId : (base.fontId || cellXf.fontId),
-            fillId: cellXf.applyFill ? cellXf.fillId : (base.fillId || cellXf.fillId),
-            borderId: cellXf.applyBorder ? cellXf.borderId : (base.borderId || cellXf.borderId),
-            xfId: cellXf.xfId,
-            applyNumberFormat: cellXf.applyNumberFormat || base.applyNumberFormat,
-            applyFont: cellXf.applyFont || base.applyFont,
-            applyFill: cellXf.applyFill || base.applyFill,
-            applyBorder: cellXf.applyBorder || base.applyBorder,
-            applyAlignment: cellXf.applyAlignment || base.applyAlignment,
-            alignment: cellXf.applyAlignment ? cellXf.alignment : base.alignment,
-        };
+        let effective = cellXf;
+        const seen = new Set();
+        for (let hop = 0; hop < MAX_XF_HOPS; hop++) {
+            const nextId = effective.xfId;
+            if (nextId < 0 || nextId >= styles.cellStyleXfs.length)
+                break;
+            if (seen.has(nextId))
+                break;
+            seen.add(nextId);
+            const base = styles.cellStyleXfs[nextId];
+            const merged = {
+                numFmtId: effective.applyNumberFormat ? effective.numFmtId : (base.numFmtId || effective.numFmtId),
+                fontId: effective.applyFont ? effective.fontId : (base.fontId || effective.fontId),
+                fillId: effective.applyFill ? effective.fillId : (base.fillId || effective.fillId),
+                borderId: effective.applyBorder ? effective.borderId : (base.borderId || effective.borderId),
+                xfId: base.xfId,
+                applyNumberFormat: effective.applyNumberFormat || base.applyNumberFormat,
+                applyFont: effective.applyFont || base.applyFont,
+                applyFill: effective.applyFill || base.applyFill,
+                applyBorder: effective.applyBorder || base.applyBorder,
+                applyAlignment: effective.applyAlignment || base.applyAlignment,
+                alignment: effective.applyAlignment ? effective.alignment : base.alignment,
+            };
+            effective = merged;
+        }
+        if (effective !== cellXf) {
+            effective = { ...effective, xfId: cellXf.xfId };
+        }
+        return effective;
     }
 
     const NS_DRAW = 'http://schemas.openxmlformats.org/drawingml/2006/main';
@@ -1030,12 +1044,31 @@
     function parseIconSet(ruleEl) {
         const root = ruleEl.getElementsByTagNameNS(NS_MAIN, 'iconSet').item(0);
         if (!root)
-            return { iconSet: '3TrafficLights1', cfvos: [], showValue: true, reverse: false };
+            return {
+                iconSet: '3TrafficLights1', cfvos: [], showValue: true, reverse: false,
+                customIcons: null,
+            };
+        const cfvos = parseCfvos(root);
+        const isCustom = root.getAttribute('custom') === '1';
+        let customIcons = null;
+        if (isCustom) {
+            customIcons = new Array(cfvos.length).fill(null);
+            const iconEls = root.getElementsByTagNameNS(NS_MAIN, 'cfIcon');
+            for (let i = 0; i < iconEls.length && i < cfvos.length; i++) {
+                const set = iconEls[i].getAttribute('iconSet');
+                const idAttr = iconEls[i].getAttribute('iconId');
+                const id = idAttr != null ? Number(idAttr) : NaN;
+                if (!set || !Number.isFinite(id))
+                    continue;
+                customIcons[i] = { iconSet: set, iconId: id };
+            }
+        }
         return {
             iconSet: root.getAttribute('iconSet') ?? '3TrafficLights1',
-            cfvos: parseCfvos(root),
+            cfvos,
             showValue: root.getAttribute('showValue') !== '0',
             reverse: root.getAttribute('reverse') === '1',
+            customIcons,
         };
     }
     function asRuleType(s) {
@@ -3706,7 +3739,10 @@
                 if (n >= thresholds[i])
                     idx = i;
             }
-            const svg = renderIcon(icons.iconSet, idx, icons.reverse);
+            const override = icons.customIcons?.[idx];
+            const svg = override
+                ? renderIcon(override.iconSet, override.iconId, false)
+                : renderIcon(icons.iconSet, idx, icons.reverse);
             if (!svg)
                 continue;
             const key = `${entry.row},${entry.col}`;
@@ -4638,6 +4674,7 @@
     exports.renderWorkbook = renderWorkbook;
     exports.resolveCfvo = resolveCfvo;
     exports.resolveColor = resolveColor;
+    exports.resolveEffectiveXf = resolveEffectiveXf;
     exports.sanitizeFontFamily = sanitizeFontFamily;
     exports.sanitizeHexColor = sanitizeHexColor;
 

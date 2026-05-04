@@ -214,7 +214,14 @@ function applyIconSet(
         for (let i = 1; i < thresholds.length; i++) {
             if (n >= thresholds[i]) idx = i;
         }
-        const svg = renderIcon(icons.iconSet, idx, icons.reverse);
+        // Custom iconSet overrides: when the rule carries a per-position
+        // map, swap in the (set, iconId) at idx instead of the declared set.
+        // `reverse` doesn't apply to custom overrides — the author picked
+        // the glyph explicitly, so we pass reverse=false.
+        const override = icons.customIcons?.[idx];
+        const svg = override
+            ? renderIcon(override.iconSet, override.iconId, false)
+            : renderIcon(icons.iconSet, idx, icons.reverse);
         if (!svg) continue;
         const key = `${entry.row},${entry.col}`;
         const existing = out.get(key) ?? {};
