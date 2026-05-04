@@ -2040,6 +2040,46 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 71. Sheet protection: <sheetProtection> state parsed + DOM attr set ──
+{
+    const { wb, container } = await renderFixture('sheet-protection-and-alt');
+    const sheet = wb.parsed.sheets[0];
+    const p = sheet.protection;
+    assert(p !== null, '71a: sheet.protection should be populated when <sheetProtection> is present');
+    assert(p.enabled === true, `71b: protection.enabled should be true (got ${p?.enabled})`);
+    // Explicit @selectLockedCells="1" → locked.
+    assert(p.selectLockedCells === true, `71c: selectLockedCells should be true (got ${p?.selectLockedCells})`);
+    // Explicit @formatCells="0" → unlocked.
+    assert(p.formatCells === false, `71d: formatCells should be false (got ${p?.formatCells})`);
+    // Absent @sort defaults to locked per ECMA-376 §18.3.1.85.
+    assert(p.sort === true, `71e: sort should default to true when attribute absent (got ${p?.sort})`);
+    // No @password → passwordHashed false.
+    assert(p.passwordHashed === false, `71f: passwordHashed should be false when no hash attrs (got ${p?.passwordHashed})`);
+
+    // DOM: section gets data-sheet-protected="true".
+    const section = container.querySelector('section.xlsx');
+    assert(section.getAttribute('data-sheet-protected') === 'true',
+        `71g: section should carry data-sheet-protected="true" (got ${JSON.stringify(section.getAttribute('data-sheet-protected'))})`);
+}
+
+// ── 72. Table alt text: TableDef carries altText + caption gets aria-label ──
+{
+    const { wb, container } = await renderFixture('sheet-protection-and-alt');
+    const sheet = wb.parsed.sheets[0];
+    assert(sheet.tables.length === 1, `72a: one table parsed (got ${sheet.tables.length})`);
+    const t = sheet.tables[0];
+    assert(t.altText === 'Q4 stock', `72b: altText should be "Q4 stock" (got ${JSON.stringify(t.altText)})`);
+    assert(t.altTextSummary === 'Weekly stock by SKU',
+        `72c: altTextSummary should be "Weekly stock by SKU" (got ${JSON.stringify(t.altTextSummary)})`);
+
+    // DOM: the caption carries aria-label="Q4 stock" (short altText wins over
+    // the longer summary when both are present).
+    const caption = container.querySelector('.xlsx-table-caption');
+    assert(caption, '72d: table caption should be rendered');
+    assert(caption.getAttribute('aria-label') === 'Q4 stock',
+        `72e: caption aria-label should be "Q4 stock" (got ${JSON.stringify(caption?.getAttribute('aria-label'))})`);
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

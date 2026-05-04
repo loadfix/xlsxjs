@@ -39,6 +39,7 @@ const fixtures = [
     'python-xlsx',
     'richtext',
     'shapes-and-textboxes',
+    'sheet-protection-and-alt',
     'sheet-view-state',
     'tables',
     'theme-fontscheme',
