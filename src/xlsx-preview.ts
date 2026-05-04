@@ -15,6 +15,9 @@ export { parseConditionalFormatting, evaluateRule, resolveCfvo, interpolateColor
 export { formatNumber } from './number-format';
 export { a1ToR1c1, r1c1ToA1 } from './formula-notation';
 export { emuToPx } from './utils';
+export type { ChartModel, ChartSeries } from './chart-parser';
+export { parseChart } from './chart-parser';
+export { renderChart } from './chart-renderer';
 
 export interface Options {
     className: string;
@@ -34,6 +37,13 @@ export interface Options {
     // model and DOM memory. Oversized payloads (>32 MiB) or MIMEs outside
     // the sanitizer's allowlist keep `dataUrl` null even when this is true.
     inlineEmbeddings: boolean;
+    // Controls whether classic chartSpace charts render as inline SVG
+    // (default) or fall back to the dashed placeholder. Producers that
+    // want to style their own chart widget — and consumers who only need
+    // the chart's anchor coordinates — can set this to false to keep the
+    // placeholder-only output. Detection still happens unconditionally;
+    // Sheet.charts[] is populated either way.
+    renderCharts: boolean;
     h: typeof h;
 }
 
@@ -44,6 +54,7 @@ export const defaultOptions: Options = {
     showFormulas: false,
     formulaNotation: 'a1',
     inlineEmbeddings: false,
+    renderCharts: true,
     h,
 };
 

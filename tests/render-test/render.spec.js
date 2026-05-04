@@ -24,6 +24,7 @@ const fixtures = [
     'cf-icons',
     'cf-new-rules',
     'chart-detect',
+    'charts',
     'comments',
     'conditional-format',
     'dimensions',

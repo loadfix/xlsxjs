@@ -14,6 +14,7 @@ import { a1ToR1c1 } from './formula-notation';
 import { renderIcon } from './icons';
 import { renderShapePreset } from './shape-presets';
 import { evaluateRule, resolveCfvo, interpolateColorScale, type ConditionalFormatting, type CfContext, type CellRange, type CfRule } from './conditional-format';
+import { renderChart } from './chart-renderer';
 
 // Excel column "width" is in units of the default font's "0" character. For
 // the default Calibri 11pt, one unit ≈ 7 pixels of content plus 5px of cell
@@ -53,7 +54,16 @@ export class HtmlRenderer {
         // more embeddings. A workbook with zero embeddings renders exactly
         // the same CSS it did before the feature landed.
         const hasEmbeddings = workbook.sheets.some((s) => s.embeddings && s.embeddings.length > 0);
-        nodes.push(renderStyle(options.className, { withEmbeddings: hasEmbeddings }));
+        // The chart CSS block is likewise gated: it only lands in the
+        // stylesheet when at least one chart will render as a real SVG
+        // figure (`chart.model != null` AND `renderCharts` is enabled).
+        // Workbooks with only chartEx / unsupported charts — or with
+        // `renderCharts: false` — keep the placeholder-only CSS that
+        // existed before this feature, so their golden snapshots stay
+        // byte-stable.
+        const hasRenderedCharts = options.renderCharts !== false &&
+            workbook.sheets.some((s) => s.charts && s.charts.some((c) => c.model !== null));
+        nodes.push(renderStyle(options.className, { withEmbeddings: hasEmbeddings, withCharts: hasRenderedCharts }));
         for (const sheet of workbook.sheets) {
             // Skip hidden and veryHidden sheets — the demo's sheet-switcher
             // omits them too so section/index pairings stay in sync.
@@ -64,7 +74,7 @@ export class HtmlRenderer {
     }
 }
 
-function renderStyle(className: string, opts: { withEmbeddings: boolean } = { withEmbeddings: false }): HTMLStyleElement {
+function renderStyle(className: string, opts: { withEmbeddings: boolean; withCharts?: boolean } = { withEmbeddings: false }): HTMLStyleElement {
     const style = document.createElement('style');
     style.setAttribute('data-xlsxjs', '');
     // Kept intentionally small — consumers style further via their own CSS.
@@ -85,6 +95,13 @@ function renderStyle(className: string, opts: { withEmbeddings: boolean } = { wi
 .${className} .xlsx-image-layer > .xlsx-embedding {
     position: absolute; pointer-events: auto;
     max-width: 320px;
+}` : '';
+    const chartCss = opts.withCharts ? `
+.${className} figure.xlsx-chart {
+    margin: 0.5em 0; padding: 0;
+}
+.${className} figure.xlsx-chart > svg {
+    display: block; max-width: 100%;
 }` : '';
     style.textContent = `
 .${className} { font-family: system-ui, sans-serif; }
@@ -124,7 +141,7 @@ function renderStyle(className: string, opts: { withEmbeddings: boolean } = { wi
     margin: 0; white-space: pre-line;
     font-family: inherit; font-size: inherit;
     position: relative; z-index: 1;
-}${embeddingCss}
+}${embeddingCss}${chartCss}
 .${className} .xlsx-form-control {
     position: absolute;
     display: inline-flex; align-items: center; gap: 4px;
@@ -710,21 +727,46 @@ function renderSheet(sheet: Sheet, styles: Styles | null, theme: Theme | null, d
         section.insertBefore(imageLayer, table);
     }
 
-    // Chart placeholders. We don't render chart content (the chart XML
-    // describes a plot, not a renderable bitmap), but we surface a dashed
-    // placeholder so consumers can see a chart lives at this anchor — and so
-    // diff tools notice drift against an Excel re-save.
+    // Charts. When options.renderCharts is true (the default) we project
+    // the parsed ChartModel to inline SVG via chart-renderer.ts. If the
+    // model is null, the plot kind isn't one we render (scatter / area /
+    // unknown / chartEx), or the renderer returns null, we fall back to
+    // the dashed placeholder so consumers still see a chart-sized div at
+    // the anchor. Anchor data-attributes match between the real SVG
+    // figure and the placeholder so downstream CSS can target either.
     for (const chart of sheet.charts) {
-        const ph = document.createElement('div');
-        ph.className = 'xlsx-chart-placeholder';
-        ph.setAttribute('data-chart-kind', chart.kind);
-        if (chart.chartType) ph.setAttribute('data-chart-type', chart.chartType);
-        ph.setAttribute('data-anchor-col', String(chart.col));
-        ph.setAttribute('data-anchor-row', String(chart.row));
-        if (chart.endCol !== null) ph.setAttribute('data-anchor-end-col', String(chart.endCol));
-        if (chart.endRow !== null) ph.setAttribute('data-anchor-end-row', String(chart.endRow));
-        ph.textContent = `[chart: ${chart.chartType ?? chart.kind}]`;
-        section.appendChild(ph);
+        let svg: SVGSVGElement | null = null;
+        if (options.renderCharts !== false && chart.model) {
+            try {
+                svg = renderChart(chart.model);
+            } catch {
+                svg = null;
+            }
+        }
+        if (svg) {
+            const figure = document.createElement('figure');
+            figure.className = 'xlsx-chart';
+            figure.setAttribute('data-chart-kind', chart.kind);
+            if (chart.chartType) figure.setAttribute('data-chart-type', chart.chartType);
+            if (chart.model?.kind) figure.setAttribute('data-chart-plot', chart.model.kind);
+            figure.setAttribute('data-anchor-col', String(chart.col));
+            figure.setAttribute('data-anchor-row', String(chart.row));
+            if (chart.endCol !== null) figure.setAttribute('data-anchor-end-col', String(chart.endCol));
+            if (chart.endRow !== null) figure.setAttribute('data-anchor-end-row', String(chart.endRow));
+            figure.appendChild(svg);
+            section.appendChild(figure);
+        } else {
+            const ph = document.createElement('div');
+            ph.className = 'xlsx-chart-placeholder';
+            ph.setAttribute('data-chart-kind', chart.kind);
+            if (chart.chartType) ph.setAttribute('data-chart-type', chart.chartType);
+            ph.setAttribute('data-anchor-col', String(chart.col));
+            ph.setAttribute('data-anchor-row', String(chart.row));
+            if (chart.endCol !== null) ph.setAttribute('data-anchor-end-col', String(chart.endCol));
+            if (chart.endRow !== null) ph.setAttribute('data-anchor-end-row', String(chart.endRow));
+            ph.textContent = `[chart: ${chart.chartType ?? chart.kind}]`;
+            section.appendChild(ph);
+        }
     }
 
     // Shapes and connectors. xlsxjs does NOT render the preset geometry

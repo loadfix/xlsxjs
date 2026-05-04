@@ -11,6 +11,7 @@ import { parseStyles, parseColorElement, type Styles, type FontStyle, type Under
 import { parseTheme, type Theme, type ColorRef } from './theme';
 import { parseConditionalFormatting, parseSqref, type ConditionalFormatting } from './conditional-format';
 import { bytesToDataUrl, sanitizeMediaMime } from './workbook';
+import { parseChart as parseChartModel, type ChartModel } from './chart-parser';
 
 // URL schemes we'll emit as an `<a href="…">` in the rendered sheet. Anything
 // outside this set (most importantly `javascript:` / `data:` / `vbscript:` /
@@ -298,6 +299,12 @@ export interface SheetChart {
     col: number; row: number;
     endCol: number | null;
     endRow: number | null;
+    // Parsed classic chart (c:chartSpace) model, when the chart part could
+    // be resolved and contains a supported plot type. chartEx charts and
+    // malformed / missing XML leave this null. The renderer projects this
+    // model to inline SVG via src/chart-renderer.ts; null falls through to
+    // the dashed placeholder.
+    model: ChartModel | null;
 }
 
 // A pivot table anchored inside a sheet. Detection-only — the sheet's cell
@@ -793,7 +800,7 @@ export class WorkbookParser {
             const xml = parts[xmlPath];
             if (!xml) continue;
             const tables = resolveTablesForSheet(xmlPath, parts);
-            const { images, charts, shapes, formControls } = resolveDrawingsForSheet(xmlPath, parts, media);
+            const { images, charts, shapes, formControls } = resolveDrawingsForSheet(xmlPath, parts, media, sharedStrings);
             const pivots = resolvePivotsForSheet(xmlPath, parts);
             const { slicers, timelines } = resolveSlicersAndTimelinesForSheet(xmlPath, parts);
             const comments = resolveCommentsForSheet(xmlPath, parts);
@@ -1336,6 +1343,7 @@ function resolveDrawingsForSheet(
     sheetPath: string,
     parts: Record<string, string>,
     media: Record<string, string>,
+    sharedStrings: SharedString[] = [],
 ): { images: SheetImage[]; charts: SheetChart[]; shapes: SheetShape[]; formControls: SheetFormControl[] } {
     const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
     const relsXml = parts[relsPath];
@@ -1363,7 +1371,7 @@ function resolveDrawingsForSheet(
             ? parseRelationships(drawingRelsXml)
             : new Map<string, { target: string; type: string }>();
         const drawingDir = drawingPath.replace(/\/[^/]+$/, '');
-        const parsed = parseDrawing(drawingXml, drawingRels, drawingDir, parts, media);
+        const parsed = parseDrawing(drawingXml, drawingRels, drawingDir, parts, media, sharedStrings);
         images.push(...parsed.images);
         charts.push(...parsed.charts);
         shapes.push(...parsed.shapes);
@@ -1819,6 +1827,7 @@ function parseDrawing(
     drawingDir: string,
     parts: Record<string, string>,
     media: Record<string, string>,
+    sharedStrings: SharedString[] = [],
 ): { images: SheetImage[]; charts: SheetChart[]; shapes: SheetShape[]; formControls: SheetFormControl[] } {
     const doc = parseXml(xml);
     const images: SheetImage[] = [];
@@ -1928,14 +1937,28 @@ function parseDrawing(
             const kind: 'classic' | 'chartex' = chartEl.namespaceURI === NS.cx ? 'chartex' : 'classic';
             const rId = chartEl.getAttributeNS(NS.rel, 'id');
             let chartType: string | null = null;
+            let chartXml: string | undefined;
             if (rId) {
                 const rel = rels.get(rId);
                 if (rel) {
                     const chartPath = rel.target.startsWith('/')
                         ? rel.target.slice(1)
                         : normaliseRelPath(`${drawingDir}/${rel.target}`);
-                    const chartXml = parts[chartPath];
+                    chartXml = parts[chartPath];
                     if (chartXml) chartType = peekChartType(chartXml, kind);
+                }
+            }
+            // Only classic chartSpace parses into a ChartModel here. chartEx
+            // and malformed XML leave model=null so the renderer falls
+            // through to the dashed placeholder. Defensive: any parse error
+            // also leaves model=null rather than aborting the sheet.
+            let model: ChartModel | null = null;
+            if (kind === 'classic' && chartXml) {
+                try {
+                    const parsed = parseChartModel(chartXml, sharedStrings);
+                    if (parsed.kind !== 'unknown') model = parsed;
+                } catch {
+                    model = null;
                 }
             }
             charts.push({
@@ -1945,6 +1968,7 @@ function parseDrawing(
                 row: row ?? 0,
                 endCol,
                 endRow,
+                model,
             });
         }
 
