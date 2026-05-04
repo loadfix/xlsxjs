@@ -121,6 +121,29 @@ Whenever a feature is added, removed, or a public option changes, update both of
 
 Minimum check before every PR that touches source: `grep -n "<feature name>" README.md TODO.md` to catch stale references.
 
+## OOXML feature workflow (required before adding rendering for any new feature)
+
+Every OOXML feature is defined by a manifest in the shared corpus
+repository `loadfix/ooxml-reference-corpus` (sibling checkout at
+`../ooxml-reference-corpus/`). xlsxjs is a renderer — it reads a fixture
+rather than authoring one — but it must agree with `python-xlsx` on what
+the feature's XML looks like.
+
+1. **Read the manifest.** Look under
+   `../ooxml-reference-corpus/features/xlsx/` for a JSON manifest
+   covering the feature you're rendering.
+
+2. **Consult the ECMA-376 5th edition spec** (corpus-only):
+   - PDFs: `../ooxml-reference-corpus/spec/ecma-376-5/part-{1,2,3,4}/*.pdf`
+   - RNC schemas (easier to read): `../ooxml-reference-corpus/spec/ecma-376-5/part-1/rnc/`
+   - XSD schemas: `../ooxml-reference-corpus/spec/ecma-376-5/part-1/xsd/`
+
+3. **If no manifest exists**, ask python-xlsx's maintainer to author
+   one first — authoring-side libraries own the definition of "done".
+
+4. **Verify rendering.** Add a Playwright render-smoke test loading the
+   committed fixture from the corpus.
+
 ## Architecture
 
 - `src/workbook.ts` — zip open + part extraction. Hands XML strings to the parser.
