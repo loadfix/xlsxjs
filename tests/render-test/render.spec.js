@@ -51,6 +51,7 @@ const fixtures = [
     'sheet-protection-and-alt',
     'slicers-timelines',
     'smartart',
+    'smartart-layouts',
     'sheet-view-state',
     'tables',
     'theme-fontscheme',
