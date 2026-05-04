@@ -3769,6 +3769,163 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 100. charts-ext: scatter / area / stacked column extensions ──────────
+// Fixture anchors three classic c:chartSpace charts on a single sheet:
+//   · chart1 — stacked column ("Sales by Region, Stacked") —
+//       3 series × 4 categories, <c:grouping val="stacked"/>.
+//   · chart2 — scatter ("Height vs Weight") —
+//       1 series × 5 (x, y) pairs via <c:xVal>/<c:yVal>.
+//   · chart3 — area ("CPU Usage") —
+//       3 series × 6 timestamps, standard grouping.
+// This scenario checks the parser surfaces each with the right
+// kind + grouping, the renderer emits the expected SVG primitives
+// (stacked rects, circles, closed-fill paths), and series values
+// round-trip.
+{
+    const { wb, container } = await renderFixture('charts-ext');
+    const sheet = wb.parsed.sheets[0];
+    assert(Array.isArray(sheet.charts) && sheet.charts.length === 3,
+        `100a: expected 3 charts (got ${sheet.charts?.length})`);
+
+    const byPlot = new Map();
+    for (const ch of sheet.charts) if (ch.model) byPlot.set(ch.model.kind, ch);
+
+    const col = byPlot.get('column');
+    const scatter = byPlot.get('scatter');
+    const area = byPlot.get('area');
+    assert(col, '100b: a column-kind chart (stacked) should be present');
+    assert(scatter, '100c: a scatter-kind chart should be present');
+    assert(area, '100d: an area-kind chart should be present');
+
+    if (col?.model) {
+        assert(col.model.title === 'Sales by Region, Stacked',
+            `100e: stacked column title should round-trip (got ${JSON.stringify(col.model.title)})`);
+        assert(col.model.grouping === 'stacked',
+            `100f: stacked column grouping should be "stacked" (got ${JSON.stringify(col.model.grouping)})`);
+        assert(col.model.series.length === 3,
+            `100g: stacked column should have 3 series (got ${col.model.series.length})`);
+        const names = col.model.series.map((s) => s.name);
+        assert(JSON.stringify(names) === JSON.stringify(['North', 'South', 'East']),
+            `100h: stacked column series names should round-trip (got ${JSON.stringify(names)})`);
+        assert(JSON.stringify(col.model.series[0]?.values) === JSON.stringify([30, 45, 50, 60]),
+            `100i: stacked column series[0] values should round-trip (got ${JSON.stringify(col.model.series[0]?.values)})`);
+    }
+
+    if (scatter?.model) {
+        assert(scatter.model.title === 'Height vs Weight',
+            `100j: scatter title should round-trip (got ${JSON.stringify(scatter.model.title)})`);
+        assert(scatter.model.grouping === null,
+            `100k: scatter grouping should be null (got ${JSON.stringify(scatter.model.grouping)})`);
+        assert(scatter.model.categories.length === 0,
+            `100l: scatter should have no categories (got ${scatter.model.categories.length})`);
+        assert(scatter.model.series.length === 1,
+            `100m: scatter should have 1 series (got ${scatter.model.series.length})`);
+        const s0 = scatter.model.series[0];
+        assert(JSON.stringify(s0?.xValues) === JSON.stringify([160, 165, 170, 175, 180]),
+            `100n: scatter xValues should round-trip (got ${JSON.stringify(s0?.xValues)})`);
+        assert(JSON.stringify(s0?.values) === JSON.stringify([55, 62, 70, 78, 85]),
+            `100o: scatter (y)values should round-trip (got ${JSON.stringify(s0?.values)})`);
+    }
+
+    if (area?.model) {
+        assert(area.model.title === 'CPU Usage',
+            `100p: area title should round-trip (got ${JSON.stringify(area.model.title)})`);
+        assert(area.model.grouping === 'standard',
+            `100q: area grouping should be "standard" (got ${JSON.stringify(area.model.grouping)})`);
+        assert(area.model.series.length === 3,
+            `100r: area chart should have 3 series (got ${area.model.series.length})`);
+        assert(JSON.stringify(area.model.categories) === JSON.stringify(['T1', 'T2', 'T3', 'T4', 'T5', 'T6']),
+            `100s: area chart categories should round-trip (got ${JSON.stringify(area.model.categories)})`);
+        assert(JSON.stringify(area.model.series[1]?.values) === JSON.stringify([15, 18, 22, 30, 32, 28]),
+            `100t: area series[1] values should round-trip (got ${JSON.stringify(area.model.series[1]?.values)})`);
+    }
+
+    // DOM assertions. Each chart figures carries the real SVG (no dashed
+    // placeholder), and the SVG primitives match the plot kind.
+    const figures = container.querySelectorAll('section.xlsx figure.xlsx-chart');
+    assert(figures.length === 3,
+        `100u: expected 3 chart figures (got ${figures.length})`);
+    const placeholders = container.querySelectorAll('section.xlsx .xlsx-chart-placeholder');
+    assert(placeholders.length === 0,
+        `100v: no dashed chart placeholder should remain (got ${placeholders.length})`);
+
+    const figByPlot = new Map();
+    for (const f of figures) figByPlot.set(f.getAttribute('data-chart-plot'), f);
+
+    // Stacked column: 3 series groups × 4 rects each. Rects in the same
+    // category share the same x and stack on y (rect[0].y > rect[1].y when
+    // series paint bottom→top because the stack top sits above).
+    const colFig = figByPlot.get('column');
+    if (colFig) {
+        const serGroups = colFig.querySelectorAll('g.xlsx-chart-series');
+        assert(serGroups.length === 3,
+            `100w: stacked column should emit 3 series groups (got ${serGroups.length})`);
+        if (serGroups.length === 3) {
+            for (let i = 0; i < 3; i++) {
+                const rects = serGroups[i].querySelectorAll('rect');
+                assert(rects.length === 4,
+                    `100x.${i}: stacked column series ${i} should have 4 rects (got ${rects.length})`);
+            }
+            // Within a category, rects across series share the same x and
+            // width; y marches upward (bottom series has highest y, top
+            // series has lowest y).
+            const s0Rect0 = serGroups[0].querySelectorAll('rect')[0];
+            const s1Rect0 = serGroups[1].querySelectorAll('rect')[0];
+            const s2Rect0 = serGroups[2].querySelectorAll('rect')[0];
+            if (s0Rect0 && s1Rect0 && s2Rect0) {
+                const x0 = s0Rect0.getAttribute('x');
+                const x1 = s1Rect0.getAttribute('x');
+                const x2 = s2Rect0.getAttribute('x');
+                assert(x0 === x1 && x1 === x2,
+                    `100y: stacked rects in the same category should share x (got ${x0}, ${x1}, ${x2})`);
+                const y0 = Number(s0Rect0.getAttribute('y'));
+                const y1 = Number(s1Rect0.getAttribute('y'));
+                const y2 = Number(s2Rect0.getAttribute('y'));
+                assert(y0 > y1 && y1 > y2,
+                    `100z: stacked rects should march upward in y (got y0=${y0} y1=${y1} y2=${y2})`);
+            }
+        }
+    }
+
+    // Scatter: 1 series group → 5 circles. Check one circle's cx/cy lies
+    // inside the svg's viewBox (480×300).
+    const scatterFig = figByPlot.get('scatter');
+    if (scatterFig) {
+        const serGroups = scatterFig.querySelectorAll('g.xlsx-chart-series');
+        assert(serGroups.length === 1,
+            `100aa: scatter should emit 1 series group (got ${serGroups.length})`);
+        if (serGroups.length >= 1) {
+            const circles = serGroups[0].querySelectorAll('circle');
+            assert(circles.length === 5,
+                `100ab: scatter should emit 5 circles (got ${circles.length})`);
+            if (circles.length) {
+                const cx = Number(circles[0].getAttribute('cx'));
+                const cy = Number(circles[0].getAttribute('cy'));
+                assert(Number.isFinite(cx) && cx >= 0 && cx <= 480,
+                    `100ac: first circle cx should sit in viewBox (got ${cx})`);
+                assert(Number.isFinite(cy) && cy >= 0 && cy <= 300,
+                    `100ad: first circle cy should sit in viewBox (got ${cy})`);
+            }
+        }
+    }
+
+    // Area: 3 paths (one per series). Each d attribute begins with M and
+    // ends with Z, confirming the closed-fill shape.
+    const areaFig = figByPlot.get('area');
+    if (areaFig) {
+        const paths = areaFig.querySelectorAll('path');
+        assert(paths.length === 3,
+            `100ae: area chart should emit 3 <path>s (got ${paths.length})`);
+        for (let i = 0; i < paths.length; i++) {
+            const d = (paths[i].getAttribute('d') || '').trim();
+            assert(d.startsWith('M'),
+                `100af.${i}: area path d should start with M (got ${d.slice(0, 16)}…)`);
+            assert(d.endsWith('Z'),
+                `100ag.${i}: area path d should end with Z (got …${d.slice(-16)})`);
+        }
+    }
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

@@ -20,6 +20,11 @@ import type { SharedString } from './workbook-parser';
 export interface ChartSeries {
     name: string | null;
     values: (number | null)[];
+    // Scatter series carry a parallel `<c:xVal>` cache alongside `<c:val>` —
+    // both coordinate streams are needed so the renderer can plot each
+    // marker at its (x, y). Non-scatter series leave this null; renderers
+    // fall back to category-index ordering.
+    xValues: (number | null)[] | null;
     // Series colour from `<c:spPr>/<a:solidFill>/<a:srgbClr val="…"/>`.
     // Leave null when the chart XML doesn't spell one out — the renderer
     // assigns a palette colour by series index.
@@ -32,6 +37,12 @@ export interface ChartModel {
     categories: string[];
     series: ChartSeries[];
     legend: 'top' | 'right' | 'bottom' | 'left' | 'none';
+    // Classic bar / column / line chart grouping, lifted straight from
+    // `<c:grouping val="…"/>`. `null` for chart types that don't carry one
+    // (pie, scatter) or when the element was missing. The renderer reads
+    // this to decide between clustered vs stacked vs 100%-stacked layouts;
+    // `kind` stays 'bar' / 'column' / 'line' — grouping is orthogonal.
+    grouping: 'standard' | 'stacked' | 'percentStacked' | null;
 }
 
 const NS_C = 'http://schemas.openxmlformats.org/drawingml/2006/chart';
@@ -116,11 +127,34 @@ function parseCategories(ser: Element): string[] {
 // the happy path for every chart type we render. Missing / malformed
 // numeric text decays to null so the renderer can skip-or-gap cleanly.
 function parseValues(ser: Element): (number | null)[] {
-    const val = firstChild(ser, NS_C, 'val');
-    if (!val) return [];
-    const numRef = firstChild(val, NS_C, 'numRef');
+    return readNumericRefOrLit(ser, 'val');
+}
+
+// Scatter (and bubble, in the future) series declare an `<c:xVal>` sibling
+// to `<c:val>` that holds the horizontal coordinate stream. Same structure
+// as `<c:val>` — a numRef/numCache happy path with numLit fallback. We
+// return null rather than an empty array when no xVal is declared, so the
+// renderer can distinguish "scatter with missing data" from "non-scatter
+// series" cleanly.
+function parseXValues(ser: Element): (number | null)[] | null {
+    const xVal = firstChild(ser, NS_C, 'xVal');
+    if (!xVal) return null;
+    return readNumericCacheOrLit(xVal);
+}
+
+// Shared reader for `<c:val>` / `<c:xVal>` blocks: each wraps a
+// `<c:numRef>/<c:numCache>` or a bare `<c:numLit>`. Missing / non-numeric
+// cells decay to null.
+function readNumericRefOrLit(ser: Element, localName: string): (number | null)[] {
+    const el = firstChild(ser, NS_C, localName);
+    if (!el) return [];
+    return readNumericCacheOrLit(el);
+}
+
+function readNumericCacheOrLit(container: Element): (number | null)[] {
+    const numRef = firstChild(container, NS_C, 'numRef');
     const cache = numRef ? firstChild(numRef, NS_C, 'numCache') : null;
-    const source = cache ?? firstChild(val, NS_C, 'numLit');
+    const source = cache ?? firstChild(container, NS_C, 'numLit');
     if (!source) return [];
     const raw = readPts(source);
     return raw.map((s) => {
@@ -190,16 +224,45 @@ function parseSeriesColor(ser: Element): string | null {
 }
 
 // Parse a `<c:ser>` block into one ChartSeries. Used by every chart kind.
-function parseSer(ser: Element, fallbackCategories: string[] | null): ChartSeries {
+// `kind` influences which coordinate streams to read — scatter pulls
+// `<c:yVal>` into `values` and `<c:xVal>` into `xValues`; everything else
+// reads the single `<c:val>` stream and leaves `xValues` null.
+function parseSer(ser: Element, fallbackCategories: string[] | null, kind: ChartModel['kind']): ChartSeries {
+    let values: (number | null)[];
+    let xValues: (number | null)[] | null;
+    if (kind === 'scatter') {
+        // Scatter series spell their y-coordinate as `<c:yVal>`. Happy
+        // path; if the producer wrote `<c:val>` instead (some legacy /
+        // LibreOffice outputs do) fall through to the common reader.
+        const yVal = readNumericRefOrLit(ser, 'yVal');
+        values = yVal.length ? yVal : parseValues(ser);
+        xValues = parseXValues(ser);
+    } else {
+        values = parseValues(ser);
+        xValues = null;
+    }
     return {
         name: parseSeriesName(ser),
-        values: parseValues(ser),
+        values,
+        xValues,
         color: parseSeriesColor(ser),
     };
     // `fallbackCategories` is unused here — categories come from the first
     // series and are hoisted by `parseChart`. Parameter kept for call-site
     // clarity in future extensions (e.g. per-series category refinement).
     void fallbackCategories;
+}
+
+// Grouping (`standard` | `stacked` | `percentStacked`) applies to bar,
+// column, line, and area plots. Absent / unrecognised values map to
+// 'standard' so the renderer can treat it as the non-stacked default.
+function parseGrouping(chartEl: Element): ChartModel['grouping'] {
+    const g = firstChild(chartEl, NS_C, 'grouping');
+    const val = g?.getAttribute('val');
+    if (val === 'stacked') return 'stacked';
+    if (val === 'percentStacked') return 'percentStacked';
+    if (val === 'standard' || val === 'clustered') return 'standard';
+    return null;
 }
 
 // Parse the `<c:title>` block. Prefers `<c:title>/<c:tx>/<c:rich>` over
@@ -250,8 +313,9 @@ function parseLegend(chart: Element): ChartModel['legend'] {
 
 // Dispatch: look at the first child of `<c:plotArea>` that names a chart
 // type and return the matching ChartModel.kind (plus category + series data
-// pulled out of the series children).
-function dispatchChart(plotArea: Element): { kind: ChartModel['kind']; sers: Element[] } {
+// pulled out of the series children). The plot element itself is returned
+// so the caller can lift `<c:grouping>` off it without re-walking.
+function dispatchChart(plotArea: Element): { kind: ChartModel['kind']; sers: Element[]; plotEl: Element | null } {
     for (let i = 0; i < plotArea.childNodes.length; i++) {
         const node = plotArea.childNodes[i];
         if (node.nodeType !== 1) continue;
@@ -263,22 +327,22 @@ function dispatchChart(plotArea: Element): { kind: ChartModel['kind']; sers: Ele
                 const dir = barDir?.getAttribute('val');
                 // Bar = horizontal; col (default) = vertical columns.
                 const kind: ChartModel['kind'] = dir === 'bar' ? 'bar' : 'column';
-                return { kind, sers: directChildren(el, NS_C, 'ser') };
+                return { kind, sers: directChildren(el, NS_C, 'ser'), plotEl: el };
             }
             case 'lineChart':
-                return { kind: 'line', sers: directChildren(el, NS_C, 'ser') };
+                return { kind: 'line', sers: directChildren(el, NS_C, 'ser'), plotEl: el };
             case 'pieChart':
             case 'doughnutChart':
-                return { kind: 'pie', sers: directChildren(el, NS_C, 'ser') };
+                return { kind: 'pie', sers: directChildren(el, NS_C, 'ser'), plotEl: el };
             case 'scatterChart':
-                return { kind: 'scatter', sers: directChildren(el, NS_C, 'ser') };
+                return { kind: 'scatter', sers: directChildren(el, NS_C, 'ser'), plotEl: el };
             case 'areaChart':
-                return { kind: 'area', sers: directChildren(el, NS_C, 'ser') };
+                return { kind: 'area', sers: directChildren(el, NS_C, 'ser'), plotEl: el };
             default:
                 continue;
         }
     }
-    return { kind: 'unknown', sers: [] };
+    return { kind: 'unknown', sers: [], plotEl: null };
 }
 
 export function parseChart(xml: string, sharedStrings: SharedString[]): ChartModel {
@@ -294,6 +358,7 @@ export function parseChart(xml: string, sharedStrings: SharedString[]): ChartMod
         categories: [],
         series: [],
         legend: 'none',
+        grouping: null,
     };
 
     let doc: Document;
@@ -310,7 +375,7 @@ export function parseChart(xml: string, sharedStrings: SharedString[]): ChartMod
     const plotArea = firstChild(chart, NS_C, 'plotArea');
     if (!plotArea) return blank;
 
-    const { kind, sers } = dispatchChart(plotArea);
+    const { kind, sers, plotEl } = dispatchChart(plotArea);
     if (kind === 'unknown') {
         // Still surface title / legend even when the plot type isn't one we
         // render — consumers can use the title for their own placeholder.
@@ -323,13 +388,22 @@ export function parseChart(xml: string, sharedStrings: SharedString[]): ChartMod
 
     // Categories come from the first series that declares a `<c:cat>`.
     // Series order preserves document order (Excel's drawing order too).
+    // Scatter charts don't have categories — their x-axis is numeric.
     let categories: string[] = [];
-    for (const ser of sers) {
-        const cat = parseCategories(ser);
-        if (cat.length) { categories = cat; break; }
+    if (kind !== 'scatter') {
+        for (const ser of sers) {
+            const cat = parseCategories(ser);
+            if (cat.length) { categories = cat; break; }
+        }
     }
 
-    const series: ChartSeries[] = sers.map((ser) => parseSer(ser, categories));
+    const series: ChartSeries[] = sers.map((ser) => parseSer(ser, categories, kind));
+
+    // Grouping applies to bar / column / line / area. Pie / scatter leave it
+    // null — stacking is meaningless on them.
+    const grouping = (kind === 'bar' || kind === 'column' || kind === 'line' || kind === 'area') && plotEl
+        ? parseGrouping(plotEl)
+        : null;
 
     return {
         kind,
@@ -337,5 +411,6 @@ export function parseChart(xml: string, sharedStrings: SharedString[]): ChartMod
         categories,
         series,
         legend: parseLegend(chart),
+        grouping,
     };
 }
