@@ -1073,3 +1073,92 @@ await writeFixture('merged', {
     writeFileSync(out, buf);
     console.log(`wrote ${out} (${buf.length} bytes)`);
 }
+
+// ── shapes-and-textboxes ──────────────────────────────────────────────────
+// Exercises the shape/connector surface: a text box anchored at B3:D5 with
+// preset="rect" carrying a two-paragraph body, and a connector at A1:A3
+// with preset="line". The drawing XML is hand-built (python-xlsx's
+// spreadsheet_drawing surface is flaky for non-image anchors) — we wire
+// xl/drawings/drawing1.xml into the sheet via the existing sheet-rels
+// pattern. No media, no rels-to-drawing part (shape-only drawings don't
+// need one).
+{
+    const outDir = resolve(repo, 'tests/render-test/shapes-and-textboxes');
+    mkdirSync(outDir, { recursive: true });
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+  <Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
+</Types>`);
+    zip.file('_rels/.rels', rootRels);
+    zip.file('xl/_rels/workbook.xml.rels', workbookRels);
+    zip.file('xl/workbook.xml', workbookXml('Shapes'));
+    zip.file('xl/sharedStrings.xml', sharedStringsXml(['body']));
+    // Sheet carries a drawing rel → xl/drawings/drawing1.xml.
+    zip.file('xl/worksheets/_rels/sheet1.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="/xl/drawings/drawing1.xml"/>
+</Relationships>`);
+    zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+           xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheetData>
+    <row r="1"><c r="A1" t="s"><v>0</v></c></row>
+  </sheetData>
+  <drawing r:id="rId1"/>
+</worksheet>`);
+    // Drawing with two twoCellAnchor entries:
+    //   (1) xdr:cxnSp  connector A1 → A3, preset="line"
+    //   (2) xdr:sp      text box B3 → D5, preset="rect",
+    //                   txBody = "Line 1\nLine 2"
+    zip.file('xl/drawings/drawing1.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <xdr:twoCellAnchor>
+    <xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:to><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+    <xdr:cxnSp macro="">
+      <xdr:nvCxnSpPr>
+        <xdr:cNvPr id="1" name="Straight Connector 1" descr="vertical line"/>
+        <xdr:cNvCxnSpPr/>
+      </xdr:nvCxnSpPr>
+      <xdr:spPr>
+        <a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="914400"/></a:xfrm>
+        <a:prstGeom prst="line"><a:avLst/></a:prstGeom>
+      </xdr:spPr>
+    </xdr:cxnSp>
+    <xdr:clientData/>
+  </xdr:twoCellAnchor>
+  <xdr:twoCellAnchor>
+    <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:to><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+    <xdr:sp macro="" textlink="">
+      <xdr:nvSpPr>
+        <xdr:cNvPr id="2" name="TextBox 1" descr="callout"/>
+        <xdr:cNvSpPr txBox="1"/>
+      </xdr:nvSpPr>
+      <xdr:spPr>
+        <a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+      </xdr:spPr>
+      <xdr:txBody>
+        <a:bodyPr wrap="square" rtlCol="0"/>
+        <a:lstStyle/>
+        <a:p><a:r><a:rPr lang="en-US"/><a:t>Line 1</a:t></a:r></a:p>
+        <a:p><a:r><a:rPr lang="en-US"/><a:t>Line 2</a:t></a:r></a:p>
+      </xdr:txBody>
+    </xdr:sp>
+    <xdr:clientData/>
+  </xdr:twoCellAnchor>
+</xdr:wsDr>`);
+    const buf = await zip.generateAsync({ type: 'nodebuffer' });
+    const out = resolve(outDir, 'workbook.xlsx');
+    writeFileSync(out, buf);
+    console.log(`wrote ${out} (${buf.length} bytes)`);
+}

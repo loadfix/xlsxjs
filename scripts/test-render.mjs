@@ -1784,6 +1784,98 @@ async function renderFixture(path, options) {
         `60b: frozen-state fixture should set kind='frozen' (got ${JSON.stringify(sheet.frozenPanes.kind)})`);
 }
 
+// ── 61. shapes-and-textboxes: xdr:sp + xdr:cxnSp parse into Sheet.shapes ──
+// The fixture carries two twoCellAnchor entries:
+//   · cxnSp at A1:A3 with prstGeom="line"            → kind='connector'
+//   · sp    at B3:D5 with prstGeom="rect" + txBody   → kind='shape',
+//     text = "Line 1\nLine 2"
+// Sheet.shapes must carry exactly these two entries; images/charts must be
+// unaffected (fixture has none). We assert kind / preset / text / anchor
+// for each one rather than a single summary — future reorderings shouldn't
+// hide a parser regression.
+{
+    const { wb } = await renderFixture('shapes-and-textboxes');
+    const sheet = wb.parsed.sheets[0];
+    assert(Array.isArray(sheet.shapes), '61a: Sheet.shapes should be an array');
+    assert(sheet.shapes.length === 2,
+        `61b: expected 2 shapes in fixture (got ${sheet.shapes.length})`);
+    assert(sheet.images.length === 0,
+        `61c: fixture has no images — images[] should stay empty (got ${sheet.images.length})`);
+    assert(sheet.charts.length === 0,
+        `61d: fixture has no charts — charts[] should stay empty (got ${sheet.charts.length})`);
+
+    const textBox = sheet.shapes.find((s) => s.kind === 'shape');
+    assert(textBox, '61e: a shape with kind="shape" should be present');
+    if (textBox) {
+        assert(textBox.preset === 'rect',
+            `61f: text-box preset should be "rect" (got ${JSON.stringify(textBox.preset)})`);
+        assert(textBox.text === 'Line 1\nLine 2',
+            `61g: text-box text should flatten paragraphs joined by \\n (got ${JSON.stringify(textBox.text)})`);
+        assert(textBox.col === 1 && textBox.row === 2,
+            `61h: text-box anchor should be (col=1, row=2) (got col=${textBox.col}, row=${textBox.row}))`);
+        assert(textBox.endCol === 3 && textBox.endRow === 4,
+            `61i: text-box end anchor should be (endCol=3, endRow=4) (got endCol=${textBox.endCol}, endRow=${textBox.endRow})`);
+        assert(textBox.alt === 'callout',
+            `61j: text-box alt should resolve from cNvPr/@descr (got ${JSON.stringify(textBox.alt)})`);
+    }
+
+    const connector = sheet.shapes.find((s) => s.kind === 'connector');
+    assert(connector, '61k: a shape with kind="connector" should be present');
+    if (connector) {
+        assert(connector.preset === 'line',
+            `61l: connector preset should be "line" (got ${JSON.stringify(connector.preset)})`);
+        assert(connector.text === null,
+            `61m: connector should carry no text body (got ${JSON.stringify(connector.text)})`);
+    }
+}
+
+// ── 62. shapes-and-textboxes renderer: <aside class="xlsx-shape"> emits ──
+// Both shapes must surface in the DOM after the <table>: two <aside> with
+// matching data-kind + data-preset + anchor attrs. The text-box must carry
+// a <pre> with the paragraph-joined body (white-space:pre-line preserves
+// the newline visually). The connector's border is dashed via CSS when
+// data-kind="connector" — we assert the attribute, not the computed style.
+{
+    const { container } = await renderFixture('shapes-and-textboxes');
+    const asides = container.querySelectorAll('section.xlsx aside.xlsx-shape');
+    assert(asides.length === 2,
+        `62a: expected 2 <aside class="xlsx-shape"> elements (got ${asides.length})`);
+
+    // Every aside must come after the <table> in the section.
+    const section = container.querySelector('section.xlsx');
+    const table = section?.querySelector('table');
+    if (table && asides[0]) {
+        // compareDocumentPosition: DOCUMENT_POSITION_FOLLOWING = 4
+        const pos = table.compareDocumentPosition(asides[0]);
+        assert((pos & 4) === 4, '62b: <aside> elements should follow the <table> in the section');
+    }
+
+    const shapeAside = Array.from(asides).find((el) => el.getAttribute('data-kind') === 'shape');
+    assert(shapeAside, '62c: at least one aside should have data-kind="shape"');
+    if (shapeAside) {
+        assert(shapeAside.getAttribute('data-preset') === 'rect',
+            `62d: text-box aside should have data-preset="rect" (got ${JSON.stringify(shapeAside.getAttribute('data-preset'))})`);
+        const pre = shapeAside.querySelector('pre');
+        assert(!!pre, '62e: text-box aside should contain a <pre> for the text body');
+        assert(pre?.textContent === 'Line 1\nLine 2',
+            `62f: <pre> textContent should preserve paragraph break (got ${JSON.stringify(pre?.textContent)})`);
+        assert(shapeAside.getAttribute('data-anchor-col') === '1',
+            `62g: text-box data-anchor-col should be "1" (got ${JSON.stringify(shapeAside.getAttribute('data-anchor-col'))})`);
+        assert(shapeAside.getAttribute('data-anchor-end-col') === '3',
+            `62h: text-box data-anchor-end-col should be "3" (got ${JSON.stringify(shapeAside.getAttribute('data-anchor-end-col'))})`);
+    }
+
+    const connectorAside = Array.from(asides).find((el) => el.getAttribute('data-kind') === 'connector');
+    assert(connectorAside, '62i: at least one aside should have data-kind="connector"');
+    if (connectorAside) {
+        assert(connectorAside.getAttribute('data-preset') === 'line',
+            `62j: connector aside should have data-preset="line" (got ${JSON.stringify(connectorAside.getAttribute('data-preset'))})`);
+        // Connectors in this fixture carry no text → no <pre>.
+        assert(!connectorAside.querySelector('pre'),
+            '62k: connector aside should not contain a <pre> (no text body)');
+    }
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

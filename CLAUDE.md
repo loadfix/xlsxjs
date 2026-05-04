@@ -53,6 +53,18 @@ wrapped in a `<figure class="xlsx-image">` after the table. Anchor
 coordinates + offsets are surfaced on the figure as data-attributes so
 callers who want real in-flow positioning can overlay using those.
 
+**Shapes**: `<xdr:sp>` (text boxes, rectangles, callouts, WordArt) and
+`<xdr:cxnSp>` (connectors) sibling the image / chart entries inside
+`<xdr:twoCellAnchor>` / `<xdr:oneCellAnchor>`. They surface on
+`Sheet.shapes: SheetShape[]` with `kind`, anchor coordinates, the
+`<a:prstGeom prst=…>` preset name, and a flattened text body (`<a:p>`
+paragraphs joined with `\n`). The renderer emits one
+`<aside class="xlsx-shape">` per shape with `data-kind` /
+`data-preset` / anchor data-attrs and a `<pre>` for the text body.
+The actual preset geometry (rect stroke, line arrow, callout tail)
+is NOT rendered — consumers who want real shape glyphs can read the
+preset + anchor off the DOM and overlay.
+
 **R1C1 notation**: `showFormulas: true` replaces cell text with the
 formula (prefixed with `=`). Set `formulaNotation: 'r1c1'` to render
 in Excel's R1C1 form (anchor-relative deltas bracketed; absolutes not
@@ -66,10 +78,12 @@ with per-run font properties; plain strings follow the simple
 the cached `<v>` (when present) is used as the display value. xlsxjs
 does not evaluate formulas — a cell with no cached value renders blank.
 
-Deliberately deferred: chart rendering, drawings beyond raster images
-(shapes / connectors / SmartArt), diagonal / double borders, in-flow
-image positioning (images render after the table, not overlaid on the
-cell grid), full expression-rule interpretation beyond the narrow form.
+Deliberately deferred: chart rendering, SmartArt, shape-geometry
+rendering (preset anchors + text surface but no stroke/fill glyphs),
+form-control VML fallback decoding, diagonal / double borders,
+in-flow image positioning (images render after the table, not
+overlaid on the cell grid), full expression-rule interpretation
+beyond the narrow form.
 
 ### Excel width → pixel conversion
 
@@ -114,7 +128,8 @@ Minimum check before every PR that touches source: `grep -n "<feature name>" REA
 ## Known future work
 
 - Charts (`xl/charts/*.xml`, both classic `c:chartSpace` and chartEx).
-- Drawings beyond raster images (shapes, connectors, SmartArt).
+- SmartArt (`xl/diagrams/*.xml`) — outer shape surfaces via `Sheet.shapes`, but the data/layout XML is not parsed.
+- Shape glyph rendering — presets land on `Sheet.shapes` as of `feat/shapes-textboxes`, but the `<aside>` placeholder doesn't paint the actual preset geometry (rect / line / callout tail).
 - In-flow image positioning (currently images render after the table).
 - Gradient fills and diagonal / double borders.
 - Full expression-rule interpretation (currently only `=<cellRef> <op> <literal>`).
