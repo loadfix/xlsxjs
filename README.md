@@ -37,7 +37,7 @@ The public surface is:
   `sanitizeHexColor`, `sanitizeFontFamily`, `sanitizeMediaMime`,
   `isSafeHyperlinkHref`, `bytesToDataUrl`, `a1ToR1c1`, `r1c1ToA1`,
   `emuToPx`, `evaluateRule`, `parseChart`, `renderChart`, `parseSmartArt`,
-  `renderSmartArtSvg`, `applyFormControlUpdate`.
+  `renderSmartArtSvg`, `applyFormControlUpdate`, `parseCfb`.
 
 Options of note:
 
@@ -60,8 +60,14 @@ Options of note:
   `xlsx:timeline-change` CustomEvents on the aside. Default `false`.
 - `smartArtLayout: 'tree' | 'svg' | 'both'` — controls how SmartArt
   diagrams render. `'tree'` (default, byte-stable) emits only the indented
-  `<ul>`; `'svg'` emits only the inline SVG hierarchy; `'both'` emits both
-  (SVG first for visual, `<ul>` after for accessibility / text).
+  `<ul>`; `'svg'` emits only the inline SVG (hierarchy / orgchart /
+  cycle layouts); `'both'` emits both (SVG first for visual, `<ul>`
+  after for accessibility / text).
+- `parseOleCfb: boolean` — opt in to extracting named streams from OLE
+  CFB `.bin` embeddings. When true, `Sheet.embeddings[i].cfb` surfaces
+  `{ clsid, streams: [{ name, bytes }] }` for each `kind === 'ole'`
+  payload. Guardrails: ≤256 streams, ≤16 MiB/stream, malformed files
+  return null rather than throwing. Default `false`.
 
 See `src/xlsx-preview.ts` for the full options list.
 
@@ -86,12 +92,15 @@ informational `<aside>` elements. Form-control widgets become live
 on opt-in (`interactiveFormControls: true`); slicer/timeline UI and
 pivot interactivity are still consumer territory.
 
-Classic chartSpace charts (column / bar / line / pie / scatter / area,
-including stacked + percentStacked variants) render as inline SVG via
-`ChartModel` + `renderChart`. SmartArt hierarchy diagrams surface on
-`Sheet.smartArt` with the parsed tree and render as a nested `<ul>`
-aside by default; opt in to `smartArtLayout: 'svg'` / `'both'` for an
-inline SVG hierarchy via `renderSmartArtSvg`.
+Classic chartSpace charts (column / bar / line / pie / scatter / area /
+radar / doughnut, including stacked + percentStacked variants and
+data-label annotations) render as inline SVG via `ChartModel` +
+`renderChart`. SmartArt diagrams render as an indented `<ul>` tree by
+default; opt in to `smartArtLayout: 'svg'` / `'both'` for inline SVG
+across hierarchy, orgchart (branch-rail connectors), and cycle
+(circular arrow) layouts via `renderSmartArtSvg`. OLE CFB `.bin`
+payloads (Word docs, Excel books, equations, …) can be opened with
+the minimal `parseCfb` helper.
 
 Images render as absolutely-positioned `<figure>`s inside a zero-height
 `.xlsx-image-layer` above the `<table>`, so anchor coordinates place the
@@ -110,7 +119,7 @@ fallbacks, and double borders.
 ```bash
 npm install
 npm run build
-npm run test:render   # jsdom depth harness (105 scenarios)
+npm run test:render   # jsdom depth harness (110 scenarios)
 npm run test:golden   # golden HTML diff against result.html snapshots
 npm test              # Playwright browser smoke (real Chrome, port :3002)
 npm run dev           # static demo server at :8767

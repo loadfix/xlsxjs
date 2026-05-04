@@ -2,8 +2,8 @@
 
 What's still open. The "Resolved in fork" block at the bottom tracks
 features that have shipped on `master` and live in the harness / fixtures.
-Last reconciled 2026-05-04 after Wave 10 (chart scatter/area/stacked,
-interactive slicers + timeline slider, SmartArt hierarchy SVG).
+Last reconciled 2026-05-04 after Wave 11 (SmartArt orgchart + cycle,
+chart radar / doughnut / data labels, OLE CFB reader).
 
 ## Open — medium items (one slice each)
 
@@ -11,16 +11,19 @@ _Empty — all medium slices shipped in Wave 7._
 
 ## Open — big projects (library-scale)
 
-- [ ] **Chart rendering (further)** — Waves 9-10 ship column / bar / line /
-  pie / scatter / area and stacked + percentStacked variants. Still open:
-  3D, stock, bubble, surface, radar, dual axes, trendlines, scatter smoothing,
-  stacked line, and every chartEx `cx:chartSpace` variant (treemap / sunburst /
-  waterfall / funnel / pareto / box-whisker / histogram / map).
-- [ ] **SmartArt layouts (further)** — Wave 10 ships the top-down hierarchy
-  layout as inline SVG (opt-in via `smartArtLayout: 'svg' | 'both'`).
-  Still open: orgchart branch-rail connectors, cycle (evenly-spaced around
-  a circle with curved arrows), matrix / radial / bracketed / process
-  layouts from `layout1.xml`.
+- [ ] **Chart rendering (further)** — Waves 9-11 ship column / bar / line /
+  pie / scatter / area / radar / doughnut and stacked + percentStacked
+  variants, plus data-label annotations. Still open: 3D, stock, bubble,
+  surface, dual axes, trendlines, scatter smoothing, stacked line,
+  concentric doughnut rings, per-chart `<c:numFmt>` for labels, and every
+  chartEx `cx:chartSpace` variant (treemap / sunburst / waterfall / funnel /
+  pareto / box-whisker / histogram / map).
+- [ ] **SmartArt layouts (further)** — Waves 10-11 ship hierarchy,
+  orgchart (branch-rail connectors), and cycle (circular arc arrows)
+  via `smartArtLayout: 'svg' | 'both'`. Still open: matrix / radial /
+  bracketed / process / Venn / pyramid layouts from `layout1.xml`,
+  children-of-children in cycle diagrams, per-layout colour themes from
+  `colors1.xml`, per-node font scaling.
 - [ ] **Pivot table interactivity** — filtering, grouping, drill-down UI.
   Materialised values already render correctly; this is interaction on top.
 - [ ] **Slicer / timeline re-materialisation** — Wave 10 ships opt-in
@@ -28,11 +31,13 @@ _Empty — all medium slices shipped in Wave 7._
   `xlsx:slicer-change` / `xlsx:timeline-change` CustomEvents. Still open:
   actually re-running the pivot data through the new filter server-side or
   in-browser when the event fires.
-- [ ] **OLE payload extraction** — detect-only shipped in Wave 8
-  (`Sheet.embeddings` + opt-in `inlineEmbeddings` → data: URL for
-  package MIMEs). Open item is handing OLE CFB `.bin` payloads through an
-  OLE CFB reader so embedded Word/Excel streams can be rendered inline
-  rather than just surfaced as metadata.
+- [ ] **OLE payload rendering** — Wave 11 ships `parseCfb` + opt-in
+  `parseOleCfb` that extracts named streams from CFB `.bin` payloads
+  (kind='ole'). `Sheet.embeddings[i].cfb` surfaces root CLSID + streams
+  with a 256-stream / 16 MiB cap. Still open: actually rendering the
+  stream contents — the WordDocument BIFF table, Excel's Workbook stream,
+  Equation Editor's MTEF byte format, etc. Those are each their own
+  library-scale project.
 - [ ] **Form-control interactivity (further)** — Wave 9 ships opt-in
   live widgets (`interactiveFormControls`). Still open: sheet-prefixed
   linkedCell refs (`Sheet2!$A$1`), macro-assigned button click dispatch, and
@@ -45,8 +50,32 @@ _Empty — all medium slices shipped in Wave 7._
 
 ## Resolved in fork
 
-Most recent first (Wave 10 landed 2026-05-04). Earlier groupings blurred
+Most recent first (Wave 11 landed 2026-05-04). Earlier groupings blurred
 together in the interest of a readable tail.
+
+### Wave 11 (extensions II, 2026-05-04)
+- ✅ **SmartArt orgchart + cycle layouts** — `renderSmartArtSvg` now
+  dispatches on `model.layout` (or explicit `opts.layout`). Orgchart
+  paints 3-segment branch-rail connectors (vertical drop + horizontal
+  rail + per-child vertical); cycle arranges nodes evenly around a circle
+  with curved `<path>` arrows using the `A` arc command, plus a shared
+  `<marker id="xlsx-smartart-arrow">` arrowhead. Fixture:
+  `tests/render-test/smartart-layouts/`.
+- ✅ **Chart radar + doughnut + data labels** — `parseChart` adds
+  `'radar'` + `'doughnut'` kinds and `ChartSeries.dataLabels`. Radar emits
+  concentric polygon gridlines + radial axis lines + series polygons at
+  30% fill opacity; doughnut paints each slice as a `<path>` with two
+  arc commands (outer + inner reverse). Data labels reach the DOM as
+  `<text class="xlsx-chart-data-label">` positioned per `<c:dLblPos>`
+  (`outEnd` / `ctr` / `inBase` / `t` / `b`); chart-level `<c:dLbls>`
+  inherits to per-series. Fixture: `tests/render-test/radar-labels/`.
+- ✅ **OLE CFB reader** — new `src/ole-cfb.ts` with `parseCfb(bytes)`
+  decoding the 512-byte header, DIFAT-chained FAT, directory stream, and
+  the mini-FAT for small streams. Surfaces root CLSID + named streams
+  with preservation of `\x01` / `\x05` control prefixes. Guardrails:
+  ≤256 streams, ≤16 MiB/stream, reject buffers > 32 MiB. Detection and
+  parsing are opt-in via `Options.parseOleCfb` (default false, Wave 8
+  byte-stable). Fixture: `tests/render-test/ole-cfb/`.
 
 ### Wave 10 (extensions, 2026-05-04)
 - ✅ **Chart scatter / area / stacked variants** — `ChartModel.kind` adds
