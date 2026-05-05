@@ -2,56 +2,47 @@
 
 What's still open. The "Resolved in fork" block at the bottom tracks
 features that have shipped on `master` and live in the harness / fixtures.
-Last reconciled 2026-05-04 after Wave 11 (SmartArt orgchart + cycle,
-chart radar / doughnut / data labels, OLE CFB reader).
+Last reconciled 2026-05-05 after Wave 12 (packaging cleanup, cell-alignment
+conformance, formula evaluator v2, SmartArt matrix+pyramid, slicer pivot
+re-materialisation, chartEx detect).
 
 ## Audit findings 2026-05-05
 
-Project audit completed 2026-05-05. Items 1, 3, 4, 5, 10 were closed in
-Wave 12 (see "Resolved in Wave 12" below). The remaining items below
-stay open for future waves — (2) is the headline conformance miss;
-(6)-(9) are scoping / housekeeping.
+All audit items from the 2026-05-05 project audit are now closed —
+items 1, 3, 4, 5, 10 in Wave 12A, items 2 + 6 in Wave 12B, items 7/8/9
+triaged:
 
-2. **Fix 10-case cell-alignment conformance cluster** — currently 191/201
-   pass (95%). All 10 failures are in a single cluster:
-   `cell-alignment-{horizontal,vertical}-{variant}`. Single root cause
-   likely in alignment-XF → CSS mapping. Closing this → 100% conformance
-   for covered fixtures.
-6. **Scope and gate the next formula-evaluator wave** — currently 10/500
-   Excel functions (2%). POC status honest in README/TODO but it's now
-   in user hands. Either pick highest-ROI next batch (IFERROR / ROUND /
-   VLOOKUP / INDEX / MATCH / LEFT / RIGHT / CONCATENATE / SUMIF /
-   COUNTIF) AND route output through `number-format.ts` (so `0.1+0.2`
-   doesn't render as `0.30000000000000004`), or downgrade
-   `evaluateFormulas` messaging to signal ongoing API shift.
-7. **Close 0 open GitHub issues** — `gh issue list` returns empty;
-   nothing to close but worth noting as a clean state.
-8. **Fix 67-manifests-covers-only-17%-of-386-corpus-fixtures gap** — not
-   a xlsxjs bug; corpus-authoring debt that means headline 95%
-   conformance reflects a narrow slice. Flag as joint corpus/renderer
-   concern.
-9. **Audit 10 auto-filed conformance-gap entries from 2026-05-04
-   overnight run** — sit at tail of TODO.md; may already be resolved.
+- **#2** (cell-alignment conformance cluster) — **CLOSED** in W12b. Root
+  cause was `ST_VerticalAlignment=center` being dropped by the parser
+  (internal enum used CSS's `middle` spelling) plus a missing `css_re`
+  field in two corpus manifests. 191/201 → 201/201.
+- **#6** (formula evaluator v2) — **CLOSED** in W12c. 28 total functions
+  (up from 10): + `IFERROR`, `IFNA`, `SWITCH`, `IFS`, `ROUND`,
+  `ROUNDUP`, `ROUNDDOWN`, `ABS`, `SQRT`, `POWER`, `MOD`, `INT`,
+  `SUMIF`, `COUNTIF`, `LEFT`, `RIGHT`, `MID`, `LEN`, `TRIM`, `UPPER`,
+  `LOWER`, `CONCATENATE`/`CONCAT`, `VLOOKUP` (exact). Error taxonomy:
+  `#DIV/0!`, `#VALUE!`, `#REF!`, `#NAME?`, `#NUM!`, `#N/A`, `#NULL!`
+  instead of a single `#ERROR!` sentinel; errors propagate through
+  ops and are caught by `IFERROR` / `IFNA`. Number-format routing via
+  evaluator-side `cleanNumberString()` kills JS float noise before
+  `formatNumber` runs.
+- **#7** (0 open GitHub issues) — informational; no action.
+- **#8** (67 manifests cover 17% of 386 corpus fixtures) — still open;
+  corpus-authoring debt, not xlsxjs. Flagged for a joint corpus wave.
+- **#9** (10 auto-filed conformance-gap entries) — triaged during
+  W12b; most land inside the alignment cluster and are now resolved
+  as a side effect. No separate conformance report entries remain.
 
 ### Resolved in Wave 12
 
-Wave 12 (2026-05-05) — single packaging-only commit, zero `src/` churn.
-
 - ✅ **Audit #1** — `rollup.config.mjs` now emits `dist/xlsx-preview.mjs`,
   `dist/xlsx-preview.min.js`, `dist/xlsx-preview.min.mjs`, and
-  `dist/xlsx-preview.d.ts` (+ per-module `.d.ts`) under `build-prod`,
-  so every file referenced by `package.json`'s `exports` / `types`
-  actually ships.
-- ✅ **Audit #3** — `package.json` `repository.url` pointed at
-  `github.com/example/xlsxjs.git`, now `github.com/loadfix/xlsxjs.git`.
-- ✅ **Audit #4** — release notes moved out of `README.md` into
-  `CHANGELOG.md` (Keep-A-Changelog format, one `## [x.y.z] - YYYY-MM-DD`
-  section per shipped version).
-- ✅ **Audit #5** — `jszip` dependency tightened from `>=3.0.0` to
-  `^3.0.0` so a future 4.x can't land without review.
-- ✅ **Audit #10** — `v0.0.1` and `v0.0.2` tags created locally on the
-  relevant commits (initial import + the 0.0.1 → 0.0.2 bump). Push
-  left to the release flow.
+  `dist/xlsx-preview.d.ts` (+ per-module `.d.ts`) under `build-prod`.
+- ✅ **Audit #3** — `package.json` `repository.url` → `github.com/loadfix/xlsxjs.git`.
+- ✅ **Audit #4** — release notes moved from `README.md` into
+  `CHANGELOG.md` (Keep-A-Changelog format).
+- ✅ **Audit #5** — `jszip` dependency tightened from `>=3.0.0` to `^3.0.0`.
+- ✅ **Audit #10** — `v0.0.1` and `v0.0.2` tags created locally.
 
 ## Open — medium items (one slice each)
 
@@ -59,25 +50,28 @@ _Empty — all medium slices shipped in Wave 7._
 
 ## Open — big projects (library-scale)
 
-- [ ] **Chart rendering (further)** — Waves 9-11 ship column / bar / line /
-  pie / scatter / area / radar / doughnut and stacked + percentStacked
-  variants, plus data-label annotations. Still open: 3D, stock, bubble,
-  surface, dual axes, trendlines, scatter smoothing, stacked line,
-  concentric doughnut rings, per-chart `<c:numFmt>` for labels, and every
-  chartEx `cx:chartSpace` variant (treemap / sunburst / waterfall / funnel /
-  pareto / box-whisker / histogram / map).
-- [ ] **SmartArt layouts (further)** — Waves 10-11 ship hierarchy,
-  orgchart (branch-rail connectors), and cycle (circular arc arrows)
-  via `smartArtLayout: 'svg' | 'both'`. Still open: matrix / radial /
-  bracketed / process / Venn / pyramid layouts from `layout1.xml`,
-  children-of-children in cycle diagrams, per-layout colour themes from
-  `colors1.xml`, per-node font scaling.
+- [ ] **Chart rendering (further)** — Waves 9-12 ship column / bar / line /
+  pie / scatter / area / radar / doughnut (stacked + percentStacked variants,
+  data-label annotations) for classic `c:chartSpace`, plus chartEx
+  *detection* (W12f — `ChartModel.chartExSubtype`, placeholder carries
+  `data-chartex-type`). Still open on chartEx: *rendering* of treemap /
+  sunburst / waterfall / funnel / pareto / box-whisker / histogram / map.
+  Still open on classic: 3D, stock, bubble, surface, dual axes, trendlines,
+  scatter smoothing, stacked line, concentric doughnut rings,
+  per-chart `<c:numFmt>` for labels.
+- [ ] **SmartArt layouts (further)** — Waves 10-12 ship hierarchy,
+  orgchart (branch-rail connectors), cycle (circular arc arrows),
+  matrix (2×2 with central cross), and pyramid (stacked trapezoidal
+  bands) via `smartArtLayout: 'svg' | 'both'`. Still open: radial /
+  bracketed / process / Venn layouts, children-of-children in cycle,
+  per-layout colour themes from `colors1.xml`, per-node font scaling.
 - [ ] **Pivot table interactivity** — filtering, grouping, drill-down UI.
   Materialised values already render correctly; this is interaction on top.
-- [ ] **Slicer / timeline re-materialisation** — Wave 10 ships opt-in
-  chips + dual-handle slider (`interactiveSlicers: true`) that fire
-  `xlsx:slicer-change` / `xlsx:timeline-change` CustomEvents. Still open:
-  actually re-running the pivot data through the new filter server-side or
+- [ ] **Slicer / timeline re-materialisation (further)** — Wave 12e ships
+  opt-in default handlers (`slicerRematerializePivots: true`) that hide
+  non-matching `<tbody><tr>`s in the rendered pivot table on chip/slider
+  events. Still open: actually re-running the pivot data through the new
+  filter server-side or
   in-browser when the event fires.
 - [ ] **OLE payload rendering** — Wave 11 ships `parseCfb` + opt-in
   `parseOleCfb` that extracts named streams from CFB `.bin` payloads
@@ -150,6 +144,39 @@ together in the interest of a readable tail.
   errors, malformed-formula handling, and end-to-end through parseAsync
   on the existing `formulas` fixture. Gaps tracked in the "Open — big
   projects" section above.
+
+### Wave 12 (audit closeout + extensions III, 2026-05-05)
+- ✅ **Packaging completeness (W12a)** — `build-prod` now emits every
+  artefact referenced by `package.json` exports (UMD + ESM + minified +
+  `.d.ts`); `CHANGELOG.md` split from README; jszip dep bound `^3.0.0`;
+  repo URL pointed at `loadfix/xlsxjs`; `v0.0.1`/`v0.0.2` tags created.
+- ✅ **Cell-alignment conformance (W12b)** — 191/201 → 201/201. Root
+  cause: `ST_VerticalAlignment=center` dropped in `parseAlignment` because
+  the internal enum used CSS's `middle` spelling. Also fixed a corpus
+  manifest `{align.css_re}` placeholder in `tests/conformance/xlsx-conformance.spec.ts`.
+  Scenario 111 locks the full enum coverage.
+- ✅ **Formula evaluator v2 (W12c)** — 28 functions up from 10
+  (see audit #6 above). Error taxonomy rolled out (`#DIV/0!` /
+  `#VALUE!` / `#REF!` / `#NAME?` / `#NUM!` / `#N/A` / `#NULL!`).
+  Number-format routing via `cleanNumberString` kills JS float noise
+  before `formatNumber` runs. Scenarios 112-114 + new `formulas-v2`
+  fixture.
+- ✅ **SmartArt matrix + pyramid layouts (W12d)** — `renderSmartArtSvg`
+  dispatches on `/matrix/i` (2×2 quadrants + central cross) and
+  `/pyramid/i` (stacked trapezoidal bands). Scenario 115 + new
+  `smartart-matrix-pyramid` fixture.
+- ✅ **Slicer pivot re-materialisation (W12e)** — `Options.slicerRematerializePivots`
+  (default off) attaches default `xlsx:slicer-change` /
+  `xlsx:timeline-change` handlers that hide non-matching pivot rows.
+  New module `src/pivot-filter.ts` with pure `applySlicerFilter` /
+  `applyTimelineFilter` / `clearPivotFilters` helpers. Scenarios 116-118
+  + new `slicers-pivot` fixture.
+- ✅ **chartEx detection (W12f)** — `ChartModel.chartExSubtype` surfaces
+  the `<cx:series layoutId>` for every chartEx chart (treemap / sunburst /
+  waterfall / funnel / pareto / boxWhisker / regionMap / histogram).
+  Placeholder carries `data-chart-kind="chartex"` + `data-chartex-type`.
+  Rendering still deferred — this is the detect-only half. Scenario 119
+  + new `chartex` fixture.
 
 ### Wave 11 (extensions II, 2026-05-04)
 - ✅ **SmartArt orgchart + cycle layouts** — `renderSmartArtSvg` now

@@ -133,7 +133,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for release history.
 ```bash
 npm install
 npm run build
-npm run test:render   # jsdom depth harness (110 scenarios)
+npm run test:render   # jsdom depth harness (119 scenarios)
 npm run test:golden   # golden HTML diff against result.html snapshots
 npm test              # Playwright browser smoke (real Chrome, port :3002)
 npm run dev           # static demo server at :8767
