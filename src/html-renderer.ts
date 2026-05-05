@@ -69,6 +69,7 @@ export class HtmlRenderer {
             withEmbeddings: hasEmbeddings,
             withCharts: hasRenderedCharts,
             withSmartArt: hasSmartArt,
+            responsive: options.responsive === true,
         }));
         for (const sheet of workbook.sheets) {
             // Skip hidden and veryHidden sheets — the demo's sheet-switcher
@@ -80,7 +81,7 @@ export class HtmlRenderer {
     }
 }
 
-function renderStyle(className: string, opts: { withEmbeddings: boolean; withCharts?: boolean; withSmartArt?: boolean } = { withEmbeddings: false }): HTMLStyleElement {
+function renderStyle(className: string, opts: { withEmbeddings: boolean; withCharts?: boolean; withSmartArt?: boolean; responsive?: boolean } = { withEmbeddings: false }): HTMLStyleElement {
     const style = document.createElement('style');
     style.setAttribute('data-xlsxjs', '');
     // Kept intentionally small — consumers style further via their own CSS.
@@ -112,6 +113,36 @@ function renderStyle(className: string, opts: { withEmbeddings: boolean; withCha
     // Same gating pattern as embeddings: only append SmartArt rules when the
     // workbook actually carries a diagram. Workbooks without SmartArt get
     // exactly the pre-existing CSS so golden snapshots stay byte-stable.
+    // Responsive (mobile-friendly) wrapping. When opted in, the sheet
+    // <section> becomes its own horizontal scroll container, so a wide
+    // table no longer forces the page viewport to scroll and the row
+    // gutter / header row stick to the left/top of that container. We
+    // also hint -webkit-overflow-scrolling so iOS gives us momentum
+    // scrolling. Gated on `responsive: true` to keep byte-stable output
+    // for consumers who never opt in.
+    const responsiveCss = opts.responsive ? `
+.${className}[data-responsive="true"] {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+}
+.${className}[data-responsive="true"] > table {
+    min-width: max-content;
+}
+.${className}[data-responsive="true"] th:first-child,
+.${className}[data-responsive="true"] td:first-child {
+    position: sticky; left: 0; z-index: 1; background: #f3f3f3;
+}
+.${className}[data-responsive="true"] thead th {
+    position: sticky; top: 0; z-index: 2; background: #f3f3f3;
+}
+.${className}[data-responsive="true"] thead th:first-child {
+    z-index: 3;
+}
+@media (max-width: 768px) {
+    .${className}[data-responsive="true"] { font-size: 0.85em; }
+    .${className}[data-responsive="true"] th, .${className}[data-responsive="true"] td { padding: 1px 4px; }
+}` : '';
     const smartArtCss = opts.withSmartArt ? `
 .${className} .xlsx-smartart {
     border: 1px dashed #b0b0b0; border-radius: 2px;
@@ -215,7 +246,7 @@ function renderStyle(className: string, opts: { withEmbeddings: boolean; withCha
 .${className} .xlsx-header, .${className} .xlsx-footer {
     display: grid; grid-template-columns: 1fr 1fr 1fr;
     font-size: 0.85em; color: #666; margin: 0.5em 0;
-}${smartArtCss}
+}${smartArtCss}${responsiveCss}
     `.trim();
     return style;
 }
@@ -489,6 +520,12 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
     const theme = workbook.theme;
     const date1904 = workbook.date1904;
     const section = h('section', { class: options.className, 'data-sheet-name': sheet.name }) as HTMLElement;
+    // Opt-in responsive: surface a data-* hook on the section so the CSS
+    // block emitted by renderStyle() can target this sheet without
+    // affecting consumers who layer their own styles. See Options.responsive.
+    if (options.responsive) {
+        section.setAttribute('data-responsive', 'true');
+    }
     applySheetView(section, sheet.view, theme);
     // Sheet-protection state surfaces as a data attribute so consumers can
     // style protected sheets (e.g. a subtle banner) via CSS. xlsxjs does not
