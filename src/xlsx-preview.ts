@@ -24,6 +24,7 @@ export { parseChart } from './chart-parser';
 export { renderChart } from './chart-renderer';
 export { renderSmartArtSvg } from './smartart-renderer';
 export type { RenderSmartArtOptions } from './smartart-renderer';
+export { applySlicerFilter, applyTimelineFilter, clearPivotFilters, findColumnByHeaderText, findHeaderCell } from './pivot-filter';
 
 export interface Options {
     className: string;
@@ -77,6 +78,18 @@ export interface Options {
     // consumers listen for the event to drive their own filter UI. Default
     // off to keep Wave-8 golden output byte-stable.
     interactiveSlicers: boolean;
+    // Opt-in default handler for `xlsx:slicer-change` / `xlsx:timeline-change`
+    // that re-materialises the pivot's rendered `<table>` rows client-side:
+    // on every event the renderer walks the table's `<tbody><tr>` and flips
+    // `tr.style.display` on rows whose cell at the slicer's/timeline's
+    // sourceName column isn't in the current selection (or, for timelines,
+    // doesn't parse as a Date inside the chosen range). The model is
+    // untouched — this is UI-only. When a slicer's source column can't be
+    // resolved inside the same `<section class="xlsx">` (e.g. cross-sheet
+    // pivot), wiring is skipped with a console.warn so consumers can still
+    // listen for the event themselves. Requires `interactiveSlicers: true`
+    // to have any effect; default off to keep the Wave-10 DOM byte-stable.
+    slicerRematerializePivots: boolean;
     // Controls how `<aside class="xlsx-smartart">` paints its diagram body:
     //   · 'tree' — the Wave 9 indented `<ul>` only (default, byte-stable).
     //   · 'svg'  — an inline SVG rendered via `renderSmartArtSvg`, and no
@@ -130,6 +143,7 @@ export const defaultOptions: Options = {
     renderCharts: true,
     interactiveFormControls: false,
     interactiveSlicers: false,
+    slicerRematerializePivots: false,
     smartArtLayout: 'tree',
     evaluateFormulas: false,
     evaluateFormulasForce: false,
