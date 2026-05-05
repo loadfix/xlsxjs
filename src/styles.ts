@@ -104,7 +104,10 @@ export interface BorderStyle {
 
 export interface Alignment {
     horizontal: 'left' | 'right' | 'center' | 'justify' | 'distributed' | 'centerContinuous' | 'fill' | null;
-    vertical: 'top' | 'middle' | 'bottom' | 'justify' | 'distributed' | null;
+    // ST_VerticalAlignment values from ECMA-376 §18.18.88 — kept verbatim
+    // (note: "center", not the CSS spelling "middle"; the renderer maps
+    // `center` → CSS vertical-align: middle).
+    vertical: 'top' | 'center' | 'bottom' | 'justify' | 'distributed' | null;
     // True when <alignment @wrapText="1"/> is present. Renderer maps this to
     // white-space: normal + word-break so multi-line content stays in cell.
     wrapText: boolean;
@@ -559,7 +562,7 @@ function parseAlignment(el: Element | null): Alignment {
         h === 'left' || h === 'right' || h === 'center' || h === 'justify' ||
         h === 'distributed' || h === 'centerContinuous' || h === 'fill' ? h : null;
     const vertical: Alignment['vertical'] =
-        v === 'top' || v === 'middle' || v === 'bottom' ||
+        v === 'top' || v === 'center' || v === 'bottom' ||
         v === 'justify' || v === 'distributed' ? v : null;
     const indentAttr = el.getAttribute('indent');
     const indent = indentAttr != null && Number.isFinite(Number(indentAttr)) ? Math.max(0, Math.floor(Number(indentAttr))) : 0;
