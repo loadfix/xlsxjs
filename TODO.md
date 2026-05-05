@@ -47,11 +47,61 @@ _Empty — all medium slices shipped in Wave 7._
   CFB containers. Today we detect them and throw. Decryption needs SHA-512
   + AES-CBC (+ RC4-40 for legacy) and an OLE CFB reader. Real project;
   should live behind an optional dependency if we ever do it.
+- [ ] **Formula evaluator — beyond the POC** — Wave 9-C ships a minimal
+  calc engine behind `Options.evaluateFormulas` (default off) covering
+  10 functions: SUM, AVERAGE, MIN, MAX, COUNT, COUNTA, IF, AND, OR, NOT
+  plus arithmetic (`+ - * / ^ %`), string concat (`&`), comparison
+  (`= <> < <= > >=`), cell refs (`A1`, `$A$1`, `a1`), and cell ranges
+  (`A1:B5`). The following gaps are intentional and remain open:
+  - Cross-sheet refs (`Sheet2!A1`, `'My Sheet'!$B$2`) — parser bails with
+    `#ERROR!`. The resolver signature + `SheetLike` would need a
+    `getSheet(name)` indirection.
+  - Structured table refs (`Table1[Column]`, `Table1[#Totals]`).
+  - Defined names (`MyRange`, `_xlnm.Print_Area`) — would need a
+    workbook-scoped symbol table passed into the resolver.
+  - Array formulas + dynamic-array spill — a range that reaches the top
+    collapses to its first scalar, no implicit intersection, no spill
+    anchor propagation.
+  - The other ~440 Excel functions — notably VLOOKUP / XLOOKUP / INDEX /
+    MATCH, text (CONCATENATE / LEFT / RIGHT / MID / TRIM / SUBSTITUTE),
+    date/time (TODAY / NOW / DATE / EOMONTH), math (ROUND / ABS / SQRT /
+    POWER / LOG), logical (IFERROR / IFNA / SWITCH / IFS),
+    statistical (COUNTIF / SUMIF / SUMIFS / AVERAGEIF), financial
+    (PMT / FV / NPV / IRR). An unknown function name returns `#ERROR!`.
+  - Error differentiation — everything collapses to `#ERROR!`; Excel
+    distinguishes `#DIV/0!`, `#VALUE!`, `#REF!`, `#NAME?`, `#NUM!`,
+    `#N/A`, `#NULL!`.
+  - Number formatting — evaluator outputs `String(n)` for numbers, so
+    `0.1+0.2` renders as `0.30000000000000004`. Pair with the existing
+    `number-format.ts` pipeline by routing the evaluator's result
+    through the cell's `numFmtId` the way cached `<v>` values already
+    are.
+  - Circular-reference handling — depth-capped at 1024 hops which
+    surfaces as `#ERROR!`; no iterative-calc flag support.
+  - Locale — decimal separator is fixed `.` and argument separator is
+    fixed `,`. Excel localises both (`;` in de-DE / fr-FR).
 
 ## Resolved in fork
 
 Most recent first (Wave 11 landed 2026-05-04). Earlier groupings blurred
 together in the interest of a readable tail.
+
+### Wave 9-C (formula evaluator POC, 2026-05-05)
+- ✅ **Minimal formula evaluator** — `src/formula-eval.ts` ships a single-
+  file recursive-descent parser + evaluator exposed as `evaluateFormula`,
+  `evaluateSheetFormulas`, `parseFormula`, `evalAst`, `makeSheetResolver`.
+  `Options.evaluateFormulas: true` (default off) triggers evaluation in
+  `parseAsync`; cells whose cached `<v>` was empty get the computed
+  result. `Options.evaluateFormulasForce: true` re-evaluates every
+  formula cell regardless of its cached value. 10 functions covered:
+  SUM, AVERAGE, MIN, MAX, COUNT, COUNTA, IF, AND, OR, NOT. Supports
+  arithmetic (`+ - * / ^ %`), string concat (`&`), comparison operators,
+  cell refs including `$A$1` forms, and cell ranges (`A1:B5`). Tests:
+  16 in `tests/unit/formula-eval.spec.js` covering each function,
+  nested calls, error propagation, empty-cell coercion, text-in-numeric
+  errors, malformed-formula handling, and end-to-end through parseAsync
+  on the existing `formulas` fixture. Gaps tracked in the "Open — big
+  projects" section above.
 
 ### Wave 11 (extensions II, 2026-05-04)
 - ✅ **SmartArt orgchart + cycle layouts** — `renderSmartArtSvg` now

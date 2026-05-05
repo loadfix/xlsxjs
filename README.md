@@ -37,7 +37,9 @@ The public surface is:
   `sanitizeHexColor`, `sanitizeFontFamily`, `sanitizeMediaMime`,
   `isSafeHyperlinkHref`, `bytesToDataUrl`, `a1ToR1c1`, `r1c1ToA1`,
   `emuToPx`, `evaluateRule`, `parseChart`, `renderChart`, `parseSmartArt`,
-  `renderSmartArtSvg`, `applyFormControlUpdate`, `parseCfb`.
+  `renderSmartArtSvg`, `applyFormControlUpdate`, `parseCfb`,
+  `evaluateFormula`, `evaluateSheetFormulas`, `parseFormula`, `evalAst`,
+  `makeSheetResolver`.
 
 Options of note:
 
@@ -68,6 +70,14 @@ Options of note:
   `{ clsid, streams: [{ name, bytes }] }` for each `kind === 'ole'`
   payload. Guardrails: ≤256 streams, ≤16 MiB/stream, malformed files
   return null rather than throwing. Default `false`.
+- `evaluateFormulas: boolean` — opt in to the POC formula evaluator.
+  When true, formula cells whose cached `<v>` was empty are re-computed
+  using a minimal calc engine (SUM / AVERAGE / MIN / MAX / COUNT /
+  COUNTA / IF / AND / OR / NOT plus arithmetic, string concat, cell
+  refs, and ranges). Cells that already carry a cached value are
+  untouched unless `evaluateFormulasForce: true` is also set.
+  Unsupported functions / cross-sheet refs / array formulas collapse
+  to `#ERROR!`. Default `false` (cached `<v>` behaviour preserved).
 
 See `src/xlsx-preview.ts` for the full options list.
 
