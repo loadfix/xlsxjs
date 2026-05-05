@@ -126,28 +126,7 @@ fallbacks, and double borders.
 
 ## Release notes
 
-### 0.0.2
-
-- **Formula evaluator POC** (`evaluateFormulas`, `evaluateFormulasForce`) —
-  opt-in calc engine covering SUM, AVERAGE, MIN, MAX, COUNT, COUNTA, IF,
-  AND, OR, NOT plus arithmetic, comparison, string concat, and cell
-  references. Cells whose cached `<v>` is empty get rewritten to the
-  computed value; `evaluateFormulasForce` overwrites Excel's own cache.
-- **Cached formula fallback** — when `<c><f>…</f></c>` carries no `<v>`,
-  render the formula text (or "#ERROR!") rather than a blank cell.
-- **Accessibility** — each sheet `<table>` now carries `role="table"`,
-  `aria-labelledby`, `aria-rowcount`, and `aria-colcount`. Column-letter
-  headers get `scope="col"`, row-number gutters get `scope="row"`, and
-  the top-left corner cell is marked `aria-hidden="true"`.
-- **Responsive mode** (`responsive: true`) — adds a `data-responsive`
-  hook on each sheet `<section>` so the stylesheet turns on horizontal
-  overflow plus sticky first column / first row for mobile viewports.
-  Default off; existing consumers keep current behaviour.
-- **Shared `oox-*` CSS classes** — rows / cells / sheet sections now also
-  carry cross-format classes (`oox-table`, `oox-table-row`,
-  `oox-table-cell`, `oox-page`) alongside the existing `xlsx-*` classes,
-  so downstream stylesheets can style DOCX pages, PPTX slides, and XLSX
-  sheets in one place.
+See [CHANGELOG.md](./CHANGELOG.md) for release history.
 
 ## Contributing
 

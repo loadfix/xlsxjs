@@ -21,13 +21,29 @@ const umdOutput = {
 };
 
 export default args => {
+	const prod = args.environment == 'BUILD:production';
+
+	// In prod, emit .d.ts alongside the bundle so package.json's
+	// `"types": "dist/xlsx-preview.d.ts"` resolves. The dev build skips
+	// declarations to keep `npm run build` fast.
+	const tsPlugin = typescript(
+		prod
+			? {
+					declaration: true,
+					declarationDir: 'dist',
+					rootDir: 'src',
+					outDir: 'dist',
+			  }
+			: {}
+	);
+
 	const config = {
 		input: 'src/xlsx-preview.ts',
 		output: [umdOutput],
-		plugins: [typescript()]
+		plugins: [tsPlugin]
 	}
 
-	if (args.environment == 'BUILD:production')
+	if (prod)
 		config.output = [umdOutput,
 			{
 				...umdOutput,

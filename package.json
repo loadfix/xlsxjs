@@ -9,10 +9,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/example/xlsxjs.git"
+    "url": "git+https://github.com/loadfix/xlsxjs.git"
   },
   "dependencies": {
-    "jszip": ">=3.0.0"
+    "jszip": "^3.0.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
