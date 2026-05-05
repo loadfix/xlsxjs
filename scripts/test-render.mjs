@@ -5071,6 +5071,82 @@ async function renderFixture(path, options) {
         `118a: no console.warn expected on a resolvable source; got ${JSON.stringify(warns)}`);
 }
 
+// ── 119. chartEx detect-only: cx:chartSpace subtype + placeholder ────────
+// The chartex fixture anchors two chartEx charts on one sheet:
+//   · chartEx1 — layoutId="treemap",   title "Budget by Region"    (5 leaves)
+//   · chartEx2 — layoutId="waterfall", title "Q1 Revenue Bridge"   (4 cats)
+// Both parts sit in the cx: namespace (Office 2014) and use the
+// /office/2014/relationships/chartEx relationship type. xlsxjs should:
+//   · surface SheetChart.kind='chartex' for each entry;
+//   · populate ChartModel.chartExSubtype with the raw layoutId;
+//   · round-trip the title + first <cx:data> categories + values;
+//   · emit a .xlsx-chart-placeholder (NOT a <figure class="xlsx-chart">)
+//     carrying data-chart-kind="chartex" + data-chartex-type="<subtype>";
+//   · emit no <svg> inside the placeholder (detect-only — no renderer yet).
+{
+    const { wb, container } = await renderFixture('chartex');
+    const sheet = wb.parsed.sheets[0];
+    assert(Array.isArray(sheet.charts) && sheet.charts.length === 2,
+        `119a: expected 2 chartEx charts (got ${sheet.charts?.length})`);
+
+    const bySubtype = new Map();
+    for (const ch of sheet.charts) {
+        assert(ch.kind === 'chartex',
+            `119b: SheetChart.kind should be "chartex" for every entry (got ${ch.kind})`);
+        assert(ch.model && ch.model.kind === 'chartex',
+            `119c: ChartModel.kind should be "chartex" (got ${ch.model?.kind})`);
+        if (ch.model) bySubtype.set(ch.model.chartExSubtype, ch);
+    }
+
+    const tree = bySubtype.get('treemap');
+    const water = bySubtype.get('waterfall');
+    assert(tree, '119d: a chart with chartExSubtype="treemap" should be present');
+    assert(water, '119e: a chart with chartExSubtype="waterfall" should be present');
+
+    if (tree?.model) {
+        assert(tree.model.title === 'Budget by Region',
+            `119f: treemap title should round-trip (got ${JSON.stringify(tree.model.title)})`);
+        assert(JSON.stringify(tree.model.categories) === JSON.stringify(['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon']),
+            `119g: treemap categories should round-trip from the first cx:data strDim (got ${JSON.stringify(tree.model.categories)})`);
+        assert(tree.model.series.length === 1,
+            `119h: treemap should surface one synthesised series (got ${tree.model.series.length})`);
+        assert(JSON.stringify(tree.model.series[0]?.values) === JSON.stringify([120, 80, 60, 40, 25]),
+            `119i: treemap values should round-trip from the first cx:data numDim (got ${JSON.stringify(tree.model.series[0]?.values)})`);
+    }
+    if (water?.model) {
+        assert(water.model.title === 'Q1 Revenue Bridge',
+            `119j: waterfall title should round-trip (got ${JSON.stringify(water.model.title)})`);
+        assert(JSON.stringify(water.model.categories) === JSON.stringify(['Opening', 'Sales', 'Returns', 'Closing']),
+            `119k: waterfall categories should round-trip (got ${JSON.stringify(water.model.categories)})`);
+        assert(JSON.stringify(water.model.series[0]?.values) === JSON.stringify([1000, 450, -120, 1330]),
+            `119l: waterfall values should round-trip (got ${JSON.stringify(water.model.series[0]?.values)})`);
+    }
+
+    // Renderer: two placeholders (NOT xlsx-chart figures). No SVG inside.
+    const figures = container.querySelectorAll('section.xlsx figure.xlsx-chart');
+    assert(figures.length === 0,
+        `119m: chartEx entries should NOT render as <figure class="xlsx-chart"> (got ${figures.length})`);
+    const placeholders = container.querySelectorAll('section.xlsx .xlsx-chart-placeholder');
+    assert(placeholders.length === 2,
+        `119n: expected 2 .xlsx-chart-placeholder divs (got ${placeholders.length})`);
+
+    const subtypesSeen = new Set();
+    for (const ph of placeholders) {
+        assert(ph.getAttribute('data-chart-kind') === 'chartex',
+            `119o: placeholder data-chart-kind should be "chartex" (got ${ph.getAttribute('data-chart-kind')})`);
+        assert(ph.getAttribute('data-chart-plot') === 'chartex',
+            `119p: placeholder data-chart-plot should be "chartex" (got ${ph.getAttribute('data-chart-plot')})`);
+        const sub = ph.getAttribute('data-chartex-type');
+        assert(sub === 'treemap' || sub === 'waterfall',
+            `119q: placeholder data-chartex-type should be "treemap" or "waterfall" (got ${sub})`);
+        if (sub) subtypesSeen.add(sub);
+        assert(ph.querySelector('svg') === null,
+            `119r: detect-only wave — no <svg> should sit inside a chartEx placeholder (got one)`);
+    }
+    assert(subtypesSeen.has('treemap') && subtypesSeen.has('waterfall'),
+        `119s: both treemap + waterfall placeholders should surface (got ${[...subtypesSeen].join(',')})`);
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

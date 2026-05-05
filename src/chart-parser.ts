@@ -38,7 +38,7 @@ export interface ChartSeries {
 }
 
 export interface ChartModel {
-    kind: 'bar' | 'column' | 'line' | 'pie' | 'scatter' | 'area' | 'radar' | 'doughnut' | 'unknown';
+    kind: 'bar' | 'column' | 'line' | 'pie' | 'scatter' | 'area' | 'radar' | 'doughnut' | 'chartex' | 'unknown';
     title: string | null;
     categories: string[];
     series: ChartSeries[];
@@ -49,9 +49,18 @@ export interface ChartModel {
     // this to decide between clustered vs stacked vs 100%-stacked layouts;
     // `kind` stays 'bar' / 'column' / 'line' — grouping is orthogonal.
     grouping: 'standard' | 'stacked' | 'percentStacked' | null;
+    // chartEx (cx:chartSpace, Office 2014) subtype. Lifted straight from
+    // `<cx:series layoutId="…">` — e.g. 'treemap', 'sunburst', 'waterfall',
+    // 'funnel', 'paretoLine', 'boxWhisker', 'regionMap', 'histogram',
+    // 'clusteredColumn'. null when the chart part isn't chartEx or the
+    // layoutId couldn't be resolved. xlsxjs does NOT render chartEx plots
+    // to SVG in this wave — the field exists so consumers + the placeholder
+    // path can surface the subtype as a `data-chartex-type` attribute.
+    chartExSubtype: string | null;
 }
 
 const NS_C = 'http://schemas.openxmlformats.org/drawingml/2006/chart';
+const NS_CX = 'http://schemas.microsoft.com/office/drawing/2014/chartex';
 const NS_A = 'http://schemas.openxmlformats.org/drawingml/2006/main';
 
 function parseXml(xml: string): Document {
@@ -432,6 +441,7 @@ export function parseChart(xml: string, sharedStrings: SharedString[]): ChartMod
         series: [],
         legend: 'none',
         grouping: null,
+        chartExSubtype: null,
     };
 
     let doc: Document;
@@ -440,6 +450,16 @@ export function parseChart(xml: string, sharedStrings: SharedString[]): ChartMod
     } catch {
         return blank;
     }
+
+    // chartEx (cx:chartSpace) detection. The 2014 extension namespace
+    // carries treemap / sunburst / waterfall / funnel / paretoLine /
+    // boxWhisker / regionMap / histogram / clusteredColumn layouts.
+    // xlsxjs surfaces the subtype as `chartExSubtype` and lifts categories
+    // + first-series values from the first `<cx:data>` block so consumers
+    // get a round-trippable model, but rendering falls through to the
+    // dashed placeholder — per-subtype SVG renderers are a future wave.
+    const cxChartSpace = doc.getElementsByTagNameNS(NS_CX, 'chartSpace').item(0);
+    if (cxChartSpace) return parseChartEx(cxChartSpace, blank);
 
     const chartSpace = doc.getElementsByTagNameNS(NS_C, 'chartSpace').item(0);
     if (!chartSpace) return blank;
@@ -494,5 +514,158 @@ export function parseChart(xml: string, sharedStrings: SharedString[]): ChartMod
         series,
         legend: parseLegend(chart),
         grouping,
+        chartExSubtype: null,
     };
+}
+
+// chartEx (cx:chartSpace) parser. Surfaces the subtype (`treemap`,
+// `sunburst`, `waterfall`, `funnel`, `paretoLine`, `boxWhisker`,
+// `regionMap`, `histogram`, `clusteredColumn`) plus a best-effort
+// round-trip of the first data block's categories + values so consumers
+// can display a title / summary. The model's `kind` is always 'chartex'
+// — we do NOT fold chartEx subtypes into the classic kind enum because
+// the renderer deliberately falls through to the dashed placeholder
+// (per-subtype SVG renderers are a future wave).
+//
+// The chartEx data layout is fundamentally different from classic:
+//   <cx:chartData>/<cx:data id="0">/
+//       <cx:strDim type="cat"><cx:pt>…</cx:pt></cx:strDim>
+//       <cx:numDim type="val"><cx:pt>…</cx:pt></cx:numDim>
+//   <cx:plotArea>/<cx:plotAreaRegion>/<cx:series layoutId="…">
+//       <cx:tx><cx:txData><cx:v>…</cx:v></cx:txData></cx:tx>
+//       <cx:dataId val="0"/>
+// We read the first <cx:data> block regardless of its `id` — xlsxjs
+// doesn't resolve the series/data `dataId` pointer in this wave.
+function parseChartEx(chartSpace: Element, blank: ChartModel): ChartModel {
+    const chart = firstChild(chartSpace, NS_CX, 'chart');
+    const title = chart ? parseChartExTitle(chart) : null;
+
+    // layoutId lives on the first <cx:series> inside
+    // <cx:plotArea>/<cx:plotAreaRegion>. Fallback: any <cx:series> anywhere.
+    let subtype: string | null = null;
+    let seriesName: string | null = null;
+    if (chart) {
+        const plotArea = firstChild(chart, NS_CX, 'plotArea');
+        const plotRegion = plotArea ? firstChild(plotArea, NS_CX, 'plotAreaRegion') : null;
+        const firstSer = plotRegion ? firstChild(plotRegion, NS_CX, 'series') : null;
+        const ser = firstSer ?? chartSpace.getElementsByTagNameNS(NS_CX, 'series').item(0);
+        if (ser) {
+            const layoutId = ser.getAttribute('layoutId');
+            if (layoutId) subtype = layoutId;
+            seriesName = parseChartExSeriesName(ser);
+        }
+    }
+
+    // Categories + values from the first <cx:data> block. In the ECMA-376
+    // schema <cx:chartData> sits as a child of <cx:chartSpace> (sibling
+    // of <cx:chart>), not inside <cx:chart>. Defensive: also walk inside
+    // <cx:chart> so producers that flatten the hierarchy still round-trip.
+    const categories: string[] = [];
+    const values: (number | null)[] = [];
+    const chartData = firstChild(chartSpace, NS_CX, 'chartData')
+        ?? (chart ? firstChild(chart, NS_CX, 'chartData') : null);
+    const firstData = chartData ? firstChild(chartData, NS_CX, 'data') : null;
+    if (firstData) {
+        for (let i = 0; i < firstData.childNodes.length; i++) {
+            const node = firstData.childNodes[i];
+            if (node.nodeType !== 1) continue;
+            const el = node as Element;
+            if (el.namespaceURI !== NS_CX) continue;
+            if (el.localName === 'strDim') {
+                for (const s of readChartExPts(el)) categories.push(s);
+            } else if (el.localName === 'numDim') {
+                for (const s of readChartExPts(el)) {
+                    if (s === '') { values.push(null); continue; }
+                    const n = Number(s);
+                    values.push(Number.isFinite(n) ? n : null);
+                }
+            }
+        }
+    }
+
+    const series: ChartSeries[] = [];
+    // Surface a single synthetic series when we actually lifted values —
+    // consumers (and scenario 116) expect `series[0].values` to round-trip.
+    if (values.length || seriesName !== null) {
+        series.push({
+            name: seriesName,
+            values,
+            xValues: null,
+            color: null,
+            dataLabels: { show: false, position: null },
+        });
+    }
+
+    return {
+        ...blank,
+        kind: 'chartex',
+        title,
+        categories,
+        series,
+        legend: 'none',
+        chartExSubtype: subtype,
+    };
+}
+
+// Read the <cx:pt> text children of a chartEx dimension block (strDim /
+// numDim). Honours the `idx` attribute; unindexed points fall into doc
+// order. Mirrors readPts() for classic but on the cx: namespace.
+function readChartExPts(parent: Element): string[] {
+    const pts: Element[] = [];
+    for (let i = 0; i < parent.childNodes.length; i++) {
+        const node = parent.childNodes[i];
+        if (node.nodeType !== 1) continue;
+        const el = node as Element;
+        if (el.namespaceURI === NS_CX && el.localName === 'pt') pts.push(el);
+    }
+    if (!pts.length) return [];
+    let maxIdx = -1;
+    const raw: { idx: number; v: string }[] = [];
+    for (const pt of pts) {
+        const idxAttr = pt.getAttribute('idx');
+        const idx = idxAttr !== null ? Number(idxAttr) : raw.length;
+        const text = pt.textContent ?? '';
+        raw.push({ idx: Number.isFinite(idx) ? idx : raw.length, v: text });
+        if (idx > maxIdx) maxIdx = idx;
+    }
+    const out: string[] = [];
+    for (let i = 0; i <= maxIdx; i++) out.push('');
+    for (const r of raw) out[r.idx] = r.v;
+    return out;
+}
+
+// chartEx title: <cx:chart>/<cx:title>/<cx:tx>/<cx:rich>/<a:p>/<a:r>/<a:t>
+// or <cx:tx>/<cx:txData>/<cx:v>. Mirrors the classic title resolver but on
+// the cx: namespace.
+function parseChartExTitle(chart: Element): string | null {
+    const title = firstChild(chart, NS_CX, 'title');
+    if (!title) return null;
+    const tx = firstChild(title, NS_CX, 'tx');
+    if (!tx) return null;
+    const rich = firstChild(tx, NS_CX, 'rich');
+    if (rich) {
+        const text = collectRichText(rich).trim();
+        if (text.length) return text;
+    }
+    const txData = firstChild(tx, NS_CX, 'txData');
+    if (txData) {
+        const v = firstChild(txData, NS_CX, 'v');
+        if (v) {
+            const text = (v.textContent ?? '').trim();
+            if (text.length) return text;
+        }
+    }
+    return null;
+}
+
+// Series name: <cx:series>/<cx:tx>/<cx:txData>/<cx:v>.
+function parseChartExSeriesName(ser: Element): string | null {
+    const tx = firstChild(ser, NS_CX, 'tx');
+    if (!tx) return null;
+    const txData = firstChild(tx, NS_CX, 'txData');
+    if (!txData) return null;
+    const v = firstChild(txData, NS_CX, 'v');
+    if (!v) return null;
+    const text = v.textContent ?? '';
+    return text.length ? text : null;
 }
