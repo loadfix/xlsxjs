@@ -52,6 +52,7 @@ const fixtures = [
     'shape-presets',
     'shapes-and-textboxes',
     'sheet-protection-and-alt',
+    'slicers-pivot',
     'slicers-timelines',
     'smartart',
     'smartart-layouts',

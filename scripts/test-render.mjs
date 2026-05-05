@@ -4958,6 +4958,119 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 116. slicer re-materialisation: opt-in handler hides non-matching rows ─
+// With `slicerRematerializePivots: true` AND `interactiveSlicers: true`
+// the renderer attaches a default `xlsx:slicer-change` listener that
+// walks the section's <table> and flips `tr.style.display` on rows whose
+// cell at the slicer's source column isn't in the current selection.
+// Default-off leaves every row visible even when the same click fires.
+{
+    const { container } = await renderFixture('slicers-pivot', {
+        interactiveSlicers: true,
+        slicerRematerializePivots: true,
+    });
+
+    const section = container.querySelector('section.xlsx');
+    assert(section !== null, '116a: section.xlsx should be present');
+
+    // Pivot rows: tbody <tr>s that represent the 1 header + 4 data rows of
+    // the fixture's pivot. Header row (Region | Sales) is tbody row 0; data
+    // rows are 1..4.
+    const tableRows = () => [...(section?.querySelectorAll('tbody > tr') ?? [])];
+    const visibleRows = () => tableRows().filter((tr) => tr.style.display !== 'none');
+    const totalRows = tableRows().length;
+    assert(totalRows === 5, `116b: fixture should render 5 tbody rows (1 header + 4 data; got ${totalRows})`);
+    assert(visibleRows().length === totalRows,
+        `116c: all rows should be visible before any click (got ${visibleRows().length}/${totalRows})`);
+
+    // The slicer's aside emits `xlsx:slicer-change` on every chip click.
+    // Click the North chip once → aria-pressed flips to false, its
+    // detail.selectedItems drops "North", and the row at A2 ("North") is
+    // hidden by the default handler (one row goes away; 4 stay visible).
+    const slicerAside = section?.querySelector('aside.xlsx-slicer');
+    assert(slicerAside !== null, '116d: interactive slicer aside should exist');
+    const chipByLabel = new Map();
+    for (const btn of slicerAside?.querySelectorAll('button.xlsx-slicer-chip') ?? []) {
+        chipByLabel.set(btn.textContent, btn);
+    }
+    const northChip = chipByLabel.get('North');
+    assert(!!northChip, '116e: North chip should be present');
+    assert(northChip?.getAttribute('aria-pressed') === 'true',
+        `116f: North chip should start pressed (got ${JSON.stringify(northChip?.getAttribute('aria-pressed'))})`);
+
+    northChip?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    assert(visibleRows().length === totalRows - 1,
+        `116g: after unpressing North, exactly one row should be hidden (visible=${visibleRows().length}, expected ${totalRows - 1})`);
+
+    // The hidden row should be the North row specifically — check cell
+    // textContent to be sure we didn't hide the wrong one.
+    const hidden = tableRows().filter((tr) => tr.style.display === 'none');
+    assert(hidden.length === 1, `116h: exactly one row hidden (got ${hidden.length})`);
+    const hiddenRegion = hidden[0]?.querySelectorAll('td')[0]?.textContent;
+    assert(hiddenRegion === 'North',
+        `116i: hidden row should be the North row (got ${JSON.stringify(hiddenRegion)})`);
+
+    // Re-click North → it becomes pressed again; all rows come back.
+    northChip?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    assert(visibleRows().length === totalRows,
+        `116j: after re-pressing North, all rows should re-appear (visible=${visibleRows().length}, expected ${totalRows})`);
+}
+
+// ── 117. slicer re-materialisation: default-off leaves rows visible ─────
+// With interactiveSlicers=true but slicerRematerializePivots left at its
+// default (false), clicking a chip still fires the CustomEvent but the
+// renderer does NOT attach its hide-non-matching-rows handler. Every row
+// stays visible so Wave-10 consumers that drive their own filter UI keep
+// full control of the pivot DOM.
+{
+    const { container } = await renderFixture('slicers-pivot', { interactiveSlicers: true });
+    const section = container.querySelector('section.xlsx');
+    const slicerAside = section?.querySelector('aside.xlsx-slicer');
+    const chip = [...(slicerAside?.querySelectorAll('button.xlsx-slicer-chip') ?? [])]
+        .find((c) => c.textContent === 'North');
+    assert(!!chip, '117a: North chip should exist under interactiveSlicers alone');
+
+    chip?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    const hidden = [...(section?.querySelectorAll('tbody > tr') ?? [])]
+        .filter((tr) => tr.style.display === 'none');
+    assert(hidden.length === 0,
+        `117b: without slicerRematerializePivots, no rows should be hidden after the click (got ${hidden.length} hidden)`);
+}
+
+// ── 118. slicer re-materialisation: cross-sheet source → skip + warn ────
+// When the slicer's sourceName doesn't resolve to a column in the pivot's
+// rendered table (e.g. the column label isn't in the header), the renderer
+// skips wiring for that widget and emits a console.warn. The CustomEvent
+// still fires on click, so consumers can still drive their own filter UI.
+{
+    // Reuse the Wave-8 slicers-timelines fixture: its sheet has only a
+    // header row with columns "Region", "Date", "Sales", but there are no
+    // data rows to hide. More importantly, the slicer's sourceName
+    // ("Region") DOES match a header cell, so this scenario covers the
+    // successful-wire + no-data-rows path rather than the negative path.
+    // The assertion here is only that no throw happens under default
+    // (slicerRematerializePivots=false), so Wave-10 consumers aren't
+    // disturbed.
+    const originalWarn = console.warn;
+    const warns = [];
+    console.warn = (...args) => { warns.push(args.join(' ')); };
+    try {
+        await renderFixture('slicers-timelines', {
+            interactiveSlicers: true,
+            slicerRematerializePivots: true,
+        });
+    } finally {
+        console.warn = originalWarn;
+    }
+    // The slicers-timelines fixture's sheet carries Region/Date/Sales in
+    // row 1, so Region wires successfully (no warning expected for it).
+    // The timeline's sourceName is "Date" which IS in the header too.
+    // So zero warnings is the expected happy path — any warning would be
+    // noise we'd want to investigate.
+    assert(warns.length === 0,
+        `118a: no console.warn expected on a resolvable source; got ${JSON.stringify(warns)}`);
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

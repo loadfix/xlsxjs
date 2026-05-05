@@ -17,6 +17,7 @@ import { evaluateRule, resolveCfvo, interpolateColorScale, type ConditionalForma
 import { renderChart } from './chart-renderer';
 import { renderSmartArtSvg } from './smartart-renderer';
 import { addSharedClass } from './shared-classes';
+import { applySlicerFilter, applyTimelineFilter, findHeaderCell } from './pivot-filter';
 
 // Excel column "width" is in units of the default font's "0" character. For
 // the default Calibri 11pt, one unit ≈ 7 pixels of content plus 5px of cell
@@ -914,11 +915,27 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
     // selection without trying to reproduce the interactive UI. Same
     // security contract as shapes — attacker-controlled strings reach the
     // DOM only via textContent / setAttribute.
+    //
+    // Opt-in re-materialisation (Options.slicerRematerializePivots): when
+    // the consumer opts in AND the slicer's sourceName resolves to a column
+    // in the section's first <table>, we attach a default listener that
+    // hides non-matching rows on every xlsx:slicer-change /
+    // xlsx:timeline-change. Wiring happens after both widgets AND the
+    // section's <table> exist, so we append all of them first then walk.
+    const slicerAsides: { aside: HTMLElement; slicer: SheetSlicer }[] = [];
+    const timelineAsides: { aside: HTMLElement; timeline: SheetTimeline }[] = [];
     for (const slicer of sheet.slicers) {
-        section.appendChild(renderSlicer(slicer, options));
+        const aside = renderSlicer(slicer, options);
+        section.appendChild(aside);
+        slicerAsides.push({ aside, slicer });
     }
     for (const timeline of sheet.timelines) {
-        section.appendChild(renderTimeline(timeline, options));
+        const aside = renderTimeline(timeline, options);
+        section.appendChild(aside);
+        timelineAsides.push({ aside, timeline });
+    }
+    if (options.slicerRematerializePivots && options.interactiveSlicers) {
+        wirePivotRematerialisation(section, slicerAsides, timelineAsides);
     }
 
     // Unanchored embeddings. Anchor-less <oleObject> rels (e.g. producers that
@@ -1772,6 +1789,77 @@ function populateInteractiveTimeline(
     };
     minHandle.addEventListener('input', onInput);
     maxHandle.addEventListener('input', onInput);
+}
+
+// Opt-in pivot re-materialisation. Called once per sheet section AFTER the
+// sheet's <table> + every slicer/timeline aside has been appended to
+// `section`. For every slicer whose `sourceName` resolves to a column in
+// the section's first <table>, attach a default `xlsx:slicer-change` /
+// `xlsx:timeline-change` listener that hides non-matching rows. Slicers
+// whose source column can't be found (cross-sheet pivots, null
+// sourceName, column label not in the pivot header) are skipped with a
+// single console.warn per widget so consumers still get the CustomEvent
+// and can drive their own filter. The model is not touched; the filter
+// only toggles `tr.style.display`.
+function wirePivotRematerialisation(
+    section: HTMLElement,
+    slicers: { aside: HTMLElement; slicer: SheetSlicer }[],
+    timelines: { aside: HTMLElement; timeline: SheetTimeline }[],
+): void {
+    const table = section.querySelector('table');
+    if (!table) return;
+    // Narrow the type for the helper API; querySelector returns Element.
+    const pivot = table as HTMLTableElement;
+
+    for (const { aside, slicer } of slicers) {
+        const sourceName = slicer.sourceName;
+        if (!sourceName) {
+            warnOnce(`xlsxjs: slicer "${slicer.name}" has no sourceName; skipping pivot re-materialisation.`);
+            continue;
+        }
+        const { column, tbodyRowIndex } = findHeaderCell(pivot, sourceName);
+        if (column < 0) {
+            warnOnce(`xlsxjs: slicer "${slicer.name}" sourceName="${sourceName}" did not resolve to a column header in the pivot; skipping re-materialisation.`);
+            continue;
+        }
+        aside.addEventListener('xlsx:slicer-change', (e: Event) => {
+            const detail = (e as CustomEvent).detail ?? {};
+            const items = Array.isArray(detail.selectedItems) ? detail.selectedItems : [];
+            applySlicerFilter(pivot, column, items as string[], tbodyRowIndex);
+        });
+    }
+
+    for (const { aside, timeline } of timelines) {
+        const sourceName = timeline.sourceName;
+        if (!sourceName) {
+            warnOnce(`xlsxjs: timeline "${timeline.name}" has no sourceName; skipping pivot re-materialisation.`);
+            continue;
+        }
+        const { column, tbodyRowIndex } = findHeaderCell(pivot, sourceName);
+        if (column < 0) {
+            warnOnce(`xlsxjs: timeline "${timeline.name}" sourceName="${sourceName}" did not resolve to a column header in the pivot; skipping re-materialisation.`);
+            continue;
+        }
+        aside.addEventListener('xlsx:timeline-change', (e: Event) => {
+            const detail = (e as CustomEvent).detail ?? {};
+            const start = detail.start instanceof Date ? detail.start : null;
+            const end = detail.end instanceof Date ? detail.end : null;
+            if (!start || !end) return;
+            applyTimelineFilter(pivot, column, start, end, tbodyRowIndex);
+        });
+    }
+}
+
+// Lightweight warning de-dup. Node + jsdom both wire console.warn to a
+// real logger, and we don't want a 50-slicer workbook flooding stderr with
+// the same message 50 times. Keep the warned-set module-scoped.
+const WARNED_MESSAGES = new Set<string>();
+function warnOnce(msg: string): void {
+    if (WARNED_MESSAGES.has(msg)) return;
+    WARNED_MESSAGES.add(msg);
+    if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+        console.warn(msg);
+    }
 }
 
 // Build an <aside class="xlsx-embedding"> for one detected embedding. Name,
