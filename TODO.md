@@ -300,22 +300,13 @@ The 950-case OOXML conformance corpus run
 1 rendering gap against the xlsxjs fork at `a188d9e`. Linked to the
 result JSON on GitHub with an actionable fix hypothesis.
 
-- **Cells holding a formula render as empty when there is no cached
-  `<v>`.**
-  [xlsx/sum-formula](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/xlsxjs/xlsx/sum-formula.json)
-  fails `sum-formula-rendered` — the harness accepts any of the
-  numeric result (`6` or `6.0`), the formula text (`=SUM(A1:A3)`), or
-  the bare form (`SUM(A1:A3)`), but finds only empty strings across
-  all 10 `<td>` nodes. Even though the Wave 1 "Cached formula values"
-  entry above marked cached `<v>` as shipped, this fixture ships a
-  `<c><f>SUM(A1:A3)</f></c>` with the cached result omitted — Excel
-  computes the value at open time but xlsxjs renders nothing.
-  Fix: when `Cell.value` is unset but `Cell.formula` is present, fall
-  back to rendering the formula text (`=SUM(A1:A3)`) into the `<td>`
-  behind a new opt-in `Options.showFormulaText` flag (default off to
-  keep the Wave 8 byte-stable snapshot contract). Alternatively wire up
-  a minimal evaluator for SUM/AVERAGE/COUNT/etc. — but that overlaps
-  with the Wave 9 follow-up "Pivot table interactivity" and belongs
-  behind its own flag. For this conformance gap specifically, emitting
-  the formula string as the cell text whenever the cached value is
-  missing is the minimum viable fix.
+### Resolved in overnight wave 1
+
+- ~~**Cells holding a formula render as empty when there is no cached
+  `<v>`.**~~ **RESOLVED** in commit `0b37533`
+  (`fix(formulas): fall back to formula text when cached <v> is empty`).
+  `html-renderer.ts` now falls back to rendering the formula text
+  (`=SUM(A1:A3)`) into the `<td>` when `Cell.value` is unset but
+  `Cell.formula` is present. Only the formulas golden snapshot
+  moved; the other 45 remain byte-stable. Corpus entry:
+  [xlsx/sum-formula](https://github.com/loadfix/ooxml-validate/blob/master/conformance/results/xlsxjs/xlsx/sum-formula.json).
