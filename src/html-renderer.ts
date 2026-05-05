@@ -16,6 +16,7 @@ import { renderShapePreset } from './shape-presets';
 import { evaluateRule, resolveCfvo, interpolateColorScale, type ConditionalFormatting, type CfContext, type CellRange, type CfRule } from './conditional-format';
 import { renderChart } from './chart-renderer';
 import { renderSmartArtSvg } from './smartart-renderer';
+import { addSharedClass } from './shared-classes';
 
 // Excel column "width" is in units of the default font's "0" character. For
 // the default Calibri 11pt, one unit ≈ 7 pixels of content plus 5px of cell
@@ -489,6 +490,9 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
     const theme = workbook.theme;
     const date1904 = workbook.date1904;
     const section = h('section', { class: options.className, 'data-sheet-name': sheet.name }) as HTMLElement;
+    // Cross-format shared class (see shared-classes.ts). An XLSX sheet,
+    // DOCX page, and PPTX slide all carry `.oox-page`.
+    addSharedClass(section, "page");
     applySheetView(section, sheet.view, theme);
     // Sheet-protection state surfaces as a data attribute so consumers can
     // style protected sheets (e.g. a subtle banner) via CSS. xlsxjs does not
@@ -508,6 +512,8 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
     section.appendChild(h('div', { class: 'xlsx-sheet-name' }, [sheet.name]));
 
     const table = h('table') as HTMLTableElement;
+    // Cross-format shared class (see shared-classes.ts).
+    addSharedClass(table, "table");
 
     if (sheet.maxCol < 0) {
         section.appendChild(table);
@@ -548,9 +554,15 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
 
     const thead = document.createElement('thead');
     const headRow = document.createElement('tr');
-    headRow.appendChild(h('th'));
+    // Cross-format shared class (see shared-classes.ts).
+    addSharedClass(headRow, "table-row");
+    const gutterTh = h('th');
+    addSharedClass(gutterTh, "table-cell");
+    headRow.appendChild(gutterTh);
     for (let c = 0; c < colCount; c++) {
         const th = h('th', null, [indexToColumnLetters(c)]);
+        // Cross-format shared class (see shared-classes.ts).
+        addSharedClass(th, "table-cell");
         if (hiddenCols.has(c)) th.style.display = 'none';
         const lvl = outlineByCol.get(c);
         if (lvl) {
@@ -627,6 +639,8 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
     const rowCount = sheet.maxRow + 1;
     for (let r = 0; r < rowCount; r++) {
         const tr = document.createElement('tr');
+        // Cross-format shared class (see shared-classes.ts).
+        addSharedClass(tr, "table-row");
         const dim = rowDim.get(r);
         if (dim?.hidden) tr.style.display = 'none';
         // Excel's row height is in points. One point = 4/3 px at 96 DPI.
@@ -635,7 +649,9 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
             tr.setAttribute('data-outline-level', String(dim.outlineLevel));
             tr.classList.add(`xlsx-outline-${Math.min(dim.outlineLevel, 7)}`);
         }
-        tr.appendChild(h('th', null, [String(r + 1)]));
+        const rowGutterTh = h('th', null, [String(r + 1)]);
+        addSharedClass(rowGutterTh, "table-cell");
+        tr.appendChild(rowGutterTh);
         const cells = sheet.rows[r];
         const byCol: Record<number, typeof cells[0]> = {};
         if (cells) for (const cell of cells) byCol[cell.col] = cell;
@@ -643,6 +659,8 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
             if (suppressedCells.has(`${r},${c}`)) continue;
             const cell = byCol[c];
             const td = document.createElement('td');
+            // Cross-format shared class (see shared-classes.ts).
+            addSharedClass(td, "table-cell");
             if (cell) renderCellContent(td, cell, styles, theme, date1904, options);
             // Dynamic-array spill anchors get a subtle dashed outline. The
             // flag is resolved at parse time from xl/metadata.xml + c/@cm.
@@ -903,6 +921,8 @@ function renderImage(
 ): HTMLElement {
     const fig = document.createElement('figure');
     fig.className = 'xlsx-image';
+    // Cross-format shared class (see shared-classes.ts).
+    addSharedClass(fig, "image");
     fig.setAttribute('data-anchor-mode', img.anchorMode);
     fig.setAttribute('data-anchor-col', String(img.col));
     fig.setAttribute('data-anchor-row', String(img.row));
