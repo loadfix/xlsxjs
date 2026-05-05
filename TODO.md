@@ -7,30 +7,16 @@ chart radar / doughnut / data labels, OLE CFB reader).
 
 ## Audit findings 2026-05-05
 
-Project audit completed 2026-05-05. Ordered roughly by blast radius —
-(1) is ship-blocking for the next publish; (2)-(5) are near-term cleanup;
-(6)-(10) are scoping / housekeeping.
+Project audit completed 2026-05-05. Items 1, 3, 4, 5, 10 were closed in
+Wave 12 (see "Resolved in Wave 12" below). The remaining items below
+stay open for future waves — (2) is the headline conformance miss;
+(6)-(9) are scoping / housekeeping.
 
-1. **CRITICAL: Fix `dist/` vs `package.json` mismatch before next publish** —
-   `package.json` advertises `xlsx-preview.mjs` + `xlsx-preview.d.ts` in
-   its `exports` map and declares `"types": "dist/xlsx-preview.d.ts"`, but
-   only `xlsx-preview.js` (UMD) + `.js.map` exist in `dist/`. TypeScript or
-   ESM consumers installing `xlsx-preview@0.0.2` will get a missing-file
-   error on day one. Either extend rollup to build those artifacts or
-   strip the exports-map entries + `"types"`.
 2. **Fix 10-case cell-alignment conformance cluster** — currently 191/201
    pass (95%). All 10 failures are in a single cluster:
    `cell-alignment-{horizontal,vertical}-{variant}`. Single root cause
    likely in alignment-XF → CSS mapping. Closing this → 100% conformance
    for covered fixtures.
-3. **Replace placeholder repository URL** — `package.json` `repository`
-   field still points at `git+https://github.com/example/xlsxjs.git`. Set
-   to `loadfix/xlsxjs`.
-4. **Add CHANGELOG.md** — release notes currently live inline in README
-   under `## Release notes`. They'll get pushed off-page as more versions
-   ship. Move to a proper `CHANGELOG.md`.
-5. **Bound `jszip` version** — currently `jszip >=3.0.0` (unbounded
-   upper). Bound to `^3`.
 6. **Scope and gate the next formula-evaluator wave** — currently 10/500
    Excel functions (2%). POC status honest in README/TODO but it's now
    in user hands. Either pick highest-ROI next batch (IFERROR / ROUND /
@@ -46,8 +32,26 @@ Project audit completed 2026-05-05. Ordered roughly by blast radius —
    concern.
 9. **Audit 10 auto-filed conformance-gap entries from 2026-05-04
    overnight run** — sit at tail of TODO.md; may already be resolved.
-10. **Git-tag 0.0.1 and 0.0.2** — verify both have tags; if not, add
-    them.
+
+### Resolved in Wave 12
+
+Wave 12 (2026-05-05) — single packaging-only commit, zero `src/` churn.
+
+- ✅ **Audit #1** — `rollup.config.mjs` now emits `dist/xlsx-preview.mjs`,
+  `dist/xlsx-preview.min.js`, `dist/xlsx-preview.min.mjs`, and
+  `dist/xlsx-preview.d.ts` (+ per-module `.d.ts`) under `build-prod`,
+  so every file referenced by `package.json`'s `exports` / `types`
+  actually ships.
+- ✅ **Audit #3** — `package.json` `repository.url` pointed at
+  `github.com/example/xlsxjs.git`, now `github.com/loadfix/xlsxjs.git`.
+- ✅ **Audit #4** — release notes moved out of `README.md` into
+  `CHANGELOG.md` (Keep-A-Changelog format, one `## [x.y.z] - YYYY-MM-DD`
+  section per shipped version).
+- ✅ **Audit #5** — `jszip` dependency tightened from `>=3.0.0` to
+  `^3.0.0` so a future 4.x can't land without review.
+- ✅ **Audit #10** — `v0.0.1` and `v0.0.2` tags created locally on the
+  relevant commits (initial import + the 0.0.1 → 0.0.2 bump). Push
+  left to the release flow.
 
 ## Open — medium items (one slice each)
 
