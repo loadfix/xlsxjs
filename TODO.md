@@ -5,6 +5,50 @@ features that have shipped on `master` and live in the harness / fixtures.
 Last reconciled 2026-05-04 after Wave 11 (SmartArt orgchart + cycle,
 chart radar / doughnut / data labels, OLE CFB reader).
 
+## Audit findings 2026-05-05
+
+Project audit completed 2026-05-05. Ordered roughly by blast radius —
+(1) is ship-blocking for the next publish; (2)-(5) are near-term cleanup;
+(6)-(10) are scoping / housekeeping.
+
+1. **CRITICAL: Fix `dist/` vs `package.json` mismatch before next publish** —
+   `package.json` advertises `xlsx-preview.mjs` + `xlsx-preview.d.ts` in
+   its `exports` map and declares `"types": "dist/xlsx-preview.d.ts"`, but
+   only `xlsx-preview.js` (UMD) + `.js.map` exist in `dist/`. TypeScript or
+   ESM consumers installing `xlsx-preview@0.0.2` will get a missing-file
+   error on day one. Either extend rollup to build those artifacts or
+   strip the exports-map entries + `"types"`.
+2. **Fix 10-case cell-alignment conformance cluster** — currently 191/201
+   pass (95%). All 10 failures are in a single cluster:
+   `cell-alignment-{horizontal,vertical}-{variant}`. Single root cause
+   likely in alignment-XF → CSS mapping. Closing this → 100% conformance
+   for covered fixtures.
+3. **Replace placeholder repository URL** — `package.json` `repository`
+   field still points at `git+https://github.com/example/xlsxjs.git`. Set
+   to `loadfix/xlsxjs`.
+4. **Add CHANGELOG.md** — release notes currently live inline in README
+   under `## Release notes`. They'll get pushed off-page as more versions
+   ship. Move to a proper `CHANGELOG.md`.
+5. **Bound `jszip` version** — currently `jszip >=3.0.0` (unbounded
+   upper). Bound to `^3`.
+6. **Scope and gate the next formula-evaluator wave** — currently 10/500
+   Excel functions (2%). POC status honest in README/TODO but it's now
+   in user hands. Either pick highest-ROI next batch (IFERROR / ROUND /
+   VLOOKUP / INDEX / MATCH / LEFT / RIGHT / CONCATENATE / SUMIF /
+   COUNTIF) AND route output through `number-format.ts` (so `0.1+0.2`
+   doesn't render as `0.30000000000000004`), or downgrade
+   `evaluateFormulas` messaging to signal ongoing API shift.
+7. **Close 0 open GitHub issues** — `gh issue list` returns empty;
+   nothing to close but worth noting as a clean state.
+8. **Fix 67-manifests-covers-only-17%-of-386-corpus-fixtures gap** — not
+   a xlsxjs bug; corpus-authoring debt that means headline 95%
+   conformance reflects a narrow slice. Flag as joint corpus/renderer
+   concern.
+9. **Audit 10 auto-filed conformance-gap entries from 2026-05-04
+   overnight run** — sit at tail of TODO.md; may already be resolved.
+10. **Git-tag 0.0.1 and 0.0.2** — verify both have tags; if not, add
+    them.
+
 ## Open — medium items (one slice each)
 
 _Empty — all medium slices shipped in Wave 7._
