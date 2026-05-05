@@ -2046,12 +2046,15 @@ function parseDrawing(
                     if (chartXml) chartType = peekChartType(chartXml, kind);
                 }
             }
-            // Only classic chartSpace parses into a ChartModel here. chartEx
-            // and malformed XML leave model=null so the renderer falls
-            // through to the dashed placeholder. Defensive: any parse error
-            // also leaves model=null rather than aborting the sheet.
+            // Parse both classic and chartEx chart parts into a ChartModel.
+            // Classic chartSpace produces a kind of 'bar' / 'column' / …;
+            // chartEx produces kind 'chartex' with a chartExSubtype tag. The
+            // renderer projects classic models to inline SVG, and routes
+            // chartEx models through the dashed placeholder (per-subtype
+            // renderers are a future wave). Defensive: any parse error
+            // leaves model=null rather than aborting the sheet.
             let model: ChartModel | null = null;
-            if (kind === 'classic' && chartXml) {
+            if (chartXml) {
                 try {
                     const parsed = parseChartModel(chartXml, sharedStrings);
                     if (parsed.kind !== 'unknown') model = parsed;

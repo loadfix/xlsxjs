@@ -888,6 +888,14 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
             ph.className = 'xlsx-chart-placeholder';
             ph.setAttribute('data-chart-kind', chart.kind);
             if (chart.chartType) ph.setAttribute('data-chart-type', chart.chartType);
+            // chartEx placeholders carry the plot + subtype attributes so
+            // consumers can style / swap the placeholder per subtype
+            // (treemap / sunburst / waterfall / …) without re-parsing. The
+            // subtype originates from `<cx:series layoutId="…">`.
+            if (chart.model?.kind) ph.setAttribute('data-chart-plot', chart.model.kind);
+            if (chart.model?.kind === 'chartex' && chart.model.chartExSubtype) {
+                ph.setAttribute('data-chartex-type', chart.model.chartExSubtype);
+            }
             ph.setAttribute('data-anchor-col', String(chart.col));
             ph.setAttribute('data-anchor-row', String(chart.row));
             if (chart.endCol !== null) ph.setAttribute('data-anchor-end-col', String(chart.endCol));

@@ -1095,6 +1095,11 @@ function sanitiseForAttr(s: string): string {
 
 export function renderChart(model: ChartModel, width: number = 480, height: number = 300): SVGSVGElement | null {
     if (model.kind === 'unknown') return null;
+    // chartEx charts fall through to the placeholder path in this wave —
+    // per-subtype SVG renderers (treemap / sunburst / waterfall / …) are
+    // a future slice. Returning null signals the caller to emit a
+    // `.xlsx-chart-placeholder` carrying the subtype via data-chartex-type.
+    if (model.kind === 'chartex') return null;
     const svg = makeSvg(width, height);
     const hasLegend = model.legend !== 'none' && model.series.some((s) => s.name);
     const legendPos = model.legend;
