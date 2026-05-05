@@ -62,6 +62,61 @@ interface Manifest {
     kind?: 'literal' | 'parameterised';
 }
 
+// Per-value CSS regex used by the cell-alignment-{horizontal,vertical}
+// manifests. The upstream corpus manifests reference {align.css_re} in
+// their render_assertions_template but forgot to declare `css_re` on
+// each parameter record; without the backfill below the placeholder
+// leaks through as a literal string and every assertion fails (the
+// rendered text-align / vertical-align computed value is correct but
+// can never match the un-substituted regex).
+//
+// The mappings come from the manifest's own prose:
+//   cell-alignment-horizontal: "'left'/'center'/'right'/'justify' map
+//     to the same CSS names (with 'left' also accepting 'start' and
+//     'right' accepting 'end' per CSS logical properties). 'general'
+//     and 'fill' have no canonical CSS parallel and accept anything;
+//     the check still requires the selector to hit."
+//   cell-alignment-vertical: "'top'/'bottom' map to the same CSS
+//     names; ST_VerticalAlignment 'center' maps to CSS 'middle'
+//     (either literal is accepted); 'justify' has no canonical CSS
+//     parallel and accepts anything."
+const ALIGNMENT_CSS_RE: Record<string, Record<string, string>> = {
+    'xlsx/cell-alignment-horizontal': {
+        general:  '.*',
+        left:     '^(left|start)$',
+        center:   '^center$',
+        right:    '^(right|end)$',
+        fill:     '.*',
+        justify:  '^justify$',
+    },
+    'xlsx/cell-alignment-vertical': {
+        top:      '^top$',
+        center:   '^(center|middle)$',
+        bottom:   '^bottom$',
+        justify:  '.*',
+    },
+};
+
+function backfillAlignmentCssRe(manifest: RawManifest): RawManifest {
+    // The two alignment manifests declare `parameters.align[*]` with
+    // only `id` + `val`; their render_assertions_template references
+    // {align.css_re} which otherwise substitutes to a literal. We
+    // preserve the original manifest shape and attach css_re to each
+    // align record so `expandManifest` can resolve it normally.
+    const id = String(manifest.id ?? '');
+    const table = ALIGNMENT_CSS_RE[id];
+    if (!table) return manifest;
+    const params = manifest.parameters;
+    if (!params || !Array.isArray(params.align)) return manifest;
+    const patched: RawManifest = JSON.parse(JSON.stringify(manifest));
+    const alignRecords = patched.parameters!.align as Array<Record<string, unknown>>;
+    for (const record of alignRecords) {
+        const key = String(record.id ?? '');
+        if (!record.css_re && table[key]) record.css_re = table[key];
+    }
+    return patched;
+}
+
 function loadManifests(): { manifest: Manifest; path: string }[] {
     // Expand every manifest file through expandManifest() before
     // filtering. Parameterised manifests (kind=parameterised) yield N
@@ -78,7 +133,8 @@ function loadManifests(): { manifest: Manifest; path: string }[] {
         const raw = readFileSync(p, 'utf8');
         const m = JSON.parse(raw) as RawManifest;
         if (m.format !== 'xlsx') continue;
-        const cases = expandManifest(m) as unknown as Manifest[];
+        const patched = backfillAlignmentCssRe(m);
+        const cases = expandManifest(patched) as unknown as Manifest[];
         for (const c of cases) {
             if (!c.render_assertions || c.render_assertions.length === 0) continue;
             out.push({ manifest: c, path: p });

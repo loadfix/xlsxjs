@@ -4558,6 +4558,160 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 111. Alignment enum coverage: every horizontal + vertical ST_*Alignment
+//        value renders to the expected CSS, exercised via an inline fixture
+//        we build here (so the regression is policed even if the corpus
+//        symlink isn't present). This closes audit item 2 (the 10-case
+//        cell-alignment conformance cluster) at the unit-test level.
+{
+    // Build a tiny workbook with one row per alignment enum value; each cell's
+    // cellXf carries the alignment attribute we want to exercise. Ordering:
+    //   col A: horizontal (general, left, center, right, fill, justify,
+    //                       distributed, centerContinuous)
+    //   col B: vertical (top, center, bottom, justify, distributed)
+    // Two separate rows; column A's row count drives sheet height.
+    const H = ['general', 'left', 'center', 'right', 'fill', 'justify', 'distributed', 'centerContinuous'];
+    const V = ['top', 'center', 'bottom', 'justify', 'distributed'];
+
+    // Synthesise a minimal xlsx in-memory. The style index layout:
+    //   0:  default, no alignment.
+    //   1..H.length:         horizontal[i-1]
+    //   H.length+1..+V.length: vertical[i-H.length-1]
+    const cellXfs = [
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>',
+        ...H.map((h) => `<xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment horizontal="${h}"/></xf>`),
+        ...V.map((v) => `<xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment vertical="${v}"/></xf>`),
+    ];
+    const stylesXml = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
+        '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>',
+        '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>',
+        '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>',
+        `<cellXfs count="${cellXfs.length}">${cellXfs.join('')}</cellXfs>`,
+        '</styleSheet>',
+    ].join('');
+
+    // Sheet layout: one row per enum with a label-ish value; s= points at the
+    // cellXf we want to exercise. The cell value itself is the enum name so
+    // that downstream assertions can find the right td by text.
+    const rowsXml = [];
+    H.forEach((h, i) => {
+        rowsXml.push(`<row r="${i + 1}"><c r="A${i + 1}" t="inlineStr" s="${i + 1}"><is><t>h:${h}</t></is></c></row>`);
+    });
+    V.forEach((v, i) => {
+        const rowIdx = H.length + i + 1;
+        const styleIdx = H.length + 1 + i;
+        rowsXml.push(`<row r="${rowIdx}"><c r="A${rowIdx}" t="inlineStr" s="${styleIdx}"><is><t>v:${v}</t></is></c></row>`);
+    });
+    const sheetXml = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
+        `<sheetData>${rowsXml.join('')}</sheetData>`,
+        '</worksheet>',
+    ].join('');
+
+    const workbookXml = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
+        '<sheets><sheet name="Align" sheetId="1" r:id="rId1"/></sheets>',
+        '</workbook>',
+    ].join('');
+
+    const workbookRelsXml = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>',
+        '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>',
+        '</Relationships>',
+    ].join('');
+
+    const rootRelsXml = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>',
+        '</Relationships>',
+    ].join('');
+
+    const contentTypesXml = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+        '<Default Extension="xml" ContentType="application/xml"/>',
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
+        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>',
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>',
+        '</Types>',
+    ].join('');
+
+    const zip = new globalThis.JSZip();
+    zip.file('[Content_Types].xml', contentTypesXml);
+    zip.file('_rels/.rels', rootRelsXml);
+    zip.file('xl/workbook.xml', workbookXml);
+    zip.file('xl/_rels/workbook.xml.rels', workbookRelsXml);
+    zip.file('xl/worksheets/sheet1.xml', sheetXml);
+    zip.file('xl/styles.xml', stylesXml);
+    const xlsxBuf = await zip.generateAsync({ type: 'uint8array' });
+
+    const wb = await parseAsync(xlsxBuf);
+    const nodes = await renderWorkbook(wb);
+    const container = document.createElement('div');
+    for (const n of nodes) container.appendChild(n);
+    // Attach to the jsdom document so computed styles resolve (jsdom requires
+    // the element to be in the document tree for getComputedStyle to return
+    // authored inline styles).
+    document.body.appendChild(container);
+
+    // 111a: the sheet has 8 + 5 = 13 data rows.
+    const rows = container.querySelectorAll('section.xlsx tbody tr');
+    assert(rows.length === H.length + V.length,
+        `111a: expected ${H.length + V.length} rows (got ${rows.length})`);
+
+    // 111b..111i: every horizontal enum maps to the right text-align.
+    const expectedH = {
+        // general + fill have no CSS analogue; leave unconstrained but the
+        // renderer should still only emit values the browser accepts.
+        general:          null,
+        left:             'left',
+        center:           'center',
+        right:            'right',
+        fill:             'start',
+        justify:          'justify',
+        distributed:      'justify',       // approximated via justify + textAlignLast
+        centerContinuous: 'center',
+    };
+    for (const [i, h] of H.entries()) {
+        const td = rows[i].querySelector('td');
+        assert(td && td.textContent === `h:${h}`,
+            `111-h-${h}-cell: expected td text "h:${h}"`);
+        const got = td?.style.textAlign ?? '';
+        if (expectedH[h] != null) {
+            assert(got === expectedH[h],
+                `111-h-${h}: expected text-align:${expectedH[h]} (got "${got}")`);
+        }
+    }
+
+    // 111j..111n: every vertical enum maps to the right vertical-align.
+    const expectedV = {
+        top:         'top',
+        center:      'middle',    // ST_VerticalAlignment 'center' → CSS 'middle'
+        bottom:      'bottom',
+        justify:     'middle',    // approximation
+        distributed: 'middle',    // approximation
+    };
+    for (const [i, v] of V.entries()) {
+        const td = rows[H.length + i].querySelector('td');
+        assert(td && td.textContent === `v:${v}`,
+            `111-v-${v}-cell: expected td text "v:${v}"`);
+        const got = td?.style.verticalAlign ?? '';
+        assert(got === expectedV[v],
+            `111-v-${v}: expected vertical-align:${expectedV[v]} (got "${got}")`);
+    }
+
+    note(`111·: alignment enums exercised — ${H.length} horizontal + ${V.length} vertical values`);
+    container.remove();
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

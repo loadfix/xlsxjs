@@ -2390,12 +2390,14 @@ function applyAlignment(td: HTMLTableCellElement, xf: CellXf): void {
         }
     }
 
-    // Vertical: middle / top / bottom map directly; justify + distributed
-    // don't exist as CSS vertical-align values, so we approximate as
-    // middle (the typical Excel use case is header rows where content is
-    // short and the distributed look is indistinguishable from middle).
+    // Vertical: ST_VerticalAlignment 'center' maps to CSS 'middle' (the
+    // CSS spelling of the same concept). top / bottom map directly.
+    // justify + distributed don't exist as CSS vertical-align values, so
+    // we approximate as middle (the typical Excel use case is header rows
+    // where content is short and the distributed look is indistinguishable
+    // from middle).
     if (a.vertical) {
-        if (a.vertical === 'middle' || a.vertical === 'justify' || a.vertical === 'distributed') {
+        if (a.vertical === 'center' || a.vertical === 'justify' || a.vertical === 'distributed') {
             td.style.verticalAlign = 'middle';
         } else {
             td.style.verticalAlign = a.vertical;
