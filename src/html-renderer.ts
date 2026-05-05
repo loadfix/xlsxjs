@@ -1908,7 +1908,13 @@ function renderCellContent(td: HTMLTableCellElement, cell: Cell, styles: Styles 
     // showFormulas: render the formula text instead of the cached value.
     // Formula text is always displayed as a string (no numeric alignment),
     // and rich-text runs are bypassed so the formula doesn't get mis-formatted.
-    if (options.showFormulas && cell.formula != null) {
+    //
+    // Fallback behaviour: when a formula cell has NO cached value (writers
+    // that don't evaluate formulas — python-xlsx emits `<f>…</f><v/>`), show
+    // the formula text so the cell isn't blank. Excel re-computes on open,
+    // but static HTML consumers can't; a blank cell for `=SUM(…)` is surprising.
+    const emptyFormula = cell.formula != null && (cell.value === '' || cell.value == null);
+    if ((options.showFormulas && cell.formula != null) || emptyFormula) {
         const a1 = `=${cell.formula}`;
         text = options.formulaNotation === 'r1c1' ? a1ToR1c1(a1, cell.row, cell.col) : a1;
         td.textContent = text;

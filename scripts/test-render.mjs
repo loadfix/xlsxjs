@@ -241,9 +241,12 @@ async function renderFixture(path, options) {
     assert(tdAt(1, 0).textContent === '60', `8k: A2 should render as "60" (got ${tdAt(1, 0).textContent})`);
     assert(tdAt(1, 0).classList.contains('xlsx-numeric'), '8l: A2 cached number should be right-aligned');
 
-    // A3 renders empty.
-    assert(tdAt(2, 0).textContent === '', `8m: A3 should render empty (got ${JSON.stringify(tdAt(2, 0).textContent)})`);
-    assert(!tdAt(2, 0).classList.contains('xlsx-numeric'), '8n: A3 has no value → no numeric class');
+    // A3 has a formula but no cached <v>. Falls back to rendering the
+    // formula text so the cell isn't blank (writers that don't evaluate
+    // formulas — python-xlsx, Excel-saved-after-invalidation — emit
+    // `<f>…</f><v/>`; Excel re-computes on open, static consumers can't).
+    assert(tdAt(2, 0).textContent === '=A1+A2', `8m: A3 should fall back to the formula text (got ${JSON.stringify(tdAt(2, 0).textContent)})`);
+    assert(tdAt(2, 0).classList.contains('xlsx-formula'), '8n: A3 fallback should carry .xlsx-formula');
 
     // A4 is a t="str" cached string, not numeric.
     assert(tdAt(3, 0).textContent === '10 rows', `8o: A4 should render as "10 rows" (got ${tdAt(3, 0).textContent})`);
