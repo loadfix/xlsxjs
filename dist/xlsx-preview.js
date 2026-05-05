@@ -7210,13 +7210,19 @@
         if (sheet.pageBreaks.cols.length > 0) {
             section.setAttribute('data-page-break-cols', sheet.pageBreaks.cols.join(','));
         }
-        section.appendChild(h('div', { class: 'xlsx-sheet-name' }, [sheet.name]));
+        const sheetNameId = `xlsx-sheet-name-${sheet.name.replace(/\W+/g, '-').replace(/^-+|-+$/g, '') || 'unnamed'}`;
+        section.appendChild(h('div', { class: 'xlsx-sheet-name', id: sheetNameId }, [sheet.name]));
         const table = h('table');
+        table.setAttribute('role', 'table');
+        table.setAttribute('aria-labelledby', sheetNameId);
         if (sheet.maxCol < 0) {
             section.appendChild(table);
             return section;
         }
         const colCount = sheet.maxCol + 1;
+        const rowCount = sheet.maxRow + 1;
+        table.setAttribute('aria-colcount', String(colCount + 1));
+        table.setAttribute('aria-rowcount', String(rowCount + 1));
         const colgroup = document.createElement('colgroup');
         colgroup.appendChild(document.createElement('col'));
         const widthByCol = new Map();
@@ -7249,9 +7255,12 @@
         table.appendChild(colgroup);
         const thead = document.createElement('thead');
         const headRow = document.createElement('tr');
-        headRow.appendChild(h('th'));
+        const corner = h('th');
+        corner.setAttribute('aria-hidden', 'true');
+        headRow.appendChild(corner);
         for (let c = 0; c < colCount; c++) {
             const th = h('th', null, [indexToColumnLetters(c)]);
+            th.setAttribute('scope', 'col');
             if (hiddenCols.has(c))
                 th.style.display = 'none';
             const lvl = outlineByCol.get(c);
@@ -7307,7 +7316,6 @@
             }
         }
         const tbody = document.createElement('tbody');
-        const rowCount = sheet.maxRow + 1;
         for (let r = 0; r < rowCount; r++) {
             const tr = document.createElement('tr');
             const dim = rowDim.get(r);
@@ -7319,7 +7327,9 @@
                 tr.setAttribute('data-outline-level', String(dim.outlineLevel));
                 tr.classList.add(`xlsx-outline-${Math.min(dim.outlineLevel, 7)}`);
             }
-            tr.appendChild(h('th', null, [String(r + 1)]));
+            const rowHeader = h('th', null, [String(r + 1)]);
+            rowHeader.setAttribute('scope', 'row');
+            tr.appendChild(rowHeader);
             const cells = sheet.rows[r];
             const byCol = {};
             if (cells)

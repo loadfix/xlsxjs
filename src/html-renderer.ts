@@ -505,9 +505,22 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
     if (sheet.pageBreaks.cols.length > 0) {
         section.setAttribute('data-page-break-cols', sheet.pageBreaks.cols.join(','));
     }
-    section.appendChild(h('div', { class: 'xlsx-sheet-name' }, [sheet.name]));
+    // Accessibility: the sheet name doubles as the table's accessible
+    // name. Using aria-labelledby lets screen readers announce the sheet
+    // name when the table gains focus, matching Excel's own behaviour
+    // ("Sheet1, table"). The id is sheet-name-derived but sanitized
+    // (sheet names can carry spaces/quotes/unicode which are invalid in
+    // HTML ids under older specs); non-word chars collapse to `-`.
+    const sheetNameId = `xlsx-sheet-name-${sheet.name.replace(/\W+/g, '-').replace(/^-+|-+$/g, '') || 'unnamed'}`;
+    section.appendChild(h('div', { class: 'xlsx-sheet-name', id: sheetNameId }, [sheet.name]));
 
     const table = h('table') as HTMLTableElement;
+    // Accessibility: explicit ARIA role so assistive tech treats this as
+    // tabular data even in renderers that apply display:block to <table>
+    // (common with frozen-pane workarounds). aria-labelledby points at
+    // the sheet-name banner above.
+    table.setAttribute('role', 'table');
+    table.setAttribute('aria-labelledby', sheetNameId);
 
     if (sheet.maxCol < 0) {
         section.appendChild(table);
@@ -515,6 +528,16 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
     }
 
     const colCount = sheet.maxCol + 1;
+    const rowCount = sheet.maxRow + 1;
+
+    // aria-rowcount / aria-colcount let screen readers announce "row N
+    // of M" as the user navigates, even in virtualised / frozen-pane
+    // layouts where the full row count isn't reachable via DOM children
+    // alone. +1 on colcount accounts for the row-number gutter column
+    // xlsxjs prepends; +1 on rowcount accounts for the column-letter
+    // header row.
+    table.setAttribute('aria-colcount', String(colCount + 1));
+    table.setAttribute('aria-rowcount', String(rowCount + 1));
 
     // <colgroup> — one <col> for the row-number gutter, then one per data
     // column. Widths from <cols>/<col> are applied directly in pixels so the
@@ -548,9 +571,17 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
 
     const thead = document.createElement('thead');
     const headRow = document.createElement('tr');
-    headRow.appendChild(h('th'));
+    // The corner cell (top-left, empty) is decorative — the row-number
+    // and column-letter gutters intersect here. Marking it aria-hidden
+    // keeps screen readers from announcing an empty header cell.
+    const corner = h('th') as HTMLTableCellElement;
+    corner.setAttribute('aria-hidden', 'true');
+    headRow.appendChild(corner);
     for (let c = 0; c < colCount; c++) {
-        const th = h('th', null, [indexToColumnLetters(c)]);
+        const th = h('th', null, [indexToColumnLetters(c)]) as HTMLTableCellElement;
+        // scope="col" lets screen readers associate each data cell with
+        // its column-letter header (A, B, C, ...) during navigation.
+        th.setAttribute('scope', 'col');
         if (hiddenCols.has(c)) th.style.display = 'none';
         const lvl = outlineByCol.get(c);
         if (lvl) {
@@ -624,7 +655,6 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
     }
 
     const tbody = document.createElement('tbody');
-    const rowCount = sheet.maxRow + 1;
     for (let r = 0; r < rowCount; r++) {
         const tr = document.createElement('tr');
         const dim = rowDim.get(r);
@@ -635,7 +665,12 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
             tr.setAttribute('data-outline-level', String(dim.outlineLevel));
             tr.classList.add(`xlsx-outline-${Math.min(dim.outlineLevel, 7)}`);
         }
-        tr.appendChild(h('th', null, [String(r + 1)]));
+        // scope="row" lets screen readers associate each data cell in
+        // this row with the row-number gutter header so the user hears
+        // "row 3" as they navigate across.
+        const rowHeader = h('th', null, [String(r + 1)]) as HTMLTableCellElement;
+        rowHeader.setAttribute('scope', 'row');
+        tr.appendChild(rowHeader);
         const cells = sheet.rows[r];
         const byCol: Record<number, typeof cells[0]> = {};
         if (cells) for (const cell of cells) byCol[cell.col] = cell;
