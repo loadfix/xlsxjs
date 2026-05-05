@@ -1,5 +1,5 @@
-// Minimal formula evaluator. POC — covers 10 Excel functions + arithmetic
-// + cell-range resolution. Opt-in via Options.evaluateFormulas.
+// Formula evaluator v2. Recursive-descent parser + tree-walk evaluator with
+// a first-class Excel error taxonomy. Opt-in via Options.evaluateFormulas.
 //
 // Design:
 //   · Lexer splits the formula body (without leading `=`) into tokens.
@@ -10,16 +10,20 @@
 //   · Evaluator resolves cell refs against a CellResolver that the caller
 //     populates from the parsed Sheet.
 //
+// Error taxonomy (Wave-12 upgrade): errors are tagged with an Excel error
+// code so the renderer can surface the matching `#DIV/0!`, `#VALUE!`,
+// `#REF!`, `#NAME?`, `#NUM!`, `#N/A`, `#NULL!` sentinel rather than a
+// generic `#ERROR!`. Errors propagate through arithmetic (any op on an
+// error returns that same error) and IFERROR / IFNA catch them.
+//
 // Deliberate limitations (documented in TODO.md):
 //   · A1 / absolute ($A$1) only — no sheet-qualified refs (Sheet2!A1),
 //     no structured references ([Table1[col]]), no named ranges.
 //   · No array formulas, no spill semantics — a cell range always reduces
 //     to a flat list of cells.
-//   · Only 10 functions (SUM, AVERAGE, MIN, MAX, COUNT, COUNTA, IF, AND,
-//     OR, NOT) plus arithmetic + comparison + basic string equality.
-//   · Errors surface as the string "#ERROR!" — no #DIV/0!, #VALUE!,
-//     #REF!, #NAME? differentiation.
-//   · Circular refs abort with #ERROR! after a 1024-hop depth cap.
+//   · Function coverage is still a subset; VLOOKUP supports exact-match
+//     only (approximate-match requests surface as #VALUE! with a comment).
+//   · Circular refs abort after a 1024-hop depth cap.
 
 import { parseCellRef, columnLettersToIndex } from './utils';
 
@@ -40,10 +44,46 @@ export interface CellResolver {
     (col: number, row: number): FormulaValue;
 }
 
-// Error sentinel. Any function / op that needs to signal an error returns
-// this same token; the top-level evaluator converts it to a display string.
+// Excel error codes. Every error the evaluator surfaces carries one of
+// these. Back-compat: the top-level evaluateFormula() collapses them to
+// the bare `#<CODE>!` / `#<CODE>?` strings that Excel actually prints.
+export type ErrorCode = '#DIV/0!' | '#VALUE!' | '#REF!' | '#NAME?' | '#NUM!' | '#N/A' | '#NULL!';
+
+// Internal error carrier. Tagged so the evaluator can distinguish a legit
+// string result starting with `#` (unlikely but possible) from an error.
+export interface FormulaError {
+    __xlsxError: true;
+    code: ErrorCode;
+}
+
+export function makeError(code: ErrorCode): FormulaError {
+    return { __xlsxError: true, code };
+}
+
+export function isFormulaError(v: unknown): v is FormulaError {
+    return !!(v && typeof v === 'object' && (v as FormulaError).__xlsxError === true);
+}
+
+// Back-compat: callers that pattern-matched against the old `ERROR` symbol
+// can still import it. Internally we now pass around `FormulaError` objects.
 export const ERROR = Symbol('formula-error');
-export type EvalResult = FormulaValue | typeof ERROR;
+
+export type EvalResult = FormulaValue | FormulaError;
+
+// Map a raw sentinel string (as it appears in a cached <v> element or an
+// `=#DIV/0!` literal) to an ErrorCode. Returns #VALUE! as a last-ditch
+// fallback when the string starts with `#` but isn't a recognised code.
+function parseErrorLiteral(text: string): ErrorCode {
+    const up = text.toUpperCase();
+    if (up.startsWith('#DIV')) return '#DIV/0!';
+    if (up.startsWith('#VALUE')) return '#VALUE!';
+    if (up.startsWith('#REF')) return '#REF!';
+    if (up.startsWith('#NAME')) return '#NAME?';
+    if (up.startsWith('#NUM')) return '#NUM!';
+    if (up.startsWith('#N/A') || up === '#NA') return '#N/A';
+    if (up.startsWith('#NULL')) return '#NULL!';
+    return '#VALUE!';
+}
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -188,7 +228,7 @@ type Ast =
     | { kind: 'num'; value: number }
     | { kind: 'str'; value: string }
     | { kind: 'bool'; value: boolean }
-    | { kind: 'err'; value: string }
+    | { kind: 'err'; code: ErrorCode }
     | { kind: 'ref'; col: number; row: number }
     | { kind: 'range'; col1: number; row1: number; col2: number; row2: number }
     | { kind: 'unary'; op: '+' | '-'; arg: Ast }
@@ -299,7 +339,7 @@ class Parser {
         if (t.kind === 'num') { this.pos++; return { kind: 'num', value: t.numeric! }; }
         if (t.kind === 'str') { this.pos++; return { kind: 'str', value: t.text }; }
         if (t.kind === 'bool') { this.pos++; return { kind: 'bool', value: t.text === 'TRUE' }; }
-        if (t.kind === 'err') { this.pos++; return { kind: 'err', value: t.text }; }
+        if (t.kind === 'err') { this.pos++; return { kind: 'err', code: parseErrorLiteral(t.text) }; }
         if (t.kind === 'lparen') {
             this.pos++;
             const inner = this.parseExpr();
@@ -338,8 +378,8 @@ class Parser {
                 this.expect('rparen');
                 return { kind: 'call', name: t.text, args };
             }
-            // Bare identifier: treat as #NAME?
-            return { kind: 'err', value: '#NAME?' };
+            // Bare identifier (no parens): unknown name → #NAME?
+            return { kind: 'err', code: '#NAME?' };
         }
         throw new Error(`unexpected token ${t.kind} (${t.text})`);
     }
@@ -357,29 +397,29 @@ export function parseFormula(src: string): Ast {
 }
 
 // ---------------------------------------------------------------------------
-// Evaluator
+// Evaluator helpers
 // ---------------------------------------------------------------------------
 
 // Coerce a single value to a number. null → 0, true → 1, false → 0, number
-// passes through, string parses (empty → 0, non-numeric → ERROR).
-function toNumber(v: FormulaValue | typeof ERROR): number | typeof ERROR {
-    if (v === ERROR) return ERROR;
+// passes through, string parses (empty → 0, non-numeric → #VALUE!).
+function toNumber(v: FormulaValue | FormulaError): number | FormulaError {
+    if (isFormulaError(v)) return v;
     if (v === null) return 0;
     if (typeof v === 'number') return v;
     if (typeof v === 'boolean') return v ? 1 : 0;
     if (typeof v === 'string') {
         if (v === '') return 0;
-        if (v.startsWith('#')) return ERROR;
+        if (v.startsWith('#')) return makeError(parseErrorLiteral(v));
         const n = Number(v);
-        if (Number.isNaN(n)) return ERROR;
+        if (Number.isNaN(n)) return makeError('#VALUE!');
         return n;
     }
     // Arrays shouldn't reach here — callers should flatten first.
-    return ERROR;
+    return makeError('#VALUE!');
 }
 
-function toBool(v: FormulaValue | typeof ERROR): boolean | typeof ERROR {
-    if (v === ERROR) return ERROR;
+function toBool(v: FormulaValue | FormulaError): boolean | FormulaError {
+    if (isFormulaError(v)) return v;
     if (v === null) return false;
     if (typeof v === 'boolean') return v;
     if (typeof v === 'number') return v !== 0;
@@ -387,35 +427,145 @@ function toBool(v: FormulaValue | typeof ERROR): boolean | typeof ERROR {
         const u = v.toUpperCase();
         if (u === 'TRUE') return true;
         if (u === 'FALSE') return false;
-        if (v.startsWith('#')) return ERROR;
+        if (v.startsWith('#')) return makeError(parseErrorLiteral(v));
         const n = Number(v);
-        if (Number.isNaN(n)) return ERROR;
+        if (Number.isNaN(n)) return makeError('#VALUE!');
         return n !== 0;
     }
-    return ERROR;
+    return makeError('#VALUE!');
+}
+
+function toStr(v: FormulaValue | FormulaError): string | FormulaError {
+    if (isFormulaError(v)) return v;
+    if (v === null) return '';
+    if (typeof v === 'string') return v;
+    if (typeof v === 'number') return cleanNumberString(v);
+    if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
+    if (Array.isArray(v)) return toStr(v.length > 0 ? v[0] : null);
+    return makeError('#VALUE!');
 }
 
 // Flatten an EvalResult to an array of scalars. Arrays flatten recursively.
-function flatten(v: FormulaValue | typeof ERROR): (FormulaValue | typeof ERROR)[] {
-    if (v === ERROR) return [ERROR];
+function flatten(v: FormulaValue | FormulaError): (FormulaValue | FormulaError)[] {
+    if (isFormulaError(v)) return [v];
     if (Array.isArray(v)) {
-        const out: (FormulaValue | typeof ERROR)[] = [];
+        const out: (FormulaValue | FormulaError)[] = [];
         for (const x of v) for (const y of flatten(x)) out.push(y);
         return out;
     }
     return [v];
 }
 
+// ---------------------------------------------------------------------------
+// Number-format routing: evaluator-side float-noise cleanup.
+//
+// JavaScript's default `(0.1 + 0.2).toString()` returns '0.30000000000000004'.
+// Excel's General format rounds to ~15 significant digits, which hides the
+// noise. We replicate that behaviour here so numeric results land in
+// `cell.value` as a clean string. This keeps the downstream renderer path
+// consistent: a cached `<v>0.3</v>` cell and an evaluated `=0.1+0.2` cell
+// now both render identically through formatNumber().
+//
+// We only apply the cleanup to non-integer finite numbers. Integers, +/-Inf,
+// and NaN fall through unchanged so we don't accidentally trim trailing zeros
+// the caller explicitly cached (e.g. `=SUM(...)` → 60).
+export function cleanNumberString(n: number): string {
+    if (!Number.isFinite(n)) return String(n);
+    if (Number.isInteger(n)) return String(n);
+    // toPrecision(15) matches Excel's 15-significant-digit cap. Then parseFloat
+    // round-trips to strip artefacts like trailing zeros and redundant exponents
+    // while preserving value.
+    const cleaned = parseFloat(n.toPrecision(15));
+    return String(cleaned);
+}
+
+// ---------------------------------------------------------------------------
+// Built-in functions.
+// ---------------------------------------------------------------------------
+
 // Built-in functions. Each receives the raw evaluated args (one per
 // positional argument; ranges stay as arrays). Returns EvalResult.
 type Fn = (args: EvalResult[]) => EvalResult;
+
+// Criteria matching for SUMIF / COUNTIF. Excel criteria forms supported:
+//   ">10"  "<=20"  "=foo"  "<>x"  bare literal (exact equality).
+// Numeric criteria coerce the cell to a number before comparing; string
+// criteria use case-insensitive string equality.
+function buildPredicate(criteria: FormulaValue | FormulaError): ((v: FormulaValue) => boolean) | FormulaError {
+    if (isFormulaError(criteria)) return criteria;
+    // Number criteria: treat as "= number".
+    if (typeof criteria === 'number') {
+        return (v) => {
+            if (typeof v === 'number') return v === criteria;
+            if (typeof v === 'string' && v !== '') {
+                const n = Number(v); return !Number.isNaN(n) && n === criteria;
+            }
+            return false;
+        };
+    }
+    if (typeof criteria === 'boolean') {
+        return (v) => v === criteria;
+    }
+    if (criteria === null) return (v) => v === null || v === '' || v === 0;
+    if (Array.isArray(criteria)) return buildPredicate(criteria.length > 0 ? criteria[0] : null);
+    // String criteria — strip operator prefix.
+    const raw = String(criteria);
+    const m = /^\s*(<=|>=|<>|=|>|<)\s*(.*)$/.exec(raw);
+    const op = m ? m[1] : '=';
+    const rest = m ? m[2] : raw;
+    // Try to coerce `rest` to a number; if it works, do numeric compare,
+    // else compare as string.
+    const restNum = rest === '' ? null : Number(rest);
+    const numericRhs = rest !== '' && !Number.isNaN(restNum as number);
+    const cmpNum = (a: number, b: number): boolean => {
+        switch (op) {
+            case '>': return a > b;
+            case '<': return a < b;
+            case '>=': return a >= b;
+            case '<=': return a <= b;
+            case '<>': return a !== b;
+            case '=': default: return a === b;
+        }
+    };
+    const cmpStr = (a: string, b: string): boolean => {
+        const la = a.toLowerCase(); const lb = b.toLowerCase();
+        switch (op) {
+            case '>': return la > lb;
+            case '<': return la < lb;
+            case '>=': return la >= lb;
+            case '<=': return la <= lb;
+            case '<>': return la !== lb;
+            case '=': default: return la === lb;
+        }
+    };
+    return (v) => {
+        if (numericRhs) {
+            const rhsN = restNum as number;
+            if (typeof v === 'number') return cmpNum(v, rhsN);
+            if (typeof v === 'string' && v !== '') {
+                const n = Number(v);
+                if (!Number.isNaN(n)) return cmpNum(n, rhsN);
+            }
+            // Non-numeric cell vs numeric criteria: only `<>` can be true.
+            return op === '<>';
+        }
+        // String criteria.
+        if (v === null) return rest === '' && (op === '=' || op === '<=' || op === '>=');
+        if (typeof v === 'boolean') return cmpStr(v ? 'TRUE' : 'FALSE', rest);
+        if (typeof v === 'number') {
+            // Numeric cell vs string criteria: only `<>` can be true.
+            return op === '<>';
+        }
+        return cmpStr(String(v), rest);
+    };
+}
 
 const FUNCTIONS: Record<string, Fn> = {
     SUM: (args) => {
         let total = 0;
         for (const a of args) {
             for (const v of flatten(a)) {
-                if (v === ERROR) return ERROR;
+                if (isFormulaError(v)) return v;
                 // SUM skips strings and booleans that came from ranges (Excel
                 // behaviour). For direct scalar args, booleans/strings coerce.
                 if (v === null) continue;
@@ -436,7 +586,7 @@ const FUNCTIONS: Record<string, Fn> = {
         let total = 0; let n = 0;
         for (const a of args) {
             for (const v of flatten(a)) {
-                if (v === ERROR) return ERROR;
+                if (isFormulaError(v)) return v;
                 if (v === null) continue;
                 if (typeof v === 'string') {
                     if (v === '') continue;
@@ -448,14 +598,14 @@ const FUNCTIONS: Record<string, Fn> = {
                 total += v as number; n++;
             }
         }
-        if (n === 0) return ERROR; // #DIV/0!
+        if (n === 0) return makeError('#DIV/0!');
         return total / n;
     },
     MIN: (args) => {
         let m: number | null = null;
         for (const a of args) {
             for (const v of flatten(a)) {
-                if (v === ERROR) return ERROR;
+                if (isFormulaError(v)) return v;
                 if (v === null) continue;
                 let num: number;
                 if (typeof v === 'number') num = v;
@@ -475,7 +625,7 @@ const FUNCTIONS: Record<string, Fn> = {
         let m: number | null = null;
         for (const a of args) {
             for (const v of flatten(a)) {
-                if (v === ERROR) return ERROR;
+                if (isFormulaError(v)) return v;
                 if (v === null) continue;
                 let num: number;
                 if (typeof v === 'number') num = v;
@@ -500,7 +650,7 @@ const FUNCTIONS: Record<string, Fn> = {
             const flat = flatten(a);
             const fromRange = Array.isArray(a);
             for (const v of flat) {
-                if (v === ERROR) continue;
+                if (isFormulaError(v)) continue;
                 if (typeof v === 'number') n++;
                 else if (!fromRange && typeof v === 'string' && v !== '') {
                     const parsed = Number(v);
@@ -515,7 +665,7 @@ const FUNCTIONS: Record<string, Fn> = {
         let n = 0;
         for (const a of args) {
             for (const v of flatten(a)) {
-                if (v === ERROR) { n++; continue; } // errors count as non-empty
+                if (isFormulaError(v)) { n++; continue; } // errors count as non-empty
                 if (v === null) continue;
                 if (typeof v === 'string' && v === '') continue;
                 n++;
@@ -524,9 +674,10 @@ const FUNCTIONS: Record<string, Fn> = {
         return n;
     },
     IF: (args) => {
-        if (args.length < 2) return ERROR;
+        if (args.length < 2) return makeError('#VALUE!');
+        if (isFormulaError(args[0])) return args[0];
         const cond = toBool(args[0] as FormulaValue);
-        if (cond === ERROR) return ERROR;
+        if (isFormulaError(cond)) return cond;
         if (cond) return args[1];
         return args.length >= 3 ? args[2] : false;
     },
@@ -534,10 +685,10 @@ const FUNCTIONS: Record<string, Fn> = {
         let seen = false;
         for (const a of args) {
             for (const v of flatten(a)) {
-                if (v === ERROR) return ERROR;
+                if (isFormulaError(v)) return v;
                 if (v === null) continue; // skip empties
                 const b = toBool(v as FormulaValue);
-                if (b === ERROR) return ERROR;
+                if (isFormulaError(b)) return b;
                 if (!b) return false;
                 seen = true;
             }
@@ -548,28 +699,315 @@ const FUNCTIONS: Record<string, Fn> = {
         let seen = false;
         for (const a of args) {
             for (const v of flatten(a)) {
-                if (v === ERROR) return ERROR;
+                if (isFormulaError(v)) return v;
                 if (v === null) continue;
                 const b = toBool(v as FormulaValue);
-                if (b === ERROR) return ERROR;
+                if (isFormulaError(b)) return b;
                 if (b) return true;
                 seen = true;
             }
         }
-        return seen ? false : ERROR;
+        return seen ? false : makeError('#VALUE!');
     },
     NOT: (args) => {
-        if (args.length !== 1) return ERROR;
+        if (args.length !== 1) return makeError('#VALUE!');
+        if (isFormulaError(args[0])) return args[0];
         const b = toBool(args[0] as FormulaValue);
-        if (b === ERROR) return ERROR;
+        if (isFormulaError(b)) return b;
         return !b;
+    },
+    // IFERROR(value, fallback): if value is any error, return fallback;
+    // otherwise pass value through. Since we eagerly evaluate both args,
+    // this differs from Excel's short-circuit behaviour only if `fallback`
+    // itself errors — then the fallback error still surfaces.
+    IFERROR: (args) => {
+        if (args.length !== 2) return makeError('#VALUE!');
+        if (isFormulaError(args[0])) return args[1];
+        // A ref to a cached-error cell lands here as a plain '#DIV/0!' string;
+        // coerce defensively.
+        if (typeof args[0] === 'string' && args[0].startsWith('#')) return args[1];
+        return args[0];
+    },
+    // IFNA(value, fallback): narrower IFERROR; only swallows #N/A.
+    IFNA: (args) => {
+        if (args.length !== 2) return makeError('#VALUE!');
+        if (isFormulaError(args[0]) && args[0].code === '#N/A') return args[1];
+        if (typeof args[0] === 'string' && args[0].toUpperCase().startsWith('#N/A')) return args[1];
+        return args[0];
+    },
+    // IFS(cond1, r1, cond2, r2, …): returns the first r_i whose cond_i is
+    // truthy. Errors propagate. Returns #N/A if no condition is true.
+    IFS: (args) => {
+        if (args.length < 2 || args.length % 2 !== 0) return makeError('#VALUE!');
+        for (let i = 0; i < args.length; i += 2) {
+            if (isFormulaError(args[i])) return args[i];
+            const b = toBool(args[i] as FormulaValue);
+            if (isFormulaError(b)) return b;
+            if (b) return args[i + 1];
+        }
+        return makeError('#N/A');
+    },
+    // SWITCH(expr, match1, r1, match2, r2, …, default?):
+    // Compare expr to each match_i; return r_i for the first hit. A lone
+    // trailing argument (odd count after the initial expr) is the default.
+    // Returns #N/A when no match + no default.
+    SWITCH: (args) => {
+        if (args.length < 3) return makeError('#VALUE!');
+        if (isFormulaError(args[0])) return args[0];
+        const expr = args[0] as FormulaValue;
+        const tail = args.slice(1);
+        const hasDefault = tail.length % 2 === 1;
+        const pairsEnd = hasDefault ? tail.length - 1 : tail.length;
+        for (let i = 0; i < pairsEnd; i += 2) {
+            if (isFormulaError(tail[i])) return tail[i];
+            if (equalValues(expr, tail[i] as FormulaValue)) return tail[i + 1];
+        }
+        return hasDefault ? tail[tail.length - 1] : makeError('#N/A');
+    },
+    // ── Math ─────────────────────────────────────────────────────────────
+    ROUND: (args) => roundToDigits(args, 'round'),
+    ROUNDUP: (args) => roundToDigits(args, 'up'),
+    ROUNDDOWN: (args) => roundToDigits(args, 'down'),
+    ABS: (args) => {
+        if (args.length !== 1) return makeError('#VALUE!');
+        const n = toNumber(args[0] as FormulaValue);
+        if (isFormulaError(n)) return n;
+        return Math.abs(n);
+    },
+    SQRT: (args) => {
+        if (args.length !== 1) return makeError('#VALUE!');
+        const n = toNumber(args[0] as FormulaValue);
+        if (isFormulaError(n)) return n;
+        if (n < 0) return makeError('#NUM!');
+        return Math.sqrt(n);
+    },
+    POWER: (args) => {
+        if (args.length !== 2) return makeError('#VALUE!');
+        const b = toNumber(args[0] as FormulaValue);
+        const e = toNumber(args[1] as FormulaValue);
+        if (isFormulaError(b)) return b;
+        if (isFormulaError(e)) return e;
+        const r = Math.pow(b, e);
+        if (!Number.isFinite(r) || Number.isNaN(r)) return makeError('#NUM!');
+        return r;
+    },
+    MOD: (args) => {
+        if (args.length !== 2) return makeError('#VALUE!');
+        const n = toNumber(args[0] as FormulaValue);
+        const d = toNumber(args[1] as FormulaValue);
+        if (isFormulaError(n)) return n;
+        if (isFormulaError(d)) return d;
+        if (d === 0) return makeError('#DIV/0!');
+        // Excel MOD takes the sign of the divisor; JS `%` takes the sign of
+        // the dividend. Adjust.
+        return n - Math.floor(n / d) * d;
+    },
+    INT: (args) => {
+        if (args.length !== 1) return makeError('#VALUE!');
+        const n = toNumber(args[0] as FormulaValue);
+        if (isFormulaError(n)) return n;
+        return Math.floor(n);
+    },
+    // ── Statistical with criteria ────────────────────────────────────────
+    SUMIF: (args) => {
+        if (args.length < 2 || args.length > 3) return makeError('#VALUE!');
+        if (isFormulaError(args[0])) return args[0];
+        if (isFormulaError(args[1])) return args[1];
+        const range = args[0];
+        const crit = args[1] as FormulaValue;
+        const sumRange = args.length === 3 ? args[2] : range;
+        if (isFormulaError(sumRange)) return sumRange;
+        const pred = buildPredicate(crit);
+        if (isFormulaError(pred)) return pred;
+        const left = Array.isArray(range) ? range : [range as FormulaValue];
+        const right = Array.isArray(sumRange) ? sumRange : [sumRange as FormulaValue];
+        let total = 0;
+        for (let i = 0; i < left.length; i++) {
+            const probe = left[i];
+            if (isFormulaError(probe)) return probe;
+            if (!pred(probe)) continue;
+            const s = right[i];
+            if (s === undefined) continue;
+            if (isFormulaError(s)) return s;
+            if (s === null) continue;
+            if (typeof s === 'number') { total += s; continue; }
+            if (typeof s === 'string') {
+                if (s === '') continue;
+                const n = Number(s);
+                if (!Number.isNaN(n)) total += n;
+                continue;
+            }
+            if (typeof s === 'boolean') { total += s ? 1 : 0; continue; }
+        }
+        return total;
+    },
+    COUNTIF: (args) => {
+        if (args.length !== 2) return makeError('#VALUE!');
+        if (isFormulaError(args[0])) return args[0];
+        if (isFormulaError(args[1])) return args[1];
+        const pred = buildPredicate(args[1] as FormulaValue);
+        if (isFormulaError(pred)) return pred;
+        let count = 0;
+        const range = args[0];
+        const flat = Array.isArray(range) ? range : [range as FormulaValue];
+        for (const v of flat) {
+            if (isFormulaError(v)) continue;
+            if (pred(v)) count++;
+        }
+        return count;
+    },
+    // ── Text ─────────────────────────────────────────────────────────────
+    LEFT: (args) => {
+        if (args.length < 1 || args.length > 2) return makeError('#VALUE!');
+        const s = toStr(args[0] as FormulaValue); if (isFormulaError(s)) return s;
+        const nArg = args.length >= 2 ? toNumber(args[1] as FormulaValue) : 1;
+        if (isFormulaError(nArg)) return nArg;
+        if (nArg < 0) return makeError('#VALUE!');
+        return s.slice(0, Math.floor(nArg));
+    },
+    RIGHT: (args) => {
+        if (args.length < 1 || args.length > 2) return makeError('#VALUE!');
+        const s = toStr(args[0] as FormulaValue); if (isFormulaError(s)) return s;
+        const nArg = args.length >= 2 ? toNumber(args[1] as FormulaValue) : 1;
+        if (isFormulaError(nArg)) return nArg;
+        if (nArg < 0) return makeError('#VALUE!');
+        const n = Math.floor(nArg);
+        return n === 0 ? '' : s.slice(-n);
+    },
+    MID: (args) => {
+        if (args.length !== 3) return makeError('#VALUE!');
+        const s = toStr(args[0] as FormulaValue); if (isFormulaError(s)) return s;
+        const startArg = toNumber(args[1] as FormulaValue); if (isFormulaError(startArg)) return startArg;
+        const nArg = toNumber(args[2] as FormulaValue); if (isFormulaError(nArg)) return nArg;
+        if (startArg < 1 || nArg < 0) return makeError('#VALUE!');
+        const start = Math.floor(startArg) - 1;
+        const n = Math.floor(nArg);
+        return s.slice(start, start + n);
+    },
+    LEN: (args) => {
+        if (args.length !== 1) return makeError('#VALUE!');
+        const s = toStr(args[0] as FormulaValue); if (isFormulaError(s)) return s;
+        return s.length;
+    },
+    TRIM: (args) => {
+        if (args.length !== 1) return makeError('#VALUE!');
+        const s = toStr(args[0] as FormulaValue); if (isFormulaError(s)) return s;
+        // Excel TRIM collapses internal runs of spaces to a single space and
+        // strips leading/trailing.
+        return s.replace(/^ +| +$/g, '').replace(/ +/g, ' ');
+    },
+    UPPER: (args) => {
+        if (args.length !== 1) return makeError('#VALUE!');
+        const s = toStr(args[0] as FormulaValue); if (isFormulaError(s)) return s;
+        return s.toUpperCase();
+    },
+    LOWER: (args) => {
+        if (args.length !== 1) return makeError('#VALUE!');
+        const s = toStr(args[0] as FormulaValue); if (isFormulaError(s)) return s;
+        return s.toLowerCase();
+    },
+    CONCATENATE: (args) => concatArgs(args),
+    CONCAT: (args) => concatArgs(args),
+    // ── Lookup ───────────────────────────────────────────────────────────
+    // VLOOKUP(lookup, tableRange, colIndex, [exact]):
+    //   The 4th arg is this evaluator's `exact` flag: TRUE / omitted =
+    //   exact-match, FALSE = approximate. Approximate-match is punted to a
+    //   future wave; when FALSE is passed we surface #VALUE! with a comment
+    //   so the gap is visible to downstream consumers.
+    VLOOKUP: (args) => {
+        if (args.length < 3 || args.length > 4) return makeError('#VALUE!');
+        if (isFormulaError(args[0])) return args[0];
+        if (isFormulaError(args[1])) return args[1];
+        if (isFormulaError(args[2])) return args[2];
+        const lookup = args[0] as FormulaValue;
+        const colIndexN = toNumber(args[2] as FormulaValue);
+        if (isFormulaError(colIndexN)) return colIndexN;
+        const colIndex = Math.floor(colIndexN);
+        if (colIndex < 1) return makeError('#VALUE!');
+        let exact = true;
+        if (args.length === 4) {
+            if (isFormulaError(args[3])) return args[3];
+            const b = toBool(args[3] as FormulaValue);
+            if (isFormulaError(b)) return b;
+            exact = b;
+        }
+        if (!exact) {
+            // Approximate match not implemented. TODO (future wave):
+            // approximate-match VLOOKUP requires a binary search over a
+            // sorted first column plus `<=` semantics.
+            return makeError('#VALUE!');
+        }
+        // Pull the 2-D row shape attached by the 'range' AST node.
+        const rangeVal = args[1];
+        const rows = Array.isArray(rangeVal)
+            ? (rangeVal as unknown as { __rows?: FormulaValue[][] }).__rows
+            : undefined;
+        if (!rows) return makeError('#VALUE!');
+        if (!Array.isArray(rows) || rows.length === 0) return makeError('#N/A');
+        if (rows[0].length < colIndex) return makeError('#REF!');
+        for (const r of rows) {
+            const probe = r[0];
+            if (probe === undefined) continue;
+            if (isFormulaError(probe)) return probe;
+            if (equalValues(lookup, probe)) {
+                const cell = r[colIndex - 1];
+                return cell === undefined ? makeError('#N/A') : cell;
+            }
+        }
+        return makeError('#N/A');
     },
 };
 
+function concatArgs(args: EvalResult[]): EvalResult {
+    let out = '';
+    for (const a of args) {
+        for (const v of flatten(a)) {
+            if (isFormulaError(v)) return v;
+            if (v === null) continue;
+            if (typeof v === 'string') { out += v; continue; }
+            if (typeof v === 'number') { out += cleanNumberString(v); continue; }
+            if (typeof v === 'boolean') { out += v ? 'TRUE' : 'FALSE'; continue; }
+        }
+    }
+    return out;
+}
+
+function roundToDigits(args: EvalResult[], mode: 'round' | 'up' | 'down'): EvalResult {
+    if (args.length !== 2) return makeError('#VALUE!');
+    const n = toNumber(args[0] as FormulaValue); if (isFormulaError(n)) return n;
+    const dArg = toNumber(args[1] as FormulaValue); if (isFormulaError(dArg)) return dArg;
+    const d = Math.floor(dArg);
+    const f = Math.pow(10, d);
+    if (!Number.isFinite(f) || f === 0) return makeError('#NUM!');
+    let r: number;
+    if (mode === 'round') r = Math.round(n * f) / f;
+    else if (mode === 'up') r = (n >= 0 ? Math.ceil(n * f) : Math.floor(n * f)) / f;
+    else r = (n >= 0 ? Math.floor(n * f) : Math.ceil(n * f)) / f;
+    return r;
+}
+
+// Excel's `=` on scalars: case-insensitive string equality, strict numeric /
+// boolean equality, null treated as 0 / ''.
+function equalValues(a: FormulaValue, b: FormulaValue): boolean {
+    if (a === null && b === null) return true;
+    if (a === null) return b === 0 || b === '';
+    if (b === null) return a === 0 || a === '';
+    if (typeof a === 'number' && typeof b === 'number') return a === b;
+    if (typeof a === 'string' && typeof b === 'string') return a.toLowerCase() === b.toLowerCase();
+    if (typeof a === 'boolean' && typeof b === 'boolean') return a === b;
+    if (typeof a === 'number' && typeof b === 'string') {
+        const n = Number(b); return !Number.isNaN(n) && a === n;
+    }
+    if (typeof a === 'string' && typeof b === 'number') {
+        const n = Number(a); return !Number.isNaN(n) && n === b;
+    }
+    return false;
+}
+
 // Compare two scalars using Excel's ordering: numbers < strings < booleans,
 // and within each type the natural order (numeric, case-insensitive string,
-// false < true). Returns -1/0/1 or ERROR when either side is an error.
-function cmp(a: FormulaValue, b: FormulaValue): number | typeof ERROR {
+// false < true). Returns -1/0/1 or a FormulaError when either side is an error.
+function cmp(a: FormulaValue, b: FormulaValue): number | FormulaError {
     if (a === null) a = 0;
     if (b === null) b = 0;
     // Same type: natural comparison.
@@ -585,65 +1023,82 @@ function cmp(a: FormulaValue, b: FormulaValue): number | typeof ERROR {
     return ra < rb ? -1 : ra > rb ? 1 : 0;
 }
 
+// Evaluator. The outer `depth` guard catches runaway recursion (mutually
+// recursive formulas / deeply nested IFs). Cell refs out of the resolver's
+// range surface as #REF! via the resolver's null / string path.
 export function evalAst(ast: Ast, resolver: CellResolver, depth = 0): EvalResult {
-    if (depth > 1024) return ERROR;
+    if (depth > 1024) return makeError('#REF!');
     switch (ast.kind) {
         case 'num': return ast.value;
         case 'str': return ast.value;
         case 'bool': return ast.value;
-        case 'err': return ERROR;
+        case 'err': return makeError(ast.code);
         case 'ref': {
             const v = resolver(ast.col, ast.row);
-            if (typeof v === 'string' && v.startsWith('#')) return ERROR;
+            if (typeof v === 'string' && v.startsWith('#')) return makeError(parseErrorLiteral(v));
             return v;
         }
         case 'range': {
             const out: FormulaValue[] = [];
+            const cols = ast.col2 - ast.col1 + 1;
             for (let r = ast.row1; r <= ast.row2; r++) {
                 for (let c = ast.col1; c <= ast.col2; c++) {
                     const v = resolver(c, r);
-                    if (typeof v === 'string' && v.startsWith('#')) return ERROR;
+                    if (typeof v === 'string' && v.startsWith('#')) return makeError(parseErrorLiteral(v));
                     out.push(v);
                 }
             }
+            // Attach the shaped 2-D form so VLOOKUP can see the row structure.
+            // The attached property is hidden from standard array behaviour —
+            // the flat array still iterates row-major.
+            const shaped: FormulaValue[][] = [];
+            for (let i = 0; i < out.length; i += cols) shaped.push(out.slice(i, i + cols));
+            (out as unknown as { __rows: FormulaValue[][] }).__rows = shaped;
             return out;
         }
         case 'unary': {
             const v = evalAst(ast.arg, resolver, depth + 1);
-            if (v === ERROR) return ERROR;
+            if (isFormulaError(v)) return v;
             const n = toNumber(v as FormulaValue);
-            if (n === ERROR) return ERROR;
+            if (isFormulaError(n)) return n;
             return ast.op === '-' ? -n : n;
         }
         case 'postfix': {
             const v = evalAst(ast.arg, resolver, depth + 1);
-            if (v === ERROR) return ERROR;
+            if (isFormulaError(v)) return v;
             const n = toNumber(v as FormulaValue);
-            if (n === ERROR) return ERROR;
+            if (isFormulaError(n)) return n;
             return n / 100;
         }
         case 'bin': {
             const l = evalAst(ast.left, resolver, depth + 1);
             const r = evalAst(ast.right, resolver, depth + 1);
-            if (l === ERROR || r === ERROR) return ERROR;
+            if (isFormulaError(l)) return l;
+            if (isFormulaError(r)) return r;
             switch (ast.op) {
                 case '+': case '-': case '*': case '/': case '^': {
                     const ln = toNumber(l as FormulaValue);
                     const rn = toNumber(r as FormulaValue);
-                    if (ln === ERROR || rn === ERROR) return ERROR;
+                    if (isFormulaError(ln)) return ln;
+                    if (isFormulaError(rn)) return rn;
                     switch (ast.op) {
                         case '+': return ln + rn;
                         case '-': return ln - rn;
                         case '*': return ln * rn;
-                        case '/': return rn === 0 ? ERROR : ln / rn;
-                        case '^': return Math.pow(ln, rn);
+                        case '/': return rn === 0 ? makeError('#DIV/0!') : ln / rn;
+                        case '^': {
+                            const v = Math.pow(ln, rn);
+                            if (!Number.isFinite(v) || Number.isNaN(v)) return makeError('#NUM!');
+                            return v;
+                        }
                     }
-                    return ERROR;
+                    return makeError('#VALUE!');
                 }
                 case '&': {
                     const stringify = (v: FormulaValue): string => {
                         if (v === null) return '';
                         if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
+                        if (typeof v === 'number') return cleanNumberString(v);
                         if (Array.isArray(v)) return stringify(v.length > 0 ? v[0] : null);
                         return String(v);
                     };
@@ -651,7 +1106,7 @@ export function evalAst(ast: Ast, resolver: CellResolver, depth = 0): EvalResult
                 }
                 case 'eq': case 'neq': case 'lt': case 'lte': case 'gt': case 'gte': {
                     const c = cmp(l as FormulaValue, r as FormulaValue);
-                    if (c === ERROR) return ERROR;
+                    if (isFormulaError(c)) return c;
                     switch (ast.op) {
                         case 'eq': return c === 0;
                         case 'neq': return c !== 0;
@@ -660,26 +1115,21 @@ export function evalAst(ast: Ast, resolver: CellResolver, depth = 0): EvalResult
                         case 'gt': return c > 0;
                         case 'gte': return c >= 0;
                     }
-                    return ERROR;
+                    return makeError('#VALUE!');
                 }
             }
-            return ERROR;
+            return makeError('#VALUE!');
         }
         case 'call': {
             const fn = FUNCTIONS[ast.name];
-            if (!fn) return ERROR; // #NAME?
+            if (!fn) return makeError('#NAME?');
             const args = ast.args.map((a) => evalAst(a, resolver, depth + 1));
-            // Short-circuit for IF: caller evaluated both branches already;
-            // this is less efficient than true short-circuit but preserves
-            // error semantics (a #DIV/0! in the untaken branch still surfaces
-            // in Excel when the cell is referenced directly, but not through
-            // IF — accept the gap for the POC).
             return fn(args);
         }
     }
 }
 
-// Top-level entry: parse + evaluate + convert ERROR → '#ERROR!' string.
+// Top-level entry: parse + evaluate + convert FormulaError → sentinel string.
 // Returns { value, kind } mirroring the Cell.kind enum that the renderer
 // expects, so the caller can splat into the Cell record.
 export function evaluateFormula(
@@ -690,10 +1140,10 @@ export function evaluateFormula(
     try {
         ast = parseFormula(source);
     } catch {
-        return { value: '#ERROR!', kind: 'error' };
+        return { value: '#VALUE!', kind: 'error' };
     }
     const result = evalAst(ast, resolver);
-    if (result === ERROR) return { value: '#ERROR!', kind: 'error' };
+    if (isFormulaError(result)) return { value: result.code, kind: 'error' };
     if (Array.isArray(result)) {
         // An unaggregated range reached the top — Excel would display the
         // first cell (implicit intersection) or spill. Return the first.
@@ -706,15 +1156,18 @@ export function evaluateFormula(
 function formatScalar(v: FormulaValue): { value: string; kind: 'number' | 'string' | 'boolean' | 'error' } {
     if (v === null) return { value: '', kind: 'string' };
     if (typeof v === 'number') {
-        if (!Number.isFinite(v)) return { value: '#ERROR!', kind: 'error' };
-        return { value: String(v), kind: 'number' };
+        if (!Number.isFinite(v)) return { value: '#NUM!', kind: 'error' };
+        // Number-format routing: write a clean 15-significant-digit string so
+        // `0.1+0.2` lands as '0.3' and the renderer's formatNumber() sees the
+        // same shape it does for a cached <v>0.3</v>.
+        return { value: cleanNumberString(v), kind: 'number' };
     }
     if (typeof v === 'boolean') return { value: v ? 'TRUE' : 'FALSE', kind: 'boolean' };
     if (typeof v === 'string') {
         if (v.startsWith('#')) return { value: v, kind: 'error' };
         return { value: v, kind: 'string' };
     }
-    return { value: '#ERROR!', kind: 'error' };
+    return { value: '#VALUE!', kind: 'error' };
 }
 
 // ---------------------------------------------------------------------------
@@ -738,12 +1191,28 @@ export interface CellLike {
 // Build a resolver closure that reads the sheet's cell grid. Empty cells
 // return null; non-empty string cells return their string; numeric cells
 // return the parsed number; boolean cells return the boolean; errors pass
-// through as '#ERROR!' strings so the evaluator can short-circuit.
+// through as '#<code>!' strings so the evaluator can short-circuit.
+//
+// Each row is a *packed* array of cells (sparse columns are collapsed out),
+// so we scan for the matching `col` rather than indexing directly. For wide
+// rows we build a per-sheet col-index cache on first access to keep the
+// lookup O(1).
 export function makeSheetResolver(sheet: SheetLike): CellResolver {
-    return (col: number, row: number): FormulaValue => {
+    const cache = new Map<number, Map<number, CellLike>>();
+    function indexRow(row: number): Map<number, CellLike> | null {
+        let m = cache.get(row);
+        if (m) return m;
         const rowArr = sheet.rows[row];
         if (!rowArr) return null;
-        const cell = rowArr[col];
+        m = new Map();
+        for (const cell of rowArr) if (cell) m.set(cell.col, cell);
+        cache.set(row, m);
+        return m;
+    }
+    return (col: number, row: number): FormulaValue => {
+        const m = indexRow(row);
+        if (!m) return null;
+        const cell = m.get(col);
         if (!cell) return null;
         if (cell.kind === 'empty') return null;
         if (cell.kind === 'number') {
@@ -752,7 +1221,7 @@ export function makeSheetResolver(sheet: SheetLike): CellResolver {
             return Number.isNaN(n) ? null : n;
         }
         if (cell.kind === 'boolean') return cell.value === 'TRUE' || cell.value === '1' || cell.value.toLowerCase() === 'true';
-        if (cell.kind === 'error') return cell.value || '#ERROR!';
+        if (cell.kind === 'error') return cell.value || '#VALUE!';
         // String / inlineStr — try numeric coercion? No, Excel keeps strings
         // as strings and lets the evaluator coerce in numeric contexts.
         return cell.value;
