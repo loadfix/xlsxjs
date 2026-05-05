@@ -34,6 +34,7 @@ const fixtures = [
     'font-extras',
     'form-controls',
     'formulas',
+    'formulas-v2',
     'hyperlinks-and-validation',
     'image',
     'merged',

@@ -4712,6 +4712,134 @@ async function renderFixture(path, options) {
     container.remove();
 }
 
+// ── 112. formulas-v2: end-to-end evaluateFormulas for the wave-12 surface ─
+// The hand-built formulas-v2 fixture ships formula cells with NO cached <v>,
+// so `evaluateFormulas: true` actually has work to do. Probes one cell per
+// high-value function — IFERROR, SWITCH, VLOOKUP, ROUND, SUMIF, plus the
+// text family — and asserts the evaluator fills the value into the rendered
+// td.textContent. Scenarios 112 / 113 pile specific assertions on top of
+// this same fixture.
+{
+    const { wb, container } = await renderFixture('formulas-v2', { evaluateFormulas: true });
+    const sheet = wb.parsed.sheets[0];
+    const findCell = (rowIndex, col) => {
+        const row = sheet.rows[rowIndex];
+        if (!row) return null;
+        return row.find((c) => c.col === col) || null;
+    };
+    // Col index 4 = column E; rows as authored (1-based) map to 0-based here.
+    const e = (rowIndex) => findCell(rowIndex, 4);
+
+    assert(e(0)?.value === '42', `112a: E1 IFERROR(1/0, 42) → 42 (got ${e(0)?.value})`);
+    assert(e(0)?.kind === 'number', `112a2: E1 kind should be number`);
+
+    assert(e(1)?.value === 'two', `112b: E2 SWITCH(2, 1,"one", 2,"two", "other") → "two" (got ${e(1)?.value})`);
+
+    assert(e(2)?.value === 'second', `112c: E3 VLOOKUP("beta", B1:C3, 2) → "second" (got ${e(2)?.value})`);
+
+    assert(e(3)?.value === '1.23', `112d: E4 ROUND(1.2345, 2) → 1.23 (got ${e(3)?.value})`);
+
+    // SUMIF over D1:D5 with criteria "foo", summing A1:A5:
+    //   foo rows → A values 10, 30, 15 → 55
+    assert(e(4)?.value === '55', `112e: E5 SUMIF(D1:D5, "foo", A1:A5) → 55 (got ${e(4)?.value})`);
+
+    assert(e(7)?.value === 'hello world', `112f: E8 TRIM("  hello   world  ") → "hello world" (got ${JSON.stringify(e(7)?.value)})`);
+    assert(e(8)?.value === 'MIXED CASE', `112g: E9 UPPER("mixed case") → "MIXED CASE" (got ${e(8)?.value})`);
+
+    // And spot-check that the evaluated cells flowed through to the DOM so
+    // the renderer sees cell.kind === 'number' and lands xlsx-numeric on it.
+    const tbodyRows = container.querySelectorAll('section.xlsx tbody tr');
+    const tdOf = (r, c) => tbodyRows[r].querySelectorAll('td')[c];
+    assert(tdOf(0, 4).textContent === '42', `112h: E1 renders as 42 (got ${tdOf(0, 4).textContent})`);
+    assert(tdOf(0, 4).classList.contains('xlsx-numeric'), '112i: E1 should carry xlsx-numeric');
+    assert(tdOf(1, 4).textContent === 'two', `112j: E2 renders as "two" (got ${tdOf(1, 4).textContent})`);
+    assert(!tdOf(1, 4).classList.contains('xlsx-numeric'), '112k: E2 string result should not be numeric-aligned');
+}
+
+// ── 113. formulas-v2: error taxonomy — each new code surfaces on its cell ─
+// E10..E16 each have a formula chosen to hit one error code. After
+// evaluation, the cell's kind is 'error' and its value carries the exact
+// Excel sentinel. The renderer paints `xlsx-error` on each.
+{
+    const { wb, container } = await renderFixture('formulas-v2', { evaluateFormulas: true });
+    const sheet = wb.parsed.sheets[0];
+    const findCell = (rowIndex, col) => {
+        const row = sheet.rows[rowIndex];
+        if (!row) return null;
+        return row.find((c) => c.col === col) || null;
+    };
+    const e = (rowIndex) => findCell(rowIndex, 4);
+    const expected = {
+        9:  '#DIV/0!',
+        10: '#VALUE!',
+        11: '#NAME?',
+        12: '#NUM!',
+        13: '#N/A',
+        14: '#REF!',
+        15: '#NULL!',
+    };
+    for (const [rowStr, code] of Object.entries(expected)) {
+        const r = Number(rowStr);
+        const cell = e(r);
+        assert(cell?.kind === 'error', `113a.${code}: E${r + 1} kind should be error (got ${cell?.kind})`);
+        assert(cell?.value === code, `113b.${code}: E${r + 1} value should be ${code} (got ${cell?.value})`);
+    }
+    // Every expected error code appears at least once in the model.
+    const seen = new Set();
+    for (const row of sheet.rows) {
+        if (!row) continue;
+        for (const c of row) if (c.kind === 'error') seen.add(c.value);
+    }
+    for (const code of Object.values(expected)) {
+        assert(seen.has(code), `113c: expected error code ${code} to appear at least once in the sheet`);
+    }
+    // And the renderer applies .xlsx-error on every error cell in the DOM.
+    const tbodyRows = container.querySelectorAll('section.xlsx tbody tr');
+    for (const [rowStr, code] of Object.entries(expected)) {
+        const r = Number(rowStr);
+        const td = tbodyRows[r].querySelectorAll('td')[4];
+        assert(td.textContent === code, `113d.${code}: E${r + 1} renders as ${code} (got ${td.textContent})`);
+        assert(td.classList.contains('xlsx-error'), `113e.${code}: E${r + 1} should carry xlsx-error`);
+    }
+}
+
+// ── 114. formulas-v2: number-format routing — 0.1+0.2 renders as 0.3 ──────
+// E6 is =0.1+0.2 with the default General format → the evaluator's clean
+// 15-significant-digit write lands as "0.3" in cell.value, and General
+// formatting passes it through unchanged.
+// E7 is the same formula with numFmt "0.00" applied → formatNumber rounds
+// to 2 decimals, rendering "0.30". Together these prove that (a) the
+// evaluator-side cleanup kills JS float noise, and (b) the evaluator's
+// kind:'number' result flows into formatNumber for explicit numFmts.
+{
+    const { wb, container } = await renderFixture('formulas-v2', { evaluateFormulas: true });
+    const sheet = wb.parsed.sheets[0];
+    const findCell = (rowIndex, col) => {
+        const row = sheet.rows[rowIndex];
+        if (!row) return null;
+        return row.find((c) => c.col === col) || null;
+    };
+    const e6 = findCell(5, 4);
+    const e7 = findCell(6, 4);
+
+    // E6 — General format, evaluator wrote a clean 15-digit string.
+    assert(e6?.value === '0.3', `114a: E6 =0.1+0.2 cell.value should be "0.3" (got ${JSON.stringify(e6?.value)})`);
+    assert(e6?.kind === 'number', `114b: E6 cell.kind should be number (got ${e6?.kind})`);
+
+    // E7 — explicit "0.00" format. cell.value is the raw "0.3"; the
+    // formatNumber pipeline adds the trailing zero.
+    assert(e7?.value === '0.3', `114c: E7 =0.1+0.2 cell.value should still be "0.3" raw (got ${JSON.stringify(e7?.value)})`);
+    assert(e7?.kind === 'number', `114d: E7 cell.kind should be number (got ${e7?.kind})`);
+
+    const tbodyRows = container.querySelectorAll('section.xlsx tbody tr');
+    const tdOf = (r, c) => tbodyRows[r].querySelectorAll('td')[c];
+    // Row 5 is E6, row 6 is E7.
+    assert(tdOf(5, 4).textContent === '0.3',
+        `114e: E6 General should render as "0.3" (got ${JSON.stringify(tdOf(5, 4).textContent)})`);
+    assert(tdOf(6, 4).textContent === '0.30',
+        `114f: E7 with "0.00" format should render as "0.30" (got ${JSON.stringify(tdOf(6, 4).textContent)})`);
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);
