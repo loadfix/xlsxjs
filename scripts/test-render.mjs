@@ -4558,6 +4558,124 @@ async function renderFixture(path, options) {
     }
 }
 
+// ── 114. smartart-matrix-pyramid: matrix + pyramid native layouts ─────────
+// The `smartart-matrix-pyramid` fixture carries two SmartArt diagrams on a
+// single sheet: a basic matrix (4 quadrants — Revenue / Growth / Quality /
+// Speed) and a basic pyramid (4 stacked bands — Vision / Strategy /
+// Execution / Review, top → bottom). The parser surfaces both with layout
+// uniqueIds matching /matrix/i and /pyramid/i; the SVG renderer's dispatch
+// picks the matrix and pyramid strategies respectively.
+//
+// Matrix SVG contract: >=4 <rect> node boxes + >=2 <line>s for the central
+// cross. Labels include "Revenue" and "Quality".
+//
+// Pyramid SVG contract: >=4 <polygon> bands. Labels include "Vision" (top)
+// and "Review" (bottom). The top polygon's x-span is narrower than the
+// bottom polygon's x-span (pyramid silhouette) — asserted by bounding box
+// off the polygons' points attribute.
+{
+    const { wb } = await renderFixture('smartart-matrix-pyramid');
+    const sheet = wb.parsed.sheets[0];
+    assert(Array.isArray(sheet.smartArt), '114a: Sheet.smartArt should be an array');
+    assert(sheet.smartArt.length === 2,
+        `114b: expected 2 SmartArt entries (got ${sheet.smartArt.length})`);
+
+    const layouts = sheet.smartArt.map((a) => a.model?.layout ?? '');
+    assert(layouts.some((l) => /matrix/i.test(l)),
+        `114c: one layout should match /matrix/i (got ${JSON.stringify(layouts)})`);
+    assert(layouts.some((l) => /pyramid/i.test(l)),
+        `114d: one layout should match /pyramid/i (got ${JSON.stringify(layouts)})`);
+
+    const matrix = sheet.smartArt.find((a) => /matrix/i.test(a.model?.layout ?? ''));
+    const pyramid = sheet.smartArt.find((a) => /pyramid/i.test(a.model?.layout ?? ''));
+    assert(matrix, '114e: matrix entry should be present');
+    assert(pyramid, '114f: pyramid entry should be present');
+
+    if (matrix && matrix.model) {
+        const names = matrix.model.rootNodes.map((r) => r.text);
+        assert(JSON.stringify(names) === JSON.stringify(['Revenue', 'Growth', 'Quality', 'Speed']),
+            `114g: matrix roots should be [Revenue, Growth, Quality, Speed] (got ${JSON.stringify(names)})`);
+    }
+    if (pyramid && pyramid.model) {
+        const names = pyramid.model.rootNodes.map((r) => r.text);
+        assert(JSON.stringify(names) === JSON.stringify(['Vision', 'Strategy', 'Execution', 'Review']),
+            `114h: pyramid roots should be [Vision, Strategy, Execution, Review] (got ${JSON.stringify(names)})`);
+    }
+
+    // SVG layout. Each diagram renders into its own aside.
+    const { container } = await renderFixture('smartart-matrix-pyramid', { smartArtLayout: 'svg' });
+    const asides = container.querySelectorAll('section.xlsx aside.xlsx-smartart');
+    assert(asides.length === 2,
+        `114i: expected 2 <aside class="xlsx-smartart"> (got ${asides.length})`);
+
+    let matrixAside = null;
+    let pyramidAside = null;
+    for (const a of asides) {
+        const layout = a.getAttribute('data-layout') ?? '';
+        if (/matrix/i.test(layout)) matrixAside = a;
+        else if (/pyramid/i.test(layout)) pyramidAside = a;
+    }
+    assert(matrixAside, '114j: matrix aside should be present');
+    assert(pyramidAside, '114k: pyramid aside should be present');
+
+    if (matrixAside) {
+        const svg = matrixAside.querySelector(':scope > svg');
+        assert(!!svg, '114l: matrix aside should contain an <svg>');
+        if (svg) {
+            const rects = svg.querySelectorAll('rect');
+            assert(rects.length >= 4,
+                `114m: matrix SVG should carry >=4 <rect> node boxes (got ${rects.length})`);
+            const lines = svg.querySelectorAll('line');
+            assert(lines.length >= 2,
+                `114n: matrix SVG should carry >=2 <line>s for the central cross (got ${lines.length})`);
+            const labels = [...svg.querySelectorAll('text')].map((t) => t.textContent);
+            assert(labels.includes('Revenue'),
+                `114o: matrix should contain a "Revenue" label (got ${JSON.stringify(labels)})`);
+            assert(labels.includes('Quality'),
+                `114p: matrix should contain a "Quality" label (got ${JSON.stringify(labels)})`);
+        }
+    }
+
+    if (pyramidAside) {
+        const svg = pyramidAside.querySelector(':scope > svg');
+        assert(!!svg, '114q: pyramid aside should contain an <svg>');
+        if (svg) {
+            const polygons = [...svg.querySelectorAll('polygon')];
+            assert(polygons.length >= 4,
+                `114r: pyramid SVG should carry >=4 <polygon> bands (got ${polygons.length})`);
+            const labels = [...svg.querySelectorAll('text')].map((t) => t.textContent);
+            assert(labels.includes('Vision'),
+                `114s: pyramid should contain a "Vision" label at the top (got ${JSON.stringify(labels)})`);
+            assert(labels.includes('Review'),
+                `114t: pyramid should contain a "Review" label at the bottom (got ${JSON.stringify(labels)})`);
+
+            // Width comparison. Parse the polygons' points attributes and
+            // compute the x-span (max x − min x) for the first and last
+            // polygon. The silhouette is narrow at the top and wider at the
+            // bottom → firstSpan < lastSpan strictly.
+            function spanOf(poly) {
+                const pts = (poly.getAttribute('points') ?? '')
+                    .split(/\s+/)
+                    .filter(Boolean)
+                    .map((p) => p.split(',').map(Number));
+                let minX = Infinity, maxX = -Infinity;
+                for (const [x] of pts) {
+                    if (!Number.isFinite(x)) continue;
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                }
+                return maxX - minX;
+            }
+            if (polygons.length >= 2) {
+                const topSpan = spanOf(polygons[0]);
+                const bottomSpan = spanOf(polygons[polygons.length - 1]);
+                assert(topSpan < bottomSpan,
+                    `114u: top polygon x-span (${topSpan}) should be narrower than bottom polygon x-span (${bottomSpan})`);
+            }
+        }
+    }
+}
+
 // ── report ────────────────────────────────────────────────────────────────
 console.log('--- xlsxjs render harness ---');
 for (const w of warnings) console.log(`  · ${w}`);

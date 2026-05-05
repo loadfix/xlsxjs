@@ -54,6 +54,7 @@ const fixtures = [
     'slicers-timelines',
     'smartart',
     'smartart-layouts',
+    'smartart-matrix-pyramid',
     'sheet-view-state',
     'tables',
     'theme-fontscheme',
