@@ -16,6 +16,7 @@ import { renderShapePreset } from './shape-presets';
 import { evaluateRule, resolveCfvo, interpolateColorScale, type ConditionalFormatting, type CfContext, type CellRange, type CfRule } from './conditional-format';
 import { renderChart } from './chart-renderer';
 import { renderSmartArtSvg } from './smartart-renderer';
+import { addSharedClass } from './shared-classes';
 
 // Excel column "width" is in units of the default font's "0" character. For
 // the default Calibri 11pt, one unit ≈ 7 pixels of content plus 5px of cell
@@ -526,6 +527,9 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
     if (options.responsive) {
         section.setAttribute('data-responsive', 'true');
     }
+    // Cross-format shared class (see shared-classes.ts). An XLSX sheet,
+    // DOCX page, and PPTX slide all carry `.oox-page`.
+    addSharedClass(section, "page");
     applySheetView(section, sheet.view, theme);
     // Sheet-protection state surfaces as a data attribute so consumers can
     // style protected sheets (e.g. a subtle banner) via CSS. xlsxjs does not
@@ -558,6 +562,8 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
     // the sheet-name banner above.
     table.setAttribute('role', 'table');
     table.setAttribute('aria-labelledby', sheetNameId);
+    // Cross-format shared class (see shared-classes.ts).
+    addSharedClass(table, "table");
 
     if (sheet.maxCol < 0) {
         section.appendChild(table);
@@ -608,17 +614,22 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
 
     const thead = document.createElement('thead');
     const headRow = document.createElement('tr');
+    // Cross-format shared class (see shared-classes.ts).
+    addSharedClass(headRow, "table-row");
     // The corner cell (top-left, empty) is decorative — the row-number
     // and column-letter gutters intersect here. Marking it aria-hidden
     // keeps screen readers from announcing an empty header cell.
     const corner = h('th') as HTMLTableCellElement;
     corner.setAttribute('aria-hidden', 'true');
+    addSharedClass(corner, "table-cell");
     headRow.appendChild(corner);
     for (let c = 0; c < colCount; c++) {
         const th = h('th', null, [indexToColumnLetters(c)]) as HTMLTableCellElement;
         // scope="col" lets screen readers associate each data cell with
         // its column-letter header (A, B, C, ...) during navigation.
         th.setAttribute('scope', 'col');
+        // Cross-format shared class (see shared-classes.ts).
+        addSharedClass(th, "table-cell");
         if (hiddenCols.has(c)) th.style.display = 'none';
         const lvl = outlineByCol.get(c);
         if (lvl) {
@@ -694,6 +705,8 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
     const tbody = document.createElement('tbody');
     for (let r = 0; r < rowCount; r++) {
         const tr = document.createElement('tr');
+        // Cross-format shared class (see shared-classes.ts).
+        addSharedClass(tr, "table-row");
         const dim = rowDim.get(r);
         if (dim?.hidden) tr.style.display = 'none';
         // Excel's row height is in points. One point = 4/3 px at 96 DPI.
@@ -707,6 +720,7 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
         // "row 3" as they navigate across.
         const rowHeader = h('th', null, [String(r + 1)]) as HTMLTableCellElement;
         rowHeader.setAttribute('scope', 'row');
+        addSharedClass(rowHeader, "table-cell");
         tr.appendChild(rowHeader);
         const cells = sheet.rows[r];
         const byCol: Record<number, typeof cells[0]> = {};
@@ -715,6 +729,8 @@ function renderSheet(sheet: Sheet, workbook: Workbook, options: Options): HTMLEl
             if (suppressedCells.has(`${r},${c}`)) continue;
             const cell = byCol[c];
             const td = document.createElement('td');
+            // Cross-format shared class (see shared-classes.ts).
+            addSharedClass(td, "table-cell");
             if (cell) renderCellContent(td, cell, styles, theme, date1904, options);
             // Dynamic-array spill anchors get a subtle dashed outline. The
             // flag is resolved at parse time from xl/metadata.xml + c/@cm.
@@ -975,6 +991,8 @@ function renderImage(
 ): HTMLElement {
     const fig = document.createElement('figure');
     fig.className = 'xlsx-image';
+    // Cross-format shared class (see shared-classes.ts).
+    addSharedClass(fig, "image");
     fig.setAttribute('data-anchor-mode', img.anchorMode);
     fig.setAttribute('data-anchor-col', String(img.col));
     fig.setAttribute('data-anchor-row', String(img.row));

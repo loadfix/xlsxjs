@@ -6827,6 +6827,23 @@
         svg.appendChild(g);
     }
 
+    const OOX_CLASSES = {
+        "wrapper": "oox-wrapper",
+        "page": "oox-page",
+        "paragraph": "oox-paragraph",
+        "run": "oox-run",
+        "heading": "oox-heading",
+        "table": "oox-table",
+        "table-row": "oox-table-row",
+        "table-cell": "oox-table-cell",
+        "image": "oox-image",
+    };
+    function addSharedClass(el, concept) {
+        if (!el)
+            return;
+        el.classList.add(OOX_CLASSES[concept]);
+    }
+
     const PX_PER_CHAR = 7;
     const PADDING_PX = 5;
     function charWidthToPx(width) {
@@ -7227,6 +7244,7 @@
         if (options.responsive) {
             section.setAttribute('data-responsive', 'true');
         }
+        addSharedClass(section, "page");
         applySheetView(section, sheet.view, theme);
         if (sheet.protection?.enabled) {
             section.setAttribute('data-sheet-protected', 'true');
@@ -7242,6 +7260,7 @@
         const table = h('table');
         table.setAttribute('role', 'table');
         table.setAttribute('aria-labelledby', sheetNameId);
+        addSharedClass(table, "table");
         if (sheet.maxCol < 0) {
             section.appendChild(table);
             return section;
@@ -7282,12 +7301,15 @@
         table.appendChild(colgroup);
         const thead = document.createElement('thead');
         const headRow = document.createElement('tr');
+        addSharedClass(headRow, "table-row");
         const corner = h('th');
         corner.setAttribute('aria-hidden', 'true');
+        addSharedClass(corner, "table-cell");
         headRow.appendChild(corner);
         for (let c = 0; c < colCount; c++) {
             const th = h('th', null, [indexToColumnLetters(c)]);
             th.setAttribute('scope', 'col');
+            addSharedClass(th, "table-cell");
             if (hiddenCols.has(c))
                 th.style.display = 'none';
             const lvl = outlineByCol.get(c);
@@ -7345,6 +7367,7 @@
         const tbody = document.createElement('tbody');
         for (let r = 0; r < rowCount; r++) {
             const tr = document.createElement('tr');
+            addSharedClass(tr, "table-row");
             const dim = rowDim.get(r);
             if (dim?.hidden)
                 tr.style.display = 'none';
@@ -7356,6 +7379,7 @@
             }
             const rowHeader = h('th', null, [String(r + 1)]);
             rowHeader.setAttribute('scope', 'row');
+            addSharedClass(rowHeader, "table-cell");
             tr.appendChild(rowHeader);
             const cells = sheet.rows[r];
             const byCol = {};
@@ -7367,6 +7391,7 @@
                     continue;
                 const cell = byCol[c];
                 const td = document.createElement('td');
+                addSharedClass(td, "table-cell");
                 if (cell)
                     renderCellContent(td, cell, styles, theme, date1904, options);
                 if (cell?.isSpillAnchor)
@@ -7553,6 +7578,7 @@
     function renderImage(img, widthByCol, hiddenCols, rowDim) {
         const fig = document.createElement('figure');
         fig.className = 'xlsx-image';
+        addSharedClass(fig, "image");
         fig.setAttribute('data-anchor-mode', img.anchorMode);
         fig.setAttribute('data-anchor-col', String(img.col));
         fig.setAttribute('data-anchor-row', String(img.row));
