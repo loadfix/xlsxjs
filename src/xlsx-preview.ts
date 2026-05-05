@@ -104,6 +104,18 @@ export interface Options {
     // Default false — Excel's own cache is authoritative for files that
     // actually went through a saved-from-Excel pipeline.
     evaluateFormulasForce: boolean;
+    /**
+     * Responsive / mobile rendering. When `true`, each sheet's
+     * `<section class="xlsx">` gets a `data-responsive="true"` hook and the
+     * stylesheet picks up an overflow-x: auto rule on the section plus
+     * sticky first-column / first-row CSS so the gutter and header stay in
+     * view while the user horizontal-scrolls. Touch viewports retain a
+     * natural scroll gesture; desktop scrollbars remain visible.
+     *
+     * Default `false` — existing consumers keep the horizontal overflow
+     * on the viewport itself.
+     */
+    responsive: boolean;
     h: typeof h;
 }
 
@@ -121,6 +133,7 @@ export const defaultOptions: Options = {
     smartArtLayout: 'tree',
     evaluateFormulas: false,
     evaluateFormulasForce: false,
+    responsive: false,
     h,
 };
 

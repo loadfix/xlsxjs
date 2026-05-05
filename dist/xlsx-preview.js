@@ -6848,6 +6848,7 @@
                 withEmbeddings: hasEmbeddings,
                 withCharts: hasRenderedCharts,
                 withSmartArt: hasSmartArt,
+                responsive: options.responsive === true,
             }));
             for (const sheet of workbook.sheets) {
                 if (sheet.state !== 'visible')
@@ -6881,6 +6882,29 @@
 }
 .${className} figure.xlsx-chart > svg {
     display: block; max-width: 100%;
+}` : '';
+        const responsiveCss = opts.responsive ? `
+.${className}[data-responsive="true"] {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+}
+.${className}[data-responsive="true"] > table {
+    min-width: max-content;
+}
+.${className}[data-responsive="true"] th:first-child,
+.${className}[data-responsive="true"] td:first-child {
+    position: sticky; left: 0; z-index: 1; background: #f3f3f3;
+}
+.${className}[data-responsive="true"] thead th {
+    position: sticky; top: 0; z-index: 2; background: #f3f3f3;
+}
+.${className}[data-responsive="true"] thead th:first-child {
+    z-index: 3;
+}
+@media (max-width: 768px) {
+    .${className}[data-responsive="true"] { font-size: 0.85em; }
+    .${className}[data-responsive="true"] th, .${className}[data-responsive="true"] td { padding: 1px 4px; }
 }` : '';
         const smartArtCss = opts.withSmartArt ? `
 .${className} .xlsx-smartart {
@@ -6985,7 +7009,7 @@
 .${className} .xlsx-header, .${className} .xlsx-footer {
     display: grid; grid-template-columns: 1fr 1fr 1fr;
     font-size: 0.85em; color: #666; margin: 0.5em 0;
-}${smartArtCss}
+}${smartArtCss}${responsiveCss}
     `.trim();
         return style;
     }
@@ -7200,6 +7224,9 @@
         const theme = workbook.theme;
         const date1904 = workbook.date1904;
         const section = h('section', { class: options.className, 'data-sheet-name': sheet.name });
+        if (options.responsive) {
+            section.setAttribute('data-responsive', 'true');
+        }
         applySheetView(section, sheet.view, theme);
         if (sheet.protection?.enabled) {
             section.setAttribute('data-sheet-protected', 'true');
@@ -9537,6 +9564,7 @@
         smartArtLayout: 'tree',
         evaluateFormulas: false,
         evaluateFormulasForce: false,
+        responsive: false,
         h,
     };
     function mergeOptions(userOptions) {

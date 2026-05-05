@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>xlsxjs — responsive render option demo</title>
+    <script src="../node_modules/jszip/dist/jszip.js"></script>
+    <script src="../dist/xlsx-preview.js"></script>
+    <style>
+        :root { font-family: system-ui, sans-serif; }
+        body { margin: 0; padding: 16px; background: #f5f5f5; color: #222; }
+        h1 { margin: 0 0 4px; font-size: 1.4rem; }
+        p.lead { margin: 0 0 16px; color: #555; }
+        .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+        .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        .pane {
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 12px;
+            min-width: 0;
+        }
+        .pane h2 { font-size: 1rem; margin: 0 0 8px; color: #333; }
+        .pane .viewport {
+            border: 1px dashed #bbb;
+            border-radius: 4px;
+            overflow: auto;
+            max-height: 70vh;
+        }
+        /* Constrain the responsive pane to a phone-ish width to make the
+           sticky-column + sticky-row behaviour obvious. */
+        .pane.responsive .viewport { width: 375px; margin: 0 auto; resize: horizontal; }
+        @media (max-width: 900px) {
+            .panes { grid-template-columns: 1fr; }
+            .pane.responsive .viewport { width: auto; }
+        }
+        .note { font-size: 0.8rem; color: #666; margin-top: 6px; }
+    </style>
+</head>
+<body>
+    <h1>xlsxjs responsive mode</h1>
+    <p class="lead">
+        Left: default — the sheet's <code>&lt;section&gt;</code> lays out at its natural width; horizontal overflow lives on the outer viewport.
+        Right: <code>responsive: true</code> — the section itself becomes an <code>overflow-x: auto</code> scroll container with sticky first column &amp; header row.
+    </p>
+
+    <div class="controls">
+        <label>Workbook: <input type="file" id="picker" accept=".xlsx" /></label>
+        <button id="sample">Use bundled sample</button>
+    </div>
+
+    <div class="panes">
+        <div class="pane default">
+            <h2>Default: <code>responsive: false</code></h2>
+            <div class="viewport" id="default-out"></div>
+            <p class="note">Section width = table width. Scroll the pane itself to see columns to the right.</p>
+        </div>
+        <div class="pane responsive">
+            <h2>Responsive: <code>responsive: true</code></h2>
+            <div class="viewport" id="responsive-out"></div>
+            <p class="note">Section caps at 100%; horizontal scroll lives inside the section, first column &amp; header row stay pinned.</p>
+        </div>
+    </div>
+
+    <script>
+        const defaultOut = document.getElementById('default-out');
+        const responsiveOut = document.getElementById('responsive-out');
+
+        async function renderBoth(buf) {
+            await Promise.all([
+                window.xlsx.renderAsync(buf, defaultOut),
+                // xlsx.renderAsync accepts ArrayBuffer directly; pass the
+                // same buffer to both panes so there's no chance of
+                // diverging parses.
+                window.xlsx.renderAsync(buf, responsiveOut, undefined, { responsive: true }),
+            ]);
+        }
+
+        document.getElementById('picker').addEventListener('change', async (e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            const buf = await file.arrayBuffer();
+            await renderBoth(buf);
+        });
+
+        document.getElementById('sample').addEventListener('click', async () => {
+            const buf = await fetch('../tests/render-test/basic/workbook.xlsx').then((r) => r.arrayBuffer());
+            await renderBoth(buf);
+        });
+    </script>
+</body>
+</html>
