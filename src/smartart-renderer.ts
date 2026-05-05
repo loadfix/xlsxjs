@@ -1,6 +1,7 @@
 // SmartArtModel → inline SVG. Wave 10 shipped a single top-down hierarchy
-// layout; Wave 11 adds two more layout strategies so the common diagram
-// variants render as something closer to what Excel paints:
+// layout; Wave 11 added orgchart + cycle; Wave 12 adds matrix + pyramid so
+// the common diagram variants render as something closer to what Excel
+// paints:
 //
 //   · 'hierarchy' — every depth level lays out horizontally across the
 //     viewport, parent nodes connect to children via straight diagonal
@@ -12,10 +13,16 @@
 //   · 'cycle'     — nodes arrange around a circle, connected clockwise by
 //     arc paths with a shared arrow marker so the flow closes back to the
 //     first node.
+//   · 'matrix'    — 4-quadrant 2×2 grid. Takes the first 4 root nodes (pad
+//     with blanks if fewer); a central <line> cross separates the cells. No
+//     connectors — matrix is a classification, not a flow.
+//   · 'pyramid'   — N stacked horizontal bands, narrow at the top and wide
+//     at the bottom. Each band is a <polygon> trapezoid; labels centred.
 //
 // Dispatch is `opts.layout` first (explicit override), then a regex match
 // against `model.layout` uniqueId (…/orgChart/… → orgchart,
-// …/cycle/… → cycle), falling through to the hierarchy default.
+// …/cycle/… → cycle, …/matrix/… → matrix, …/pyramid/… → pyramid),
+// falling through to the hierarchy default.
 //
 // Security contract:
 //   · Node text reaches the DOM via `textContent` on `<text>` elements. We
@@ -62,7 +69,13 @@ const PALETTE = [
 const CONNECTOR_COLOR = '#888';
 const TEXT_COLOR = '#ffffff';
 
-export type SmartArtLayoutStrategy = 'hierarchy' | 'orgchart' | 'cycle' | 'auto';
+export type SmartArtLayoutStrategy =
+    | 'hierarchy'
+    | 'orgchart'
+    | 'cycle'
+    | 'matrix'
+    | 'pyramid'
+    | 'auto';
 
 export interface RenderSmartArtOptions {
     width?: number;
@@ -83,6 +96,8 @@ export interface RenderSmartArtOptions {
  *     the model's announced layout.
  *   · `model.layout` uniqueId matching `/orgChart/i` → orgchart strategy.
  *   · `model.layout` uniqueId matching `/cycle/i`   → cycle strategy.
+ *   · `model.layout` uniqueId matching `/matrix/i`  → matrix strategy.
+ *   · `model.layout` uniqueId matching `/pyramid/i` → pyramid strategy.
  *   · everything else → hierarchy (default) strategy.
  */
 export function renderSmartArtSvg(
@@ -100,6 +115,12 @@ export function renderSmartArtSvg(
     if (strategy === 'cycle') {
         return renderCycle(model, width, height);
     }
+    if (strategy === 'matrix') {
+        return renderMatrix(model, width, height);
+    }
+    if (strategy === 'pyramid') {
+        return renderPyramid(model, width, height);
+    }
     // Both hierarchy and orgchart share the level-based placement; the only
     // difference is how connectors are drawn.
     return renderHierarchyOrOrgchart(model, width, height, strategy === 'orgchart');
@@ -111,13 +132,21 @@ export function renderSmartArtSvg(
 function resolveStrategy(
     layoutName: string | null,
     override: SmartArtLayoutStrategy,
-): 'hierarchy' | 'orgchart' | 'cycle' {
-    if (override === 'hierarchy' || override === 'orgchart' || override === 'cycle') {
+): 'hierarchy' | 'orgchart' | 'cycle' | 'matrix' | 'pyramid' {
+    if (
+        override === 'hierarchy' ||
+        override === 'orgchart' ||
+        override === 'cycle' ||
+        override === 'matrix' ||
+        override === 'pyramid'
+    ) {
         return override;
     }
     if (layoutName) {
         if (/orgChart/i.test(layoutName)) return 'orgchart';
         if (/cycle/i.test(layoutName)) return 'cycle';
+        if (/matrix/i.test(layoutName)) return 'matrix';
+        if (/pyramid/i.test(layoutName)) return 'pyramid';
     }
     return 'hierarchy';
 }
@@ -399,6 +428,168 @@ function renderCycle(model: SmartArtModel, width: number, height: number): SVGSV
     const fill = PALETTE[0];
     for (const p of placed) {
         appendNode(svg, p.x, p.y, CYCLE_NODE_WIDTH, CYCLE_NODE_HEIGHT, CYCLE_NODE_RX, fill, p.node.text);
+    }
+
+    return svg;
+}
+
+// Matrix layout: 4-quadrant 2×2 grid. Takes the first 4 root-level nodes
+// (or, when a single synthetic root wraps them, the first 4 children), pads
+// with blank nodes if fewer, and paints each as a rounded rect filled with
+// its depth-indexed palette colour. A central <line> cross separates the
+// quadrants. No connectors — matrix encodes a classification, not a flow.
+function renderMatrix(model: SmartArtModel, width: number, height: number): SVGSVGElement {
+    const roots = model.rootNodes;
+    // Prefer direct roots when there are several of them (typical matrix
+    // shape — 4 peer classification cells). Fall back to the single root's
+    // children when Excel wraps them in one synthetic root, mirroring the
+    // pattern used by the cycle renderer.
+    let source: SmartArtNode[] = [];
+    if (roots.length > 1) {
+        source = roots;
+    } else if (roots.length === 1) {
+        source = roots[0].children.length > 0 ? roots[0].children : roots;
+    }
+
+    // Always render exactly 4 quadrants. Pad with blank nodes if fewer, clip
+    // the overflow if more. A blank node still carries an empty label so the
+    // palette keeps its position; consumers visually see a coloured cell.
+    const blank: SmartArtNode = { id: '', text: '', children: [], level: 0 };
+    const cells: SmartArtNode[] = [
+        source[0] ?? blank,
+        source[1] ?? blank,
+        source[2] ?? blank,
+        source[3] ?? blank,
+    ];
+
+    const svg = createSvgRoot(width, height);
+
+    const margin = 20;
+    const cellW = Math.max(NODE_WIDTH, (width - margin * 3) / 2);
+    const cellH = Math.max(NODE_HEIGHT, (height - margin * 3) / 2);
+
+    // Centre coordinates for each of the four cells, in row-major order:
+    //   index 0 → top-left, 1 → top-right, 2 → bottom-left, 3 → bottom-right.
+    const positions: Array<{ cx: number; cy: number }> = [
+        { cx: margin + cellW / 2,                      cy: margin + cellH / 2 },
+        { cx: margin + cellW + margin + cellW / 2,     cy: margin + cellH / 2 },
+        { cx: margin + cellW / 2,                      cy: margin + cellH + margin + cellH / 2 },
+        { cx: margin + cellW + margin + cellW / 2,     cy: margin + cellH + margin + cellH / 2 },
+    ];
+
+    // Central cross. Horizontal + vertical lines at the grid midpoint so the
+    // viewer reads the four cells as a partition, not as four free-floating
+    // boxes. The test harness asserts at least two <line> elements in the
+    // matrix SVG.
+    const midX = margin + cellW + margin / 2;
+    const midY = margin + cellH + margin / 2;
+    const crossColor = '#ccc';
+
+    const hLine = document.createElementNS(SVG_NS, 'line');
+    hLine.setAttribute('x1', String(margin));
+    hLine.setAttribute('y1', String(midY));
+    hLine.setAttribute('x2', String(width - margin));
+    hLine.setAttribute('y2', String(midY));
+    hLine.setAttribute('stroke', crossColor);
+    hLine.setAttribute('stroke-width', '1');
+    svg.appendChild(hLine);
+
+    const vLine = document.createElementNS(SVG_NS, 'line');
+    vLine.setAttribute('x1', String(midX));
+    vLine.setAttribute('y1', String(margin));
+    vLine.setAttribute('x2', String(midX));
+    vLine.setAttribute('y2', String(height - margin));
+    vLine.setAttribute('stroke', crossColor);
+    vLine.setAttribute('stroke-width', '1');
+    svg.appendChild(vLine);
+
+    // One rounded-rect node per quadrant. Palette index = quadrant position,
+    // so the first four palette entries each own one cell regardless of the
+    // original tree depth.
+    for (let i = 0; i < cells.length; i++) {
+        const pos = positions[i];
+        const fill = PALETTE[i % PALETTE.length];
+        appendNode(svg, pos.cx, pos.cy, cellW, cellH, NODE_RX, fill, cells[i].text);
+    }
+
+    return svg;
+}
+
+// Pyramid layout: flatten the model to a list of root-level nodes and paint
+// them as N stacked horizontal bands from top (narrow) to bottom (wide).
+// Each band is a <polygon> trapezoid whose top-width and bottom-width
+// interpolate linearly between 0.2*w and 0.9*w. Labels centre inside each
+// trapezoid.
+function renderPyramid(model: SmartArtModel, width: number, height: number): SVGSVGElement {
+    const roots = model.rootNodes;
+    // Pick up the peer list — direct roots when there are multiple, or the
+    // single root's children when Excel wrapped them in one synthetic node.
+    let nodes: SmartArtNode[] = [];
+    if (roots.length > 1) {
+        nodes = roots;
+    } else if (roots.length === 1) {
+        nodes = roots[0].children.length > 0 ? roots[0].children : roots;
+    }
+
+    const svg = createSvgRoot(width, height);
+    if (nodes.length === 0) return svg;
+
+    const n = nodes.length;
+    const topMargin = 20;
+    const bottomMargin = 20;
+    const usableH = Math.max(n * 20, height - topMargin - bottomMargin);
+    const bandH = usableH / n;
+
+    // Width interpolation. At the very top of the pyramid the trapezoid is
+    // 0.2*w wide; at the very bottom it spans 0.9*w. Every band's top-width
+    // and bottom-width are linear samples along that ramp, keyed by the
+    // band's y coordinates.
+    const minWidth = 0.2 * width;
+    const maxWidth = 0.9 * width;
+    const cx = width / 2;
+
+    function widthAt(fraction: number): number {
+        // fraction: 0 at the apex, 1 at the base.
+        return minWidth + (maxWidth - minWidth) * fraction;
+    }
+
+    for (let i = 0; i < n; i++) {
+        const topY = topMargin + i * bandH;
+        const bottomY = topY + bandH;
+        // Depth-into-the-pyramid for the top / bottom edge of this band.
+        // i=0, top → 0; last band, bottom → 1.
+        const topFrac = i / n;
+        const bottomFrac = (i + 1) / n;
+        const topW = widthAt(topFrac);
+        const botW = widthAt(bottomFrac);
+
+        const tlx = cx - topW / 2;
+        const trx = cx + topW / 2;
+        const blx = cx - botW / 2;
+        const brx = cx + botW / 2;
+
+        const points = `${tlx.toFixed(2)},${topY.toFixed(2)} ` +
+                       `${trx.toFixed(2)},${topY.toFixed(2)} ` +
+                       `${brx.toFixed(2)},${bottomY.toFixed(2)} ` +
+                       `${blx.toFixed(2)},${bottomY.toFixed(2)}`;
+
+        const poly = document.createElementNS(SVG_NS, 'polygon');
+        poly.setAttribute('points', points);
+        poly.setAttribute('fill', PALETTE[i % PALETTE.length]);
+        poly.setAttribute('stroke', PALETTE[i % PALETTE.length]);
+        svg.appendChild(poly);
+
+        const label = document.createElementNS(SVG_NS, 'text');
+        label.setAttribute('x', String(cx));
+        label.setAttribute('y', String((topY + bottomY) / 2));
+        label.setAttribute('text-anchor', 'middle');
+        label.setAttribute('dominant-baseline', 'middle');
+        label.setAttribute('fill', TEXT_COLOR);
+        label.setAttribute('font-family', 'system-ui, sans-serif');
+        label.setAttribute('font-size', '12');
+        // Node text is attacker-controlled — textContent only.
+        label.textContent = nodes[i].text;
+        svg.appendChild(label);
     }
 
     return svg;
