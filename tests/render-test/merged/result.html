@@ -82,9 +82,9 @@
     display: grid; grid-template-columns: 1fr 1fr 1fr;
     font-size: 0.85em; color: #666; margin: 0.5em 0;
 }</style>
-<section class="xlsx" data-sheet-name="Report">
-<div class="xlsx-sheet-name">Report</div>
-<table>
+<section class="xlsx oox-page" data-sheet-name="Report">
+<div class="xlsx-sheet-name" id="xlsx-sheet-name-Report">Report</div>
+<table role="table" aria-labelledby="xlsx-sheet-name-Report" class="oox-table" aria-colcount="4" aria-rowcount="5">
 <colgroup>
 <col>
 <col style="width: 131px;">
@@ -92,35 +92,35 @@
 <col style="width: 61px;">
 </colgroup>
 <thead>
-<tr>
-<th>
+<tr class="oox-table-row">
+<th aria-hidden="true" class="oox-table-cell">
 </th>
-<th>A</th>
-<th>B</th>
-<th>C</th>
+<th scope="col" class="oox-table-cell">A</th>
+<th scope="col" class="oox-table-cell">B</th>
+<th scope="col" class="oox-table-cell">C</th>
 </tr>
 </thead>
 <tbody>
-<tr>
-<th>1</th>
-<td colspan="3" class="xlsx-merged">Q4 Report</td>
+<tr class="oox-table-row">
+<th scope="row" class="oox-table-cell">1</th>
+<td class="oox-table-cell xlsx-merged" colspan="3">Q4 Report</td>
 </tr>
-<tr>
-<th>2</th>
-<td>Name</td>
-<td>Region</td>
-<td>Score</td>
+<tr class="oox-table-row">
+<th scope="row" class="oox-table-cell">2</th>
+<td class="oox-table-cell">Name</td>
+<td class="oox-table-cell">Region</td>
+<td class="oox-table-cell">Score</td>
 </tr>
-<tr>
-<th>3</th>
-<td rowspan="2" class="xlsx-merged">Alice</td>
-<td>North</td>
-<td class="xlsx-numeric">90</td>
+<tr class="oox-table-row">
+<th scope="row" class="oox-table-cell">3</th>
+<td class="oox-table-cell xlsx-merged" rowspan="2">Alice</td>
+<td class="oox-table-cell">North</td>
+<td class="oox-table-cell xlsx-numeric">90</td>
 </tr>
-<tr>
-<th>4</th>
-<td>North</td>
-<td class="xlsx-numeric">85</td>
+<tr class="oox-table-row">
+<th scope="row" class="oox-table-cell">4</th>
+<td class="oox-table-cell">North</td>
+<td class="oox-table-cell xlsx-numeric">85</td>
 </tr>
 </tbody>
 </table>

@@ -82,9 +82,9 @@
     display: grid; grid-template-columns: 1fr 1fr 1fr;
     font-size: 0.85em; color: #666; margin: 0.5em 0;
 }</style>
-<section class="xlsx" data-sheet-name="People">
-<div class="xlsx-sheet-name">People</div>
-<table>
+<section class="xlsx oox-page" data-sheet-name="People">
+<div class="xlsx-sheet-name" id="xlsx-sheet-name-People">People</div>
+<table role="table" aria-labelledby="xlsx-sheet-name-People" class="oox-table" aria-colcount="4" aria-rowcount="4">
 <colgroup>
 <col>
 <col>
@@ -92,32 +92,32 @@
 <col>
 </colgroup>
 <thead>
-<tr>
-<th>
+<tr class="oox-table-row">
+<th aria-hidden="true" class="oox-table-cell">
 </th>
-<th>A</th>
-<th>B</th>
-<th>C</th>
+<th scope="col" class="oox-table-cell">A</th>
+<th scope="col" class="oox-table-cell">B</th>
+<th scope="col" class="oox-table-cell">C</th>
 </tr>
 </thead>
 <tbody>
-<tr>
-<th>1</th>
-<td>Name</td>
-<td>Score</td>
-<td>Passed</td>
+<tr class="oox-table-row">
+<th scope="row" class="oox-table-cell">1</th>
+<td class="oox-table-cell">Name</td>
+<td class="oox-table-cell">Score</td>
+<td class="oox-table-cell">Passed</td>
 </tr>
-<tr>
-<th>2</th>
-<td>Alice</td>
-<td class="xlsx-numeric">90</td>
-<td>TRUE</td>
+<tr class="oox-table-row">
+<th scope="row" class="oox-table-cell">2</th>
+<td class="oox-table-cell">Alice</td>
+<td class="oox-table-cell xlsx-numeric">90</td>
+<td class="oox-table-cell">TRUE</td>
 </tr>
-<tr>
-<th>3</th>
-<td>Bob</td>
-<td class="xlsx-numeric">72</td>
-<td>FALSE</td>
+<tr class="oox-table-row">
+<th scope="row" class="oox-table-cell">3</th>
+<td class="oox-table-cell">Bob</td>
+<td class="oox-table-cell xlsx-numeric">72</td>
+<td class="oox-table-cell">FALSE</td>
 </tr>
 </tbody>
 </table>
