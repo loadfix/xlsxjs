@@ -16,6 +16,7 @@
         }
     }
     const OLE_CFB_MAGIC = [0xd0, 0xcf, 0x11, 0xe0];
+    const MAX_MEDIA_BYTES = 32 * 1024 * 1024;
     async function bytesOf(data) {
         if (data instanceof Uint8Array)
             return data;
@@ -35,6 +36,7 @@
         constructor() {
             this.parts = {};
             this.media = {};
+            this.embeddings = {};
             this.parsed = null;
         }
         static async load(data, parser) {
@@ -101,6 +103,13 @@
                 }
             }
             for (const p of Object.keys(zip.files)) {
+                if (/^xl\/ctrlProps\/.*\.xml$/i.test(p)) {
+                    const xml = await readIfPresent(p);
+                    if (xml)
+                        wb.parts[p] = xml;
+                }
+            }
+            for (const p of Object.keys(zip.files)) {
                 if (/^xl\/comments\d*\.xml$/i.test(p)) {
                     const xml = await readIfPresent(p);
                     if (xml)
@@ -109,6 +118,13 @@
             }
             for (const p of Object.keys(zip.files)) {
                 if (/^xl\/charts\/.*\.xml$/i.test(p)) {
+                    const xml = await readIfPresent(p);
+                    if (xml)
+                        wb.parts[p] = xml;
+                }
+            }
+            for (const p of Object.keys(zip.files)) {
+                if (/^xl\/diagrams\/.*\.xml$/i.test(p)) {
                     const xml = await readIfPresent(p);
                     if (xml)
                         wb.parts[p] = xml;
@@ -145,12 +161,27 @@
                     const bin = zip.file(p);
                     if (!bin)
                         continue;
-                    const base64 = await bin.async('base64');
-                    const mime = guessMime(p);
+                    const buf = await bin.async('uint8array');
+                    if (buf.byteLength > MAX_MEDIA_BYTES)
+                        continue;
+                    const base64 = bytesToBase64(buf);
+                    const mime = sanitizeMediaMime(guessMime(p));
                     wb.media[p] = `data:${mime};base64,${base64}`;
                 }
             }
-            wb.parsed = parser.parse(wb.parts, wb.media);
+            const contentTypesXml = await readIfPresent('[Content_Types].xml');
+            if (contentTypesXml)
+                wb.parts['[Content_Types].xml'] = contentTypesXml;
+            for (const p of Object.keys(zip.files)) {
+                if (/^xl\/embeddings\/[^/]+$/i.test(p)) {
+                    const bin = zip.file(p);
+                    if (!bin)
+                        continue;
+                    const buf = await bin.async('uint8array');
+                    wb.embeddings[p] = buf;
+                }
+            }
+            wb.parsed = parser.parse(wb.parts, wb.media, wb.embeddings);
             return wb;
         }
     }
@@ -168,6 +199,43 @@
             case 'tiff': return 'image/tiff';
             default: return 'application/octet-stream';
         }
+    }
+    const MEDIA_MIME_ALLOWLIST = new Set([
+        'image/png',
+        'image/jpeg',
+        'image/gif',
+        'image/svg+xml',
+        'image/webp',
+        'image/bmp',
+        'image/tiff',
+        'application/octet-stream',
+        'text/plain',
+        'application/pdf',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'application/vnd.ms-excel',
+        'application/msword',
+        'application/vnd.ms-powerpoint',
+    ]);
+    function sanitizeMediaMime(mime) {
+        return MEDIA_MIME_ALLOWLIST.has(mime) ? mime : 'application/octet-stream';
+    }
+    const MAX_EMBEDDING_BYTES = MAX_MEDIA_BYTES;
+    function bytesToDataUrl(bytes, mime) {
+        if (bytes.byteLength > MAX_MEDIA_BYTES)
+            return null;
+        const safe = sanitizeMediaMime(mime);
+        return `data:${safe};base64,${bytesToBase64(bytes)}`;
+    }
+    function bytesToBase64(bytes) {
+        const CHUNK = 0x8000;
+        let binary = '';
+        for (let i = 0; i < bytes.length; i += CHUNK) {
+            const slice = bytes.subarray(i, Math.min(i + CHUNK, bytes.length));
+            binary += String.fromCharCode.apply(null, slice);
+        }
+        return btoa(binary);
     }
 
     function columnLettersToIndex(letters) {
@@ -311,11 +379,11 @@
         }
         return null;
     }
-    function parseXml$2(xml) {
+    function parseXml$3(xml) {
         return new DOMParser().parseFromString(xml, 'application/xml');
     }
     function parseStyles(xml) {
-        const doc = parseXml$2(xml);
+        const doc = parseXml$3(xml);
         return {
             numFmts: parseNumFmts(doc),
             fonts: parseFonts(doc),
@@ -668,7 +736,7 @@
             return `#${rgb[1].toLowerCase()}`;
         return null;
     }
-    function parseXml$1(xml) {
+    function parseXml$2(xml) {
         return new DOMParser().parseFromString(xml, 'application/xml');
     }
     function parseTheme(xml) {
@@ -677,7 +745,7 @@
         colors[1] = '#000000';
         colors[2] = '#e7e6e6';
         colors[3] = '#44546a';
-        const doc = parseXml$1(xml);
+        const doc = parseXml$2(xml);
         const { majorFont, minorFont } = parseFontScheme(doc);
         const scheme = doc.getElementsByTagNameNS(NS_DRAW, 'clrScheme').item(0);
         if (!scheme)
@@ -1445,34 +1513,1073 @@
     function toHex(n) {
         return Math.max(0, Math.min(255, n)).toString(16).padStart(2, '0');
     }
-    function evalExpression(rule, cell, _range, _ctx) {
+    function evalExpression(rule, cell, range, ctx) {
         const raw = rule.formulas[0] ?? '';
         const src = raw.trim().replace(/^=/, '');
-        const m = /^\$?([A-Z]+)\$?([1-9][0-9]*)\s*(<=|>=|<>|=|<|>)\s*(.+)$/.exec(src);
-        if (!m) {
+        return evalExpr(src, cell);
+    }
+    function evalExpr(src, cell, range, ctx) {
+        const s = src.trim();
+        if (!s)
             return false;
+        const boolCall = matchCall(s, ['AND', 'OR', 'NOT']);
+        if (boolCall) {
+            const args = splitArgs(boolCall.inner);
+            if (boolCall.name === 'AND') {
+                if (args.length === 0)
+                    return false;
+                for (const a of args)
+                    if (!evalExpr(a, cell))
+                        return false;
+                return true;
+            }
+            if (boolCall.name === 'OR') {
+                if (args.length === 0)
+                    return false;
+                for (const a of args)
+                    if (evalExpr(a, cell))
+                        return true;
+                return false;
+            }
+            if (boolCall.name === 'NOT') {
+                if (args.length !== 1)
+                    return false;
+                return !evalExpr(args[0], cell);
+            }
         }
-        const [, , , op, rhs] = m;
-        const v = numericValue(cell);
-        const rhsLit = parseFormulaLiteral(rhs);
-        if (v === null || typeof rhsLit !== 'number')
+        const modMatch = /^MOD\s*\(\s*(ROW|COLUMN)\s*\(\s*\)\s*,\s*(-?\d+)\s*\)\s*(=|<>)\s*(-?\d+)\s*$/i.exec(s);
+        if (modMatch) {
+            const axis = modMatch[1].toUpperCase();
+            const divisor = Number(modMatch[2]);
+            const op = modMatch[3];
+            const target = Number(modMatch[4]);
+            if (divisor === 0)
+                return false;
+            const raw = (axis === 'ROW' ? cell.row : cell.col) + 1;
+            const m = ((raw % divisor) + divisor) % divisor;
+            return op === '=' ? m === target : m !== target;
+        }
+        const parityMatch = /^(ISEVEN|ISODD)\s*\(\s*(ROW|COLUMN)\s*\(\s*\)\s*\)\s*$/i.exec(s);
+        if (parityMatch) {
+            const fn = parityMatch[1].toUpperCase();
+            const axis = parityMatch[2].toUpperCase();
+            const raw = (axis === 'ROW' ? cell.row : cell.col) + 1;
+            return fn === 'ISEVEN' ? raw % 2 === 0 : raw % 2 !== 0;
+        }
+        const isnumSearch = /^ISNUMBER\s*\(\s*(SEARCH\s*\(.*\))\s*\)\s*$/i.exec(s);
+        if (isnumSearch)
+            return evalSearch(isnumSearch[1], cell);
+        const typePred = matchCall(s, ['ISNUMBER', 'ISBLANK', 'ISERROR', 'ISEVEN', 'ISODD']);
+        if (typePred) {
+            const args = splitArgs(typePred.inner);
+            if (args.length !== 1)
+                return false;
+            const arg = args[0].trim();
+            if (typePred.name === 'ISEVEN' || typePred.name === 'ISODD') {
+                if (!isCellRef(arg))
+                    return false;
+                const n = numericValue(cell);
+                if (n === null || !Number.isFinite(n))
+                    return false;
+                const even = Math.trunc(n) % 2 === 0;
+                return typePred.name === 'ISEVEN' ? even : !even;
+            }
+            if (!isCellRef(arg))
+                return false;
+            if (typePred.name === 'ISNUMBER')
+                return cell.kind === 'number' || cell.kind === 'boolean';
+            if (typePred.name === 'ISBLANK')
+                return evalContainsBlanks(cell);
+            if (typePred.name === 'ISERROR')
+                return cell.kind === 'error';
+        }
+        const searchCmp = /^(SEARCH\s*\(.*\))\s*(>=|>|<>|=)\s*(-?\d+)\s*$/i.exec(s);
+        if (searchCmp) {
+            const hit = evalSearch(searchCmp[1], cell);
+            const target = Number(searchCmp[3]);
+            switch (searchCmp[2]) {
+                case '>':
+                case '>=':
+                    return hit && target >= 0;
+                case '=':
+                    return hit && target >= 1;
+                case '<>':
+                    return !hit;
+                default: return false;
+            }
+        }
+        if (/^SEARCH\s*\(.*\)\s*$/i.test(s))
+            return evalSearch(s, cell);
+        const leftRight = /^(LEFT|RIGHT)\s*\(\s*([^,]+?)\s*(?:,\s*(\d+)\s*)?\)\s*(=|<>)\s*(".*")\s*$/i.exec(s);
+        if (leftRight) {
+            const fn = leftRight[1].toUpperCase();
+            const argRef = leftRight[2].trim();
+            const n = leftRight[3] ? Number(leftRight[3]) : 1;
+            const op = leftRight[4];
+            const lit = parseQuoted(leftRight[5]);
+            if (!isCellRef(argRef) || lit === null || !Number.isFinite(n) || n < 0)
+                return false;
+            const v = cell.value ?? '';
+            const slice = fn === 'LEFT' ? v.slice(0, n) : (n === 0 ? '' : v.slice(-n));
+            const hit = slice === lit;
+            return op === '=' ? hit : !hit;
+        }
+        const m = /^\$?([A-Z]+)\$?([1-9][0-9]*)\s*(<=|>=|<>|=|<|>)\s*(.+)$/.exec(s);
+        if (m) {
+            const [, , , op, rhs] = m;
+            const v = numericValue(cell);
+            const rhsLit = parseFormulaLiteral(rhs);
+            if (v === null || typeof rhsLit !== 'number')
+                return false;
+            switch (op) {
+                case '<': return v < rhsLit;
+                case '<=': return v <= rhsLit;
+                case '>': return v > rhsLit;
+                case '>=': return v >= rhsLit;
+                case '=': return v === rhsLit;
+                case '<>': return v !== rhsLit;
+                default: return false;
+            }
+        }
+        return false;
+    }
+    function matchCall(src, names) {
+        const s = src.trim();
+        for (const n of names) {
+            if (s.length < n.length + 2)
+                continue;
+            if (s.slice(0, n.length).toUpperCase() !== n)
+                continue;
+            let i = n.length;
+            while (i < s.length && (s[i] === ' ' || s[i] === '\t'))
+                i++;
+            if (s[i] !== '(')
+                continue;
+            let depth = 0;
+            let inStr = false;
+            let end = -1;
+            for (let j = i; j < s.length; j++) {
+                const ch = s[j];
+                if (inStr) {
+                    if (ch === '"') {
+                        if (s[j + 1] === '"') {
+                            j++;
+                            continue;
+                        }
+                        inStr = false;
+                    }
+                    continue;
+                }
+                if (ch === '"') {
+                    inStr = true;
+                    continue;
+                }
+                if (ch === '(')
+                    depth++;
+                else if (ch === ')') {
+                    depth--;
+                    if (depth === 0) {
+                        end = j;
+                        break;
+                    }
+                }
+            }
+            if (end !== s.length - 1)
+                continue;
+            return { name: n, inner: s.slice(i + 1, end) };
+        }
+        return null;
+    }
+    function splitArgs(s) {
+        const out = [];
+        let depth = 0;
+        let inStr = false;
+        let start = 0;
+        for (let i = 0; i < s.length; i++) {
+            const ch = s[i];
+            if (inStr) {
+                if (ch === '"') {
+                    if (s[i + 1] === '"') {
+                        i++;
+                        continue;
+                    }
+                    inStr = false;
+                }
+                continue;
+            }
+            if (ch === '"') {
+                inStr = true;
+                continue;
+            }
+            if (ch === '(')
+                depth++;
+            else if (ch === ')')
+                depth--;
+            else if (ch === ',' && depth === 0) {
+                out.push(s.slice(start, i).trim());
+                start = i + 1;
+            }
+        }
+        const tail = s.slice(start).trim();
+        if (tail || out.length > 0)
+            out.push(tail);
+        return out;
+    }
+    function parseQuoted(s) {
+        const t = s.trim();
+        if (t.length < 2 || t[0] !== '"' || t[t.length - 1] !== '"')
+            return null;
+        let out = '';
+        for (let i = 1; i < t.length - 1; i++) {
+            if (t[i] === '"') {
+                if (t[i + 1] === '"') {
+                    out += '"';
+                    i++;
+                    continue;
+                }
+                return null;
+            }
+            out += t[i];
+        }
+        return out;
+    }
+    function isCellRef(s) {
+        return /^\$?[A-Z]+\$?[1-9][0-9]*$/i.test(s.trim());
+    }
+    function evalSearch(callSrc, cell) {
+        const call = matchCall(callSrc, ['SEARCH']);
+        if (!call)
             return false;
-        switch (op) {
-            case '<': return v < rhsLit;
-            case '<=': return v <= rhsLit;
-            case '>': return v > rhsLit;
-            case '>=': return v >= rhsLit;
-            case '=': return v === rhsLit;
-            case '<>': return v !== rhsLit;
-            default: return false;
+        const args = splitArgs(call.inner);
+        if (args.length < 2)
+            return false;
+        const needle = parseQuoted(args[0]);
+        const targetArg = args[1].trim();
+        if (needle === null)
+            return false;
+        if (!isCellRef(targetArg))
+            return false;
+        const hay = (cell.value ?? '').toLocaleLowerCase();
+        return hay.includes(needle.toLocaleLowerCase());
+    }
+
+    const NS_C = 'http://schemas.openxmlformats.org/drawingml/2006/chart';
+    const NS_A = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+    function parseXml$1(xml) {
+        return new DOMParser().parseFromString(xml, 'application/xml');
+    }
+    function firstChild(parent, ns, localName) {
+        if (!parent)
+            return null;
+        for (let i = 0; i < parent.childNodes.length; i++) {
+            const node = parent.childNodes[i];
+            if (node.nodeType !== 1)
+                continue;
+            const el = node;
+            if (el.namespaceURI === ns && el.localName === localName)
+                return el;
         }
+        return null;
+    }
+    function directChildren(parent, ns, localName) {
+        const out = [];
+        for (let i = 0; i < parent.childNodes.length; i++) {
+            const node = parent.childNodes[i];
+            if (node.nodeType !== 1)
+                continue;
+            const el = node;
+            if (el.namespaceURI === ns && el.localName === localName)
+                out.push(el);
+        }
+        return out;
+    }
+    function readPts(parent) {
+        const pts = directChildren(parent, NS_C, 'pt');
+        if (!pts.length)
+            return [];
+        let maxIdx = -1;
+        const raw = [];
+        for (const pt of pts) {
+            const idxAttr = pt.getAttribute('idx');
+            const idx = idxAttr !== null ? Number(idxAttr) : raw.length;
+            const vEl = firstChild(pt, NS_C, 'v');
+            const v = vEl ? (vEl.textContent ?? '') : '';
+            raw.push({ idx: Number.isFinite(idx) ? idx : raw.length, v });
+            if (idx > maxIdx)
+                maxIdx = idx;
+        }
+        const out = [];
+        for (let i = 0; i <= maxIdx; i++)
+            out.push('');
+        for (const r of raw)
+            out[r.idx] = r.v;
+        return out;
+    }
+    function parseCategories(ser) {
+        const cat = firstChild(ser, NS_C, 'cat');
+        if (!cat)
+            return [];
+        const strRef = firstChild(cat, NS_C, 'strRef');
+        if (strRef) {
+            const cache = firstChild(strRef, NS_C, 'strCache');
+            if (cache)
+                return readPts(cache);
+        }
+        const numRef = firstChild(cat, NS_C, 'numRef');
+        if (numRef) {
+            const cache = firstChild(numRef, NS_C, 'numCache');
+            if (cache)
+                return readPts(cache);
+        }
+        const strLit = firstChild(cat, NS_C, 'strLit');
+        if (strLit)
+            return readPts(strLit);
+        const numLit = firstChild(cat, NS_C, 'numLit');
+        if (numLit)
+            return readPts(numLit);
+        return [];
+    }
+    function parseValues(ser) {
+        return readNumericRefOrLit(ser, 'val');
+    }
+    function parseXValues(ser) {
+        const xVal = firstChild(ser, NS_C, 'xVal');
+        if (!xVal)
+            return null;
+        return readNumericCacheOrLit(xVal);
+    }
+    function readNumericRefOrLit(ser, localName) {
+        const el = firstChild(ser, NS_C, localName);
+        if (!el)
+            return [];
+        return readNumericCacheOrLit(el);
+    }
+    function readNumericCacheOrLit(container) {
+        const numRef = firstChild(container, NS_C, 'numRef');
+        const cache = numRef ? firstChild(numRef, NS_C, 'numCache') : null;
+        const source = cache ?? firstChild(container, NS_C, 'numLit');
+        if (!source)
+            return [];
+        const raw = readPts(source);
+        return raw.map((s) => {
+            if (s === '')
+                return null;
+            const n = Number(s);
+            return Number.isFinite(n) ? n : null;
+        });
+    }
+    function parseSeriesName(ser) {
+        const tx = firstChild(ser, NS_C, 'tx');
+        if (!tx)
+            return null;
+        const strRef = firstChild(tx, NS_C, 'strRef');
+        if (strRef) {
+            const cache = firstChild(strRef, NS_C, 'strCache');
+            if (cache) {
+                const pts = readPts(cache);
+                if (pts.length)
+                    return pts[0];
+            }
+        }
+        const vEl = firstChild(tx, NS_C, 'v');
+        if (vEl)
+            return vEl.textContent ?? null;
+        const rich = firstChild(tx, NS_C, 'rich');
+        if (rich)
+            return collectRichText(rich);
+        return null;
+    }
+    function collectRichText(root) {
+        const parts = [];
+        const visit = (el) => {
+            for (let i = 0; i < el.childNodes.length; i++) {
+                const node = el.childNodes[i];
+                if (node.nodeType !== 1)
+                    continue;
+                const child = node;
+                if (child.namespaceURI === NS_A && child.localName === 't') {
+                    parts.push(child.textContent ?? '');
+                    continue;
+                }
+                visit(child);
+            }
+        };
+        visit(root);
+        return parts.join('');
+    }
+    function parseSeriesColor(ser) {
+        const spPr = firstChild(ser, NS_C, 'spPr');
+        if (!spPr)
+            return null;
+        const solidFill = firstChild(spPr, NS_A, 'solidFill');
+        if (!solidFill)
+            return null;
+        const srgb = firstChild(solidFill, NS_A, 'srgbClr');
+        if (!srgb)
+            return null;
+        const val = srgb.getAttribute('val');
+        if (!val || !/^[0-9a-fA-F]{6}$/.test(val))
+            return null;
+        return `#${val.toLowerCase()}`;
+    }
+    function parseSer(ser, fallbackCategories, kind, chartLevelLabels) {
+        let values;
+        let xValues;
+        if (kind === 'scatter') {
+            const yVal = readNumericRefOrLit(ser, 'yVal');
+            values = yVal.length ? yVal : parseValues(ser);
+            xValues = parseXValues(ser);
+        }
+        else {
+            values = parseValues(ser);
+            xValues = null;
+        }
+        return {
+            name: parseSeriesName(ser),
+            values,
+            xValues,
+            color: parseSeriesColor(ser),
+            dataLabels: parseSeriesDataLabels(ser, chartLevelLabels),
+        };
+    }
+    function parseDataLabelsBlock(block) {
+        if (!block)
+            return { show: false, position: null };
+        let show = false;
+        let position = null;
+        for (let i = 0; i < block.childNodes.length; i++) {
+            const node = block.childNodes[i];
+            if (node.nodeType !== 1)
+                continue;
+            const el = node;
+            if (el.namespaceURI !== NS_C)
+                continue;
+            if (el.localName === 'showVal') {
+                if (el.getAttribute('val') === '1')
+                    show = true;
+            }
+            else if (el.localName === 'dLblPos') {
+                const v = el.getAttribute('val');
+                if (v)
+                    position = v;
+            }
+            else if (el.localName === 'dLbl') {
+                for (let j = 0; j < el.childNodes.length; j++) {
+                    const c = el.childNodes[j];
+                    if (c.nodeType !== 1)
+                        continue;
+                    const ce = c;
+                    if (ce.namespaceURI !== NS_C)
+                        continue;
+                    if (ce.localName === 'showVal' && ce.getAttribute('val') === '1')
+                        show = true;
+                    if (ce.localName === 'dLblPos') {
+                        const v = ce.getAttribute('val');
+                        if (v && position === null)
+                            position = v;
+                    }
+                }
+            }
+        }
+        return { show, position };
+    }
+    function parseSeriesDataLabels(ser, chartLevel) {
+        const block = firstChild(ser, NS_C, 'dLbls');
+        if (!block)
+            return { show: chartLevel.show, position: chartLevel.position };
+        const perSer = parseDataLabelsBlock(block);
+        return {
+            show: perSer.show || chartLevel.show,
+            position: perSer.position ?? chartLevel.position,
+        };
+    }
+    function parseGrouping(chartEl) {
+        const g = firstChild(chartEl, NS_C, 'grouping');
+        const val = g?.getAttribute('val');
+        if (val === 'stacked')
+            return 'stacked';
+        if (val === 'percentStacked')
+            return 'percentStacked';
+        if (val === 'standard' || val === 'clustered')
+            return 'standard';
+        return null;
+    }
+    function parseTitle(chart) {
+        const title = firstChild(chart, NS_C, 'title');
+        if (!title)
+            return null;
+        const tx = firstChild(title, NS_C, 'tx');
+        if (!tx)
+            return null;
+        const rich = firstChild(tx, NS_C, 'rich');
+        if (rich) {
+            const text = collectRichText(rich).trim();
+            return text.length ? text : null;
+        }
+        const strRef = firstChild(tx, NS_C, 'strRef');
+        if (strRef) {
+            const cache = firstChild(strRef, NS_C, 'strCache');
+            if (cache) {
+                const pts = readPts(cache);
+                if (pts.length && pts[0])
+                    return pts[0];
+            }
+        }
+        return null;
+    }
+    function parseLegend(chart) {
+        const legend = firstChild(chart, NS_C, 'legend');
+        if (!legend)
+            return 'none';
+        const pos = firstChild(legend, NS_C, 'legendPos');
+        const val = pos?.getAttribute('val');
+        switch (val) {
+            case 't': return 'top';
+            case 'b': return 'bottom';
+            case 'l': return 'left';
+            case 'r':
+            case 'tr':
+            case null:
+            case undefined:
+                return 'right';
+            default:
+                return 'right';
+        }
+    }
+    function dispatchChart(plotArea) {
+        for (let i = 0; i < plotArea.childNodes.length; i++) {
+            const node = plotArea.childNodes[i];
+            if (node.nodeType !== 1)
+                continue;
+            const el = node;
+            if (el.namespaceURI !== NS_C)
+                continue;
+            switch (el.localName) {
+                case 'barChart': {
+                    const barDir = firstChild(el, NS_C, 'barDir');
+                    const dir = barDir?.getAttribute('val');
+                    const kind = dir === 'bar' ? 'bar' : 'column';
+                    return { kind, sers: directChildren(el, NS_C, 'ser'), plotEl: el };
+                }
+                case 'lineChart':
+                    return { kind: 'line', sers: directChildren(el, NS_C, 'ser'), plotEl: el };
+                case 'pieChart':
+                    return { kind: 'pie', sers: directChildren(el, NS_C, 'ser'), plotEl: el };
+                case 'doughnutChart':
+                    return { kind: 'doughnut', sers: directChildren(el, NS_C, 'ser'), plotEl: el };
+                case 'scatterChart':
+                    return { kind: 'scatter', sers: directChildren(el, NS_C, 'ser'), plotEl: el };
+                case 'areaChart':
+                    return { kind: 'area', sers: directChildren(el, NS_C, 'ser'), plotEl: el };
+                case 'radarChart':
+                    return { kind: 'radar', sers: directChildren(el, NS_C, 'ser'), plotEl: el };
+                default:
+                    continue;
+            }
+        }
+        return { kind: 'unknown', sers: [], plotEl: null };
+    }
+    function parseChart(xml, sharedStrings) {
+        const blank = {
+            kind: 'unknown',
+            title: null,
+            categories: [],
+            series: [],
+            legend: 'none',
+            grouping: null,
+        };
+        let doc;
+        try {
+            doc = parseXml$1(xml);
+        }
+        catch {
+            return blank;
+        }
+        const chartSpace = doc.getElementsByTagNameNS(NS_C, 'chartSpace').item(0);
+        if (!chartSpace)
+            return blank;
+        const chart = firstChild(chartSpace, NS_C, 'chart');
+        if (!chart)
+            return blank;
+        const plotArea = firstChild(chart, NS_C, 'plotArea');
+        if (!plotArea)
+            return blank;
+        const { kind, sers, plotEl } = dispatchChart(plotArea);
+        if (kind === 'unknown') {
+            return {
+                ...blank,
+                title: parseTitle(chart),
+                legend: parseLegend(chart),
+            };
+        }
+        let categories = [];
+        if (kind !== 'scatter') {
+            for (const ser of sers) {
+                const cat = parseCategories(ser);
+                if (cat.length) {
+                    categories = cat;
+                    break;
+                }
+            }
+        }
+        const chartLevelLabels = plotEl
+            ? parseDataLabelsBlock(firstChild(plotEl, NS_C, 'dLbls'))
+            : { show: false, position: null };
+        const series = sers.map((ser) => parseSer(ser, categories, kind, chartLevelLabels));
+        const grouping = (kind === 'bar' || kind === 'column' || kind === 'line' || kind === 'area') && plotEl
+            ? parseGrouping(plotEl)
+            : null;
+        return {
+            kind,
+            title: parseTitle(chart),
+            categories,
+            series,
+            legend: parseLegend(chart),
+            grouping,
+        };
+    }
+
+    const DGM_NS = 'http://schemas.openxmlformats.org/drawingml/2006/diagram';
+    const A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+    const MAX_TREE_DEPTH = 32;
+    function parseSmartArt(dataXml, layoutXml) {
+        const empty = { id: '', rootNodes: [], layout: parseLayoutName(layoutXml ?? null) };
+        if (!dataXml)
+            return empty;
+        let doc;
+        try {
+            doc = new DOMParser().parseFromString(dataXml, 'application/xml');
+        }
+        catch {
+            return empty;
+        }
+        const dataModel = doc.getElementsByTagNameNS(DGM_NS, 'dataModel').item(0);
+        if (!dataModel)
+            return empty;
+        const ptLst = dataModel.getElementsByTagNameNS(DGM_NS, 'ptLst').item(0);
+        if (!ptLst)
+            return empty;
+        const points = new Map();
+        const ptEls = ptLst.getElementsByTagNameNS(DGM_NS, 'pt');
+        for (let i = 0; i < ptEls.length; i++) {
+            const pt = ptEls[i];
+            const id = pt.getAttribute('modelId');
+            if (!id)
+                continue;
+            const type = pt.getAttribute('type') ?? '';
+            if (type === 'pres' || type === 'parTrans' || type === 'sibTrans')
+                continue;
+            const text = flattenPtText(pt);
+            points.set(id, { id, type, text });
+        }
+        const parOfs = [];
+        const cxnLst = dataModel.getElementsByTagNameNS(DGM_NS, 'cxnLst').item(0);
+        if (cxnLst) {
+            const cxnEls = cxnLst.getElementsByTagNameNS(DGM_NS, 'cxn');
+            for (let i = 0; i < cxnEls.length; i++) {
+                const cxn = cxnEls[i];
+                const type = cxn.getAttribute('type') ?? 'parOf';
+                if (type !== 'parOf')
+                    continue;
+                const src = cxn.getAttribute('srcId');
+                const dest = cxn.getAttribute('destId');
+                if (!src || !dest)
+                    continue;
+                if (!points.has(src) || !points.has(dest))
+                    continue;
+                const ordAttr = cxn.getAttribute('srcOrd');
+                const ord = ordAttr !== null && Number.isFinite(Number(ordAttr))
+                    ? Number(ordAttr)
+                    : 0;
+                parOfs.push({ src, dest, ord });
+            }
+        }
+        const childrenOf = new Map();
+        const referencedAsDest = new Set();
+        const grouped = new Map();
+        for (const edge of parOfs) {
+            const list = grouped.get(edge.src) ?? [];
+            list.push(edge);
+            grouped.set(edge.src, list);
+            referencedAsDest.add(edge.dest);
+        }
+        for (const [src, list] of grouped) {
+            list.sort((a, b) => a.ord - b.ord);
+            childrenOf.set(src, list.map((e) => e.dest));
+        }
+        const docPt = Array.from(points.values()).find((p) => p.type === 'doc');
+        let rootIds;
+        if (docPt && childrenOf.has(docPt.id)) {
+            rootIds = childrenOf.get(docPt.id) ?? [];
+        }
+        else {
+            rootIds = Array.from(points.values())
+                .filter((p) => p.type !== 'doc' && !referencedAsDest.has(p.id))
+                .map((p) => p.id);
+        }
+        const rootNodes = [];
+        const onStack = new Set();
+        for (const rootId of rootIds) {
+            const root = buildNode(rootId, points, childrenOf, onStack, 0);
+            if (root)
+                rootNodes.push(root);
+        }
+        return { id: '', rootNodes, layout: parseLayoutName(layoutXml ?? null) };
+    }
+    function buildNode(id, points, childrenOf, onStack, depth) {
+        const pt = points.get(id);
+        if (!pt)
+            return null;
+        if (depth >= MAX_TREE_DEPTH) {
+            return { id: pt.id, text: pt.text, children: [], level: depth };
+        }
+        if (onStack.has(id)) {
+            return { id: pt.id, text: pt.text, children: [], level: depth };
+        }
+        onStack.add(id);
+        const children = [];
+        const childIds = childrenOf.get(id) ?? [];
+        for (const childId of childIds) {
+            const child = buildNode(childId, points, childrenOf, onStack, depth + 1);
+            if (child)
+                children.push(child);
+        }
+        onStack.delete(id);
+        return { id: pt.id, text: pt.text, children, level: depth };
+    }
+    function flattenPtText(pt) {
+        const t = pt.getElementsByTagNameNS(DGM_NS, 't').item(0);
+        if (!t)
+            return '';
+        const pEls = t.getElementsByTagNameNS(A_NS, 'p');
+        if (pEls.length === 0) {
+            const tEls = t.getElementsByTagNameNS(A_NS, 't');
+            let out = '';
+            for (let i = 0; i < tEls.length; i++)
+                out += tEls[i].textContent ?? '';
+            return out;
+        }
+        const paragraphs = [];
+        for (let i = 0; i < pEls.length; i++) {
+            const p = pEls[i];
+            const tEls = p.getElementsByTagNameNS(A_NS, 't');
+            let line = '';
+            for (let j = 0; j < tEls.length; j++)
+                line += tEls[j].textContent ?? '';
+            paragraphs.push(line);
+        }
+        return paragraphs.join('\n');
+    }
+    function parseLayoutName(layoutXml) {
+        if (!layoutXml)
+            return null;
+        let doc;
+        try {
+            doc = new DOMParser().parseFromString(layoutXml, 'application/xml');
+        }
+        catch {
+            return null;
+        }
+        const def = doc.getElementsByTagNameNS(DGM_NS, 'layoutDef').item(0);
+        if (!def)
+            return null;
+        return def.getAttribute('uniqueId') || null;
+    }
+
+    const CFB_MAGIC = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+    const FREESECT = 0xffffffff;
+    const ENDOFCHAIN = 0xfffffffe;
+    const FATSECT = 0xfffffffd;
+    const DIFSECT = 0xfffffffc;
+    const DIR_TYPE_UNUSED = 0x00;
+    const DIR_TYPE_STREAM = 0x02;
+    const DIR_TYPE_ROOT = 0x05;
+    const MAX_STREAMS = 256;
+    const MAX_STREAM_BYTES = 16 * 1024 * 1024;
+    const MAX_BUFFER_BYTES = 32 * 1024 * 1024;
+    const MAX_CHAIN_SECTORS = 1 << 20;
+    function parseCfb(bytes) {
+        if (!bytes || bytes.byteLength < 512)
+            return null;
+        if (bytes.byteLength > MAX_BUFFER_BYTES)
+            return null;
+        for (let i = 0; i < CFB_MAGIC.length; i++) {
+            if (bytes[i] !== CFB_MAGIC[i])
+                return null;
+        }
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const sectorShift = view.getUint16(0x1e, true);
+        if (sectorShift !== 9 && sectorShift !== 12)
+            return null;
+        const sectorSize = 1 << sectorShift;
+        if (sectorSize < 128)
+            return null;
+        const miniSectorShift = view.getUint16(0x20, true);
+        if (miniSectorShift < 1 || miniSectorShift > 16)
+            return null;
+        const miniSectorSize = 1 << miniSectorShift;
+        const numFatSectors = view.getUint32(0x2c, true);
+        const firstDirSector = view.getUint32(0x30, true);
+        const miniStreamCutoff = view.getUint32(0x38, true);
+        const firstMiniFatSector = view.getUint32(0x3c, true);
+        const numMiniFatSectors = view.getUint32(0x40, true);
+        const firstDifatSector = view.getUint32(0x44, true);
+        const numDifatSectors = view.getUint32(0x48, true);
+        if (numFatSectors > MAX_CHAIN_SECTORS)
+            return null;
+        if (numMiniFatSectors > MAX_CHAIN_SECTORS)
+            return null;
+        if (numDifatSectors > MAX_CHAIN_SECTORS)
+            return null;
+        const sectorDataStart = sectorSize;
+        const availableBytes = bytes.byteLength - sectorDataStart;
+        if (availableBytes < 0)
+            return null;
+        const totalSectors = Math.floor(availableBytes / sectorSize);
+        if (totalSectors <= 0)
+            return null;
+        const sectorBytes = (sid) => {
+            if (sid >= totalSectors)
+                return null;
+            const off = sectorDataStart + sid * sectorSize;
+            if (off + sectorSize > bytes.byteLength)
+                return null;
+            return bytes.subarray(off, off + sectorSize);
+        };
+        const difat = [];
+        for (let i = 0; i < 109; i++) {
+            const sid = view.getUint32(0x4c + i * 4, true);
+            if (sid === FREESECT)
+                break;
+            difat.push(sid);
+        }
+        {
+            let next = firstDifatSector;
+            let guard = 0;
+            const seen = new Set();
+            while (next !== ENDOFCHAIN && next !== FREESECT && guard < numDifatSectors + 4) {
+                if (seen.has(next))
+                    break;
+                seen.add(next);
+                const sec = sectorBytes(next);
+                if (!sec)
+                    break;
+                const secView = new DataView(sec.buffer, sec.byteOffset, sec.byteLength);
+                const entriesPerDifat = (sectorSize / 4) - 1;
+                for (let i = 0; i < entriesPerDifat; i++) {
+                    const sid = secView.getUint32(i * 4, true);
+                    if (sid === FREESECT)
+                        break;
+                    difat.push(sid);
+                }
+                next = secView.getUint32(sectorSize - 4, true);
+                guard++;
+                if (difat.length > MAX_CHAIN_SECTORS)
+                    return null;
+            }
+        }
+        const fatEntriesPerSector = sectorSize / 4;
+        const fatLength = difat.length * fatEntriesPerSector;
+        if (fatLength > MAX_CHAIN_SECTORS)
+            return null;
+        const fat = new Uint32Array(fatLength);
+        for (let i = 0; i < difat.length; i++) {
+            const sec = sectorBytes(difat[i]);
+            if (!sec)
+                return null;
+            const secView = new DataView(sec.buffer, sec.byteOffset, sec.byteLength);
+            for (let j = 0; j < fatEntriesPerSector; j++) {
+                fat[i * fatEntriesPerSector + j] = secView.getUint32(j * 4, true);
+            }
+        }
+        function readFatChain(firstSid, size) {
+            if (firstSid === ENDOFCHAIN || firstSid === FREESECT)
+                return new Uint8Array(0);
+            const cap = Math.min(size, MAX_STREAM_BYTES);
+            const out = new Uint8Array(cap);
+            let written = 0;
+            let sid = firstSid;
+            const seen = new Set();
+            let hops = 0;
+            while (sid !== ENDOFCHAIN && sid !== FREESECT && sid !== FATSECT && sid !== DIFSECT) {
+                if (hops++ > MAX_CHAIN_SECTORS)
+                    return null;
+                if (seen.has(sid))
+                    return null;
+                seen.add(sid);
+                const sec = sectorBytes(sid);
+                if (!sec)
+                    return null;
+                const copyLen = Math.min(sec.length, cap - written);
+                if (copyLen <= 0)
+                    break;
+                out.set(sec.subarray(0, copyLen), written);
+                written += copyLen;
+                if (written >= cap)
+                    break;
+                if (sid >= fat.length)
+                    return null;
+                sid = fat[sid];
+            }
+            return out.subarray(0, Math.min(written, size));
+        }
+        const dirBytes = readFatChain(firstDirSector, bytes.byteLength);
+        if (!dirBytes)
+            return null;
+        const entryCount = Math.min(Math.floor(dirBytes.length / 128), MAX_STREAMS);
+        if (entryCount === 0)
+            return null;
+        const dirView = new DataView(dirBytes.buffer, dirBytes.byteOffset, dirBytes.byteLength);
+        const entries = [];
+        for (let i = 0; i < entryCount; i++) {
+            const base = i * 128;
+            if (base + 128 > dirBytes.length)
+                break;
+            const type = dirBytes[base + 0x42];
+            if (type === DIR_TYPE_UNUSED) {
+                entries.push({ name: '', type, startSector: 0, size: 0, clsid: null });
+                continue;
+            }
+            const nameLenBytes = dirView.getUint16(base + 0x40, true);
+            const clampedNameLen = Math.max(0, Math.min(nameLenBytes, 64));
+            const name = decodeUtf16LeName(dirBytes.subarray(base, base + clampedNameLen));
+            const startSector = dirView.getUint32(base + 0x74, true);
+            const sizeLo = dirView.getUint32(base + 0x78, true);
+            const sizeHi = dirView.getUint32(base + 0x7c, true);
+            const size = sizeHi !== 0 ? MAX_STREAM_BYTES + 1 : sizeLo;
+            const clsid = readClsid(dirBytes, base + 0x50);
+            entries.push({ name, type, startSector, size, clsid });
+        }
+        const root = entries[0];
+        if (!root || root.type !== DIR_TYPE_ROOT)
+            return null;
+        let miniStream = null;
+        let miniFat = null;
+        const ensureMini = () => {
+            if (miniStream && miniFat)
+                return true;
+            miniStream = readFatChain(root.startSector, Math.min(root.size, MAX_STREAM_BYTES));
+            if (!miniStream)
+                return false;
+            if (firstMiniFatSector === ENDOFCHAIN || firstMiniFatSector === FREESECT) {
+                miniFat = new Uint32Array(0);
+                return true;
+            }
+            const mfatBytes = readFatChain(firstMiniFatSector, numMiniFatSectors * sectorSize);
+            if (!mfatBytes)
+                return false;
+            const entries = Math.floor(mfatBytes.length / 4);
+            miniFat = new Uint32Array(entries);
+            const mfatView = new DataView(mfatBytes.buffer, mfatBytes.byteOffset, mfatBytes.byteLength);
+            for (let i = 0; i < entries; i++)
+                miniFat[i] = mfatView.getUint32(i * 4, true);
+            return true;
+        };
+        function readMiniChain(firstSid, size) {
+            if (!ensureMini() || !miniStream || !miniFat)
+                return null;
+            if (firstSid === ENDOFCHAIN || firstSid === FREESECT)
+                return new Uint8Array(0);
+            const cap = Math.min(size, MAX_STREAM_BYTES);
+            const out = new Uint8Array(cap);
+            let written = 0;
+            let sid = firstSid;
+            const seen = new Set();
+            let hops = 0;
+            while (sid !== ENDOFCHAIN && sid !== FREESECT && sid !== FATSECT && sid !== DIFSECT) {
+                if (hops++ > MAX_CHAIN_SECTORS)
+                    return null;
+                if (seen.has(sid))
+                    return null;
+                seen.add(sid);
+                const off = sid * miniSectorSize;
+                if (off + miniSectorSize > miniStream.length)
+                    return null;
+                const copyLen = Math.min(miniSectorSize, cap - written);
+                if (copyLen <= 0)
+                    break;
+                out.set(miniStream.subarray(off, off + copyLen), written);
+                written += copyLen;
+                if (written >= cap)
+                    break;
+                if (sid >= miniFat.length)
+                    return null;
+                sid = miniFat[sid];
+            }
+            return out.subarray(0, Math.min(written, size));
+        }
+        const streams = [];
+        for (let i = 1; i < entries.length && streams.length < MAX_STREAMS; i++) {
+            const e = entries[i];
+            if (e.type !== DIR_TYPE_STREAM)
+                continue;
+            if (e.size > MAX_STREAM_BYTES)
+                continue;
+            if (!e.name)
+                continue;
+            const useMini = e.size > 0 && e.size < miniStreamCutoff;
+            const streamBytes = useMini
+                ? readMiniChain(e.startSector, e.size)
+                : readFatChain(e.startSector, e.size);
+            if (!streamBytes)
+                continue;
+            streams.push({ name: e.name, bytes: streamBytes });
+        }
+        return {
+            clsid: root.clsid,
+            streams,
+        };
+    }
+    function decodeUtf16LeName(buf) {
+        let out = '';
+        for (let i = 0; i + 1 < buf.length; i += 2) {
+            const cu = buf[i] | (buf[i + 1] << 8);
+            if (cu === 0)
+                break;
+            out += String.fromCharCode(cu);
+        }
+        if (out.length === 0)
+            return '';
+        const head = out[0];
+        const rest = out.slice(1).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+        if (head === '\x01' || head === '\x05') {
+            return head + rest;
+        }
+        if (head >= '\x00' && head < ' ' && head !== '\t' && head !== '\n' && head !== '\r') {
+            return rest;
+        }
+        return head + rest;
+    }
+    function readClsid(buf, offset) {
+        if (offset + 16 > buf.length)
+            return null;
+        const b = buf.subarray(offset, offset + 16);
+        let allZero = true;
+        for (let i = 0; i < 16; i++) {
+            if (b[i] !== 0) {
+                allZero = false;
+                break;
+            }
+        }
+        if (allZero)
+            return null;
+        const hex = (n) => n.toString(16).padStart(2, '0');
+        const g1 = hex(b[3]) + hex(b[2]) + hex(b[1]) + hex(b[0]);
+        const g2 = hex(b[5]) + hex(b[4]);
+        const g3 = hex(b[7]) + hex(b[6]);
+        const g4 = hex(b[8]) + hex(b[9]);
+        const g5 = hex(b[10]) + hex(b[11]) + hex(b[12]) + hex(b[13]) + hex(b[14]) + hex(b[15]);
+        return `{${g1}-${g2}-${g3}-${g4}-${g5}}`.toUpperCase();
     }
 
     const SAFE_HREF_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:']);
+    const MAX_RANGE_EXPANSION_CELLS = 1048576;
     function isSafeHyperlinkHref(raw) {
         if (raw == null)
             return true;
         if (typeof raw !== 'string')
+            return false;
+        if (/[\x00-\x1f\x7f]/.test(raw))
             return false;
         const trimmed = raw.trim();
         if (trimmed === '')
@@ -1497,12 +2604,14 @@
         cx: 'http://schemas.microsoft.com/office/drawing/2014/chartex',
         tc: 'http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments',
         xda: 'http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray',
+        dgm: 'http://schemas.openxmlformats.org/drawingml/2006/diagram',
     };
+    const SMARTART_GRAPHIC_URI = 'http://schemas.openxmlformats.org/drawingml/2006/diagram';
     class WorkbookParser {
         constructor(_options) {
             this._options = _options;
         }
-        parse(parts, media = {}) {
+        parse(parts, media = {}, embeddingBytes = {}) {
             const workbookXml = parts['xl/workbook.xml'];
             if (!workbookXml)
                 throw new Error('xlsx-preview: workbook.xml missing');
@@ -1521,6 +2630,9 @@
             const metadata = parts['xl/metadata.xml']
                 ? parseWorkbookMetadata(parts['xl/metadata.xml'])
                 : null;
+            const contentTypes = parts['[Content_Types].xml']
+                ? parseContentTypes(parts['[Content_Types].xml'])
+                : { defaults: new Map(), overrides: new Map() };
             const sheets = [];
             for (let i = 0; i < sheetMeta.length; i++) {
                 const { name, rId, state } = sheetMeta[i];
@@ -1536,15 +2648,179 @@
                 if (!xml)
                     continue;
                 const tables = resolveTablesForSheet(xmlPath, parts);
-                const { images, charts, shapes } = resolveDrawingsForSheet(xmlPath, parts, media);
+                const { images, charts, shapes, formControls, smartArt } = resolveDrawingsForSheet(xmlPath, parts, media, sharedStrings);
                 const pivots = resolvePivotsForSheet(xmlPath, parts);
+                const { slicers, timelines } = resolveSlicersAndTimelinesForSheet(xmlPath, parts);
                 const comments = resolveCommentsForSheet(xmlPath, parts);
                 const threadedComments = resolveThreadedCommentsForSheet(xmlPath, parts, persons);
                 const hyperlinkTargets = resolveHyperlinkTargets(xmlPath, parts);
-                sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, shapes, pivots, comments, threadedComments, hyperlinkTargets, i, definedNames, metadata));
+                const embeddings = resolveEmbeddingsForSheet(xmlPath, xml, parts, embeddingBytes, contentTypes, this._options.inlineEmbeddings === true, this._options.parseOleCfb === true);
+                sheets.push(parseSheet(name, state, xml, sharedStrings, tables, images, charts, shapes, formControls, embeddings, pivots, slicers, timelines, comments, threadedComments, hyperlinkTargets, i, definedNames, metadata, smartArt));
             }
             return { sheets, styles, theme, persons, date1904, definedNames, metadata };
         }
+    }
+    function parseContentTypes(xml) {
+        const doc = parseXml(xml);
+        const defaults = new Map();
+        const overrides = new Map();
+        const ns = 'http://schemas.openxmlformats.org/package/2006/content-types';
+        const defEls = doc.getElementsByTagNameNS(ns, 'Default');
+        for (let i = 0; i < defEls.length; i++) {
+            const el = defEls[i];
+            const ext = el.getAttribute('Extension');
+            const ct = el.getAttribute('ContentType');
+            if (ext && ct)
+                defaults.set(ext.toLowerCase(), ct);
+        }
+        const ovEls = doc.getElementsByTagNameNS(ns, 'Override');
+        for (let i = 0; i < ovEls.length; i++) {
+            const el = ovEls[i];
+            const part = el.getAttribute('PartName');
+            const ct = el.getAttribute('ContentType');
+            if (part && ct)
+                overrides.set(part, ct);
+        }
+        return { defaults, overrides };
+    }
+    function resolveContentType(path, map) {
+        const pkgPath = path.startsWith('/') ? path : `/${path}`;
+        const ov = map.overrides.get(pkgPath);
+        if (ov)
+            return ov;
+        const dot = path.lastIndexOf('.');
+        if (dot >= 0) {
+            const ext = path.slice(dot + 1).toLowerCase();
+            const def = map.defaults.get(ext);
+            if (def)
+                return def;
+            switch (ext) {
+                case 'bin': return 'application/vnd.openxmlformats-officedocument.oleObject';
+                case 'pdf': return 'application/pdf';
+                case 'xlsx': return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+                case 'docx': return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+                case 'pptx': return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+                case 'xls': return 'application/vnd.ms-excel';
+                case 'doc': return 'application/msword';
+                case 'ppt': return 'application/vnd.ms-powerpoint';
+                case 'txt': return 'text/plain';
+            }
+        }
+        return 'application/octet-stream';
+    }
+    function resolveEmbeddingsForSheet(sheetPath, sheetXml, parts, embeddingBytes, contentTypes, inline, parseOleCfb) {
+        const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
+        const relsXml = parts[relsPath];
+        if (!relsXml)
+            return [];
+        const rels = parseRelationships(relsXml);
+        const sheetDir = sheetPath.replace(/\/[^/]+$/, '');
+        const embRels = [];
+        for (const [rId, rel] of rels) {
+            const isOle = rel.type.endsWith('/oleObject');
+            const isPackage = rel.type.endsWith('/package');
+            if (!isOle && !isPackage)
+                continue;
+            const target = rel.target.startsWith('/')
+                ? rel.target.slice(1)
+                : normaliseRelPath(`${sheetDir}/${rel.target}`);
+            const fileName = target.slice(target.lastIndexOf('/') + 1) || null;
+            embRels.push({
+                rId,
+                kind: isOle ? 'ole' : 'package',
+                target,
+                fileName,
+            });
+        }
+        if (embRels.length === 0)
+            return [];
+        const anchorByRid = parseOleObjectAnchors(sheetXml);
+        const out = [];
+        for (const rel of embRels) {
+            const bytes = embeddingBytes[rel.target];
+            if (!bytes) {
+                continue;
+            }
+            const contentType = resolveContentType(rel.target, contentTypes);
+            const anchor = anchorByRid.get(rel.rId) ?? null;
+            let dataUrl = null;
+            if (inline) {
+                const safeMime = sanitizeMediaMime(contentType);
+                if (safeMime !== 'application/octet-stream' || contentType === 'application/octet-stream') {
+                    dataUrl = bytesToDataUrl(bytes, contentType);
+                }
+            }
+            const cfb = (parseOleCfb && rel.kind === 'ole') ? parseCfb(bytes) : null;
+            out.push({
+                kind: rel.kind,
+                contentType,
+                fileName: rel.fileName,
+                progId: anchor?.progId ?? null,
+                col: anchor?.col ?? null,
+                row: anchor?.row ?? null,
+                endCol: anchor?.endCol ?? null,
+                endRow: anchor?.endRow ?? null,
+                size: bytes.byteLength,
+                dataUrl,
+                altText: anchor?.altText ?? null,
+                cfb,
+            });
+        }
+        return out;
+    }
+    function parseOleObjectAnchors(xml) {
+        const out = new Map();
+        const doc = parseXml(xml);
+        const els = doc.getElementsByTagNameNS(NS.main, 'oleObject');
+        for (let i = 0; i < els.length; i++) {
+            const el = els[i];
+            const rId = el.getAttributeNS(NS.rel, 'id');
+            if (!rId || out.has(rId))
+                continue;
+            const progId = el.getAttribute('progId') || null;
+            let col = null;
+            let row = null;
+            let endCol = null;
+            let endRow = null;
+            const findFrom = el.getElementsByTagNameNS(NS.xdr, 'from').item(0)
+                ?? el.getElementsByTagNameNS(NS.main, 'from').item(0);
+            const findTo = el.getElementsByTagNameNS(NS.xdr, 'to').item(0)
+                ?? el.getElementsByTagNameNS(NS.main, 'to').item(0);
+            if (findFrom) {
+                col = anchorCellValue(findFrom, 'col');
+                row = anchorCellValue(findFrom, 'row');
+                if (col === null) {
+                    const c = findFrom.getElementsByTagNameNS(NS.main, 'col').item(0);
+                    col = c ? Number(c.textContent) : null;
+                    if (col !== null && !Number.isFinite(col))
+                        col = null;
+                }
+                if (row === null) {
+                    const r = findFrom.getElementsByTagNameNS(NS.main, 'row').item(0);
+                    row = r ? Number(r.textContent) : null;
+                    if (row !== null && !Number.isFinite(row))
+                        row = null;
+                }
+            }
+            if (findTo) {
+                endCol = anchorCellValue(findTo, 'col');
+                endRow = anchorCellValue(findTo, 'row');
+                if (endCol === null) {
+                    const c = findTo.getElementsByTagNameNS(NS.main, 'col').item(0);
+                    endCol = c ? Number(c.textContent) : null;
+                    if (endCol !== null && !Number.isFinite(endCol))
+                        endCol = null;
+                }
+                if (endRow === null) {
+                    const r = findTo.getElementsByTagNameNS(NS.main, 'row').item(0);
+                    endRow = r ? Number(r.textContent) : null;
+                    if (endRow !== null && !Number.isFinite(endRow))
+                        endRow = null;
+                }
+            }
+            out.set(rId, { progId, col, row, endCol, endRow, altText: null });
+        }
+        return out;
     }
     function parseWorkbookMetadata(xml) {
         const doc = parseXml(xml);
@@ -1768,16 +3044,18 @@
         }
         return stack.join('/');
     }
-    function resolveDrawingsForSheet(sheetPath, parts, media) {
+    function resolveDrawingsForSheet(sheetPath, parts, media, sharedStrings = []) {
         const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
         const relsXml = parts[relsPath];
         if (!relsXml)
-            return { images: [], charts: [], shapes: [] };
+            return { images: [], charts: [], shapes: [], formControls: [], smartArt: [] };
         const rels = parseRelationships(relsXml);
         const dir = sheetPath.replace(/\/[^/]+$/, '');
         const images = [];
         const charts = [];
         const shapes = [];
+        const formControls = [];
+        const smartArt = [];
         for (const [, rel] of rels) {
             if (!rel.type.endsWith('/drawing'))
                 continue;
@@ -1793,12 +3071,14 @@
                 ? parseRelationships(drawingRelsXml)
                 : new Map();
             const drawingDir = drawingPath.replace(/\/[^/]+$/, '');
-            const parsed = parseDrawing(drawingXml, drawingRels, drawingDir, parts, media);
+            const parsed = parseDrawing(drawingXml, drawingRels, drawingDir, parts, media, sharedStrings);
             images.push(...parsed.images);
             charts.push(...parsed.charts);
             shapes.push(...parsed.shapes);
+            formControls.push(...parsed.formControls);
+            smartArt.push(...parsed.smartArt);
         }
-        return { images, charts, shapes };
+        return { images, charts, shapes, formControls, smartArt };
     }
     function resolvePivotsForSheet(sheetPath, parts) {
         const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
@@ -1847,6 +3127,267 @@
             endCol: Math.max(a.col, b.col),
             endRow: Math.max(a.row, b.row),
         };
+    }
+    function resolveSlicersAndTimelinesForSheet(sheetPath, parts) {
+        const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
+        const relsXml = parts[relsPath];
+        const slicers = [];
+        const timelines = [];
+        if (!relsXml)
+            return { slicers, timelines };
+        const rels = parseRelationships(relsXml);
+        const dir = sheetPath.replace(/\/[^/]+$/, '');
+        const slicerCacheByName = indexSlicerCaches(parts);
+        const timelineCacheByName = indexTimelineCaches(parts);
+        for (const [, rel] of rels) {
+            const type = rel.type;
+            const isSlicer = type.endsWith('/slicer');
+            const isTimeline = type.endsWith('/timeline');
+            if (!isSlicer && !isTimeline)
+                continue;
+            const target = rel.target.startsWith('/')
+                ? rel.target.slice(1)
+                : normaliseRelPath(`${dir}/${rel.target}`);
+            const xml = parts[target];
+            if (!xml)
+                continue;
+            if (isSlicer) {
+                slicers.push(...parseSlicerFile(xml, slicerCacheByName));
+            }
+            else {
+                timelines.push(...parseTimelineFile(xml, timelineCacheByName));
+            }
+        }
+        return { slicers, timelines };
+    }
+    function indexSlicerCaches(parts) {
+        const out = new Map();
+        for (const path of Object.keys(parts)) {
+            if (!/^xl\/slicerCaches\/[^/]+\.xml$/i.test(path))
+                continue;
+            const xml = parts[path];
+            if (!xml)
+                continue;
+            const name = peekRootAttr(xml, 'slicerCacheDefinition', 'name');
+            if (name)
+                out.set(name, xml);
+        }
+        return out;
+    }
+    function indexTimelineCaches(parts) {
+        const out = new Map();
+        for (const path of Object.keys(parts)) {
+            if (!/^xl\/timelineCaches\/[^/]+\.xml$/i.test(path))
+                continue;
+            const xml = parts[path];
+            if (!xml)
+                continue;
+            const name = peekRootAttr(xml, 'timelineCacheDefinition', 'name');
+            if (name)
+                out.set(name, xml);
+        }
+        return out;
+    }
+    function peekRootAttr(xml, rootLocal, attr) {
+        const doc = parseXml(xml);
+        const all = doc.getElementsByTagName('*');
+        for (let i = 0; i < all.length; i++) {
+            const el = all[i];
+            if (el.localName === rootLocal) {
+                return el.getAttribute(attr);
+            }
+        }
+        return null;
+    }
+    function parseSlicerFile(xml, slicerCacheByName) {
+        const doc = parseXml(xml);
+        const out = [];
+        const all = doc.getElementsByTagName('*');
+        for (let i = 0; i < all.length; i++) {
+            const el = all[i];
+            if (el.localName !== 'slicer')
+                continue;
+            const name = el.getAttribute('name');
+            const cache = el.getAttribute('cache');
+            if (!name || !cache)
+                continue;
+            const caption = el.getAttribute('caption');
+            const columnCountAttr = el.getAttribute('columnCount');
+            const columnCount = numOrNull(columnCountAttr);
+            const style = el.getAttribute('style') || null;
+            const showCaptionAttr = el.getAttribute('showCaption');
+            const showCaption = !(showCaptionAttr === '0' || showCaptionAttr === 'false');
+            const rowHeightAttr = el.getAttribute('rowHeight');
+            const rowHeight = numOrNull(rowHeightAttr);
+            const cacheXml = slicerCacheByName.get(cache);
+            let sourceName = null;
+            let selectedItems = [];
+            let allItems = [];
+            if (cacheXml) {
+                const details = readSlicerCache(cacheXml);
+                sourceName = details.sourceName;
+                selectedItems = details.selectedItems;
+                allItems = details.allItems;
+            }
+            out.push({
+                name,
+                caption: caption || null,
+                cache,
+                sourceName,
+                columnCount,
+                style,
+                showCaption,
+                rowHeight,
+                selectedItems,
+                allItems,
+            });
+        }
+        return out;
+    }
+    function parseTimelineFile(xml, timelineCacheByName) {
+        const doc = parseXml(xml);
+        const out = [];
+        const all = doc.getElementsByTagName('*');
+        for (let i = 0; i < all.length; i++) {
+            const el = all[i];
+            if (el.localName !== 'timeline')
+                continue;
+            const name = el.getAttribute('name');
+            const cache = el.getAttribute('cache');
+            if (!name || !cache)
+                continue;
+            const caption = el.getAttribute('caption');
+            const style = el.getAttribute('style') || null;
+            const showHeader = !truthyZero(el.getAttribute('showHeader'));
+            const showSelectionLabel = !truthyZero(el.getAttribute('showSelectionLabel'));
+            const showTimeLevel = !truthyZero(el.getAttribute('showTimeLevel'));
+            const showHorizontalScrollbar = !truthyZero(el.getAttribute('showHorizontalScrollbar'));
+            let level = null;
+            let selectedRange = null;
+            const nested = firstDescendantByLocalName(el, 'timelineViewState');
+            const src = nested ?? el;
+            const levelAttr = src.getAttribute('level');
+            level = normaliseTimelineLevel(levelAttr);
+            const selectionEl = firstDescendantByLocalName(src, 'selection') ?? src;
+            const startAttr = selectionEl.getAttribute('startDate');
+            const endAttr = selectionEl.getAttribute('endDate');
+            if (startAttr !== null || endAttr !== null) {
+                selectedRange = { start: startAttr, end: endAttr };
+            }
+            const cacheXml = timelineCacheByName.get(cache);
+            let sourceName = null;
+            let bounds = null;
+            if (cacheXml) {
+                const details = readTimelineCache(cacheXml);
+                sourceName = details.sourceName;
+                bounds = details.bounds;
+            }
+            out.push({
+                name,
+                caption: caption || null,
+                cache,
+                sourceName,
+                level,
+                selectedRange,
+                showHeader,
+                showSelectionLabel,
+                showTimeLevel,
+                showHorizontalScrollbar,
+                style,
+                bounds,
+            });
+        }
+        return out;
+    }
+    function readSlicerCache(xml) {
+        const doc = parseXml(xml);
+        let sourceName = null;
+        const all = doc.getElementsByTagName('*');
+        for (let i = 0; i < all.length; i++) {
+            const el = all[i];
+            if (el.localName === 'slicerCacheDefinition') {
+                sourceName = el.getAttribute('sourceName');
+                break;
+            }
+        }
+        const selectedItems = [];
+        const allItems = [];
+        for (let i = 0; i < all.length; i++) {
+            const el = all[i];
+            if (el.localName !== 'tabular')
+                continue;
+            const items = firstDescendantByLocalName(el, 'items');
+            if (!items)
+                continue;
+            for (let j = 0; j < items.childNodes.length; j++) {
+                const node = items.childNodes[j];
+                if (node.nodeType !== 1)
+                    continue;
+                const item = node;
+                if (item.localName !== 'i')
+                    continue;
+                const name = item.getAttribute('n') ?? item.textContent;
+                if (!name || name.length === 0)
+                    continue;
+                allItems.push(name);
+                const selected = item.getAttribute('s');
+                if (selected === '1' || selected === 'true')
+                    selectedItems.push(name);
+            }
+        }
+        return { sourceName, selectedItems, allItems };
+    }
+    function readTimelineCache(xml) {
+        const doc = parseXml(xml);
+        let sourceName = null;
+        let bounds = null;
+        const all = doc.getElementsByTagName('*');
+        for (let i = 0; i < all.length; i++) {
+            const el = all[i];
+            if (el.localName === 'timelineCacheDefinition') {
+                sourceName = el.getAttribute('sourceName');
+            }
+            if (el.localName === 'bounds') {
+                const minAttr = el.getAttribute('startDate');
+                const maxAttr = el.getAttribute('endDate');
+                if (minAttr && maxAttr) {
+                    bounds = { min: minAttr, max: maxAttr };
+                }
+            }
+        }
+        return { sourceName, bounds };
+    }
+    function firstDescendantByLocalName(root, localName) {
+        const all = root.getElementsByTagName('*');
+        for (let i = 0; i < all.length; i++) {
+            if (all[i].localName === localName)
+                return all[i];
+        }
+        return null;
+    }
+    function numOrNull(attr) {
+        if (attr === null || attr === '')
+            return null;
+        const n = Number(attr);
+        return Number.isFinite(n) ? n : null;
+    }
+    function truthyZero(v) {
+        return v === '0' || v === 'false';
+    }
+    function normaliseTimelineLevel(raw) {
+        if (!raw)
+            return null;
+        const lower = raw.toLowerCase();
+        if (lower === 'years' || lower === 'quarters' || lower === 'months' || lower === 'days') {
+            return lower;
+        }
+        const numericMap = {
+            '0': 'years',
+            '1': 'quarters',
+            '2': 'months',
+            '3': 'days',
+        };
+        return numericMap[raw] ?? null;
     }
     function resolveCommentsForSheet(sheetPath, parts) {
         const relsPath = sheetPath.replace(/\/([^/]+)$/, '/_rels/$1.rels');
@@ -1917,11 +3458,13 @@
         }
         return out;
     }
-    function parseDrawing(xml, rels, drawingDir, parts, media) {
+    function parseDrawing(xml, rels, drawingDir, parts, media, sharedStrings = []) {
         const doc = parseXml(xml);
         const images = [];
         const charts = [];
         const shapes = [];
+        const formControls = [];
+        const smartArt = [];
         const labelled = [
             ...Array.from(doc.getElementsByTagNameNS(NS.xdr, 'twoCellAnchor'))
                 .map((el) => ({ el, mode: 'twoCell' })),
@@ -1998,15 +3541,27 @@
                 const kind = chartEl.namespaceURI === NS.cx ? 'chartex' : 'classic';
                 const rId = chartEl.getAttributeNS(NS.rel, 'id');
                 let chartType = null;
+                let chartXml;
                 if (rId) {
                     const rel = rels.get(rId);
                     if (rel) {
                         const chartPath = rel.target.startsWith('/')
                             ? rel.target.slice(1)
                             : normaliseRelPath(`${drawingDir}/${rel.target}`);
-                        const chartXml = parts[chartPath];
+                        chartXml = parts[chartPath];
                         if (chartXml)
                             chartType = peekChartType(chartXml, kind);
+                    }
+                }
+                let model = null;
+                if (kind === 'classic' && chartXml) {
+                    try {
+                        const parsed = parseChart(chartXml, sharedStrings);
+                        if (parsed.kind !== 'unknown')
+                            model = parsed;
+                    }
+                    catch {
+                        model = null;
                     }
                 }
                 charts.push({
@@ -2016,20 +3571,260 @@
                     row: row ?? 0,
                     endCol,
                     endRow,
+                    model,
                 });
+            }
+            const graphicFrame = anchor.getElementsByTagNameNS(NS.xdr, 'graphicFrame').item(0);
+            if (graphicFrame) {
+                const graphicData = graphicFrame.getElementsByTagNameNS(NS.a, 'graphicData').item(0);
+                const uri = graphicData?.getAttribute('uri') ?? '';
+                if (uri === SMARTART_GRAPHIC_URI) {
+                    const relIdsEl = graphicData.getElementsByTagNameNS(NS.dgm, 'relIds').item(0);
+                    if (relIdsEl) {
+                        const dmId = relIdsEl.getAttributeNS(NS.rel, 'dm');
+                        const loId = relIdsEl.getAttributeNS(NS.rel, 'lo');
+                        const dmRel = dmId ? rels.get(dmId) : undefined;
+                        const loRel = loId ? rels.get(loId) : undefined;
+                        let dataXml = null;
+                        let layoutXml = null;
+                        if (dmRel) {
+                            const dataPath = dmRel.target.startsWith('/')
+                                ? dmRel.target.slice(1)
+                                : normaliseRelPath(`${drawingDir}/${dmRel.target}`);
+                            dataXml = parts[dataPath] ?? null;
+                        }
+                        if (loRel) {
+                            const layoutPath = loRel.target.startsWith('/')
+                                ? loRel.target.slice(1)
+                                : normaliseRelPath(`${drawingDir}/${loRel.target}`);
+                            layoutXml = parts[layoutPath] ?? null;
+                        }
+                        const cNvPr = graphicFrame.getElementsByTagNameNS(NS.xdr, 'cNvPr').item(0);
+                        const name = cNvPr?.getAttribute('name') || null;
+                        const model = dataXml ? parseSmartArt(dataXml, layoutXml) : null;
+                        smartArt.push({
+                            name,
+                            col: col ?? 0,
+                            row: row ?? 0,
+                            endCol,
+                            endRow,
+                            model,
+                        });
+                    }
+                }
             }
             const spEls = [
                 ...Array.from(anchor.getElementsByTagNameNS(NS.xdr, 'sp')),
                 ...Array.from(anchor.getElementsByTagNameNS(NS.xdr, 'cxnSp')),
             ];
-            for (const el of spEls) {
-                const kind = el.localName === 'cxnSp' ? 'connector' : 'shape';
-                const shape = parseShape(el, kind, col, row, endCol, endRow);
-                if (shape)
-                    shapes.push(shape);
+            const ctrlPropRelHit = anchorHasCtrlPropRel(anchor, rels, drawingDir, parts);
+            let formControlConsumed = false;
+            if (ctrlPropRelHit && spEls.length > 0) {
+                const fc = parseFormControl(spEls[0], rels, drawingDir, parts, col, row, colOff, rowOff, endCol, endRow, anchor);
+                if (fc) {
+                    formControls.push(fc);
+                    formControlConsumed = true;
+                }
+            }
+            if (!formControlConsumed) {
+                for (const el of spEls) {
+                    const kind = el.localName === 'cxnSp' ? 'connector' : 'shape';
+                    const shape = parseShape(el, kind, col, row, endCol, endRow);
+                    if (shape)
+                        shapes.push(shape);
+                }
             }
         }
-        return { images, charts, shapes };
+        return { images, charts, shapes, formControls, smartArt };
+    }
+    function anchorHasCtrlPropRel(anchor, rels, drawingDir, parts) {
+        const descendants = anchor.getElementsByTagName('*');
+        for (let i = 0; i < descendants.length; i++) {
+            const rId = descendants[i].getAttributeNS(NS.rel, 'id');
+            if (!rId)
+                continue;
+            const rel = rels.get(rId);
+            if (!rel)
+                continue;
+            if (rel.type.endsWith('/ctrlProp')) {
+                const target = rel.target.startsWith('/')
+                    ? rel.target.slice(1)
+                    : normaliseRelPath(`${drawingDir}/${rel.target}`);
+                if (parts[target])
+                    return true;
+            }
+            const target = rel.target.startsWith('/')
+                ? rel.target.slice(1)
+                : normaliseRelPath(`${drawingDir}/${rel.target}`);
+            if (/^xl\/ctrlProps\/.*\.xml$/i.test(target) && parts[target])
+                return true;
+        }
+        return false;
+    }
+    const FORM_CONTROL_OBJECT_TYPES = {
+        'button': 'button',
+        'checkbox': 'checkbox',
+        'radio': 'radio',
+        'drop': 'combo',
+        'combobox': 'combo',
+        'list': 'list',
+        'listbox': 'list',
+        'scroll': 'scrollbar',
+        'scrollbar': 'scrollbar',
+        'spin': 'spinner',
+        'spinner': 'spinner',
+        'groupbox': 'groupBox',
+        'label': 'label',
+        'dialog': 'dialog',
+    };
+    function normaliseFormControlKind(raw) {
+        if (!raw)
+            return 'unknown';
+        const key = raw.toLowerCase();
+        return FORM_CONTROL_OBJECT_TYPES[key] ?? 'unknown';
+    }
+    function parseFormControl(sp, rels, drawingDir, parts, col, row, colOff, rowOff, endCol, endRow, anchor) {
+        let ctrlPropXml = null;
+        const descendants = anchor.getElementsByTagName('*');
+        for (let i = 0; i < descendants.length; i++) {
+            const rId = descendants[i].getAttributeNS(NS.rel, 'id');
+            if (!rId)
+                continue;
+            const rel = rels.get(rId);
+            if (!rel)
+                continue;
+            const target = rel.target.startsWith('/')
+                ? rel.target.slice(1)
+                : normaliseRelPath(`${drawingDir}/${rel.target}`);
+            if (!/^xl\/ctrlProps\/.*\.xml$/i.test(target))
+                continue;
+            ctrlPropXml = parts[target] ?? null;
+            if (ctrlPropXml)
+                break;
+        }
+        const cNvPr = sp.getElementsByTagNameNS(NS.xdr, 'cNvPr').item(0);
+        const shapeName = cNvPr?.getAttribute('name') || null;
+        const altText = cNvPr?.getAttribute('descr') || cNvPr?.getAttribute('title') || null;
+        let labelFromText = null;
+        const txBody = sp.getElementsByTagNameNS(NS.xdr, 'txBody').item(0);
+        if (txBody) {
+            const paragraphs = [];
+            const pEls = txBody.getElementsByTagNameNS(NS.a, 'p');
+            for (let i = 0; i < pEls.length; i++) {
+                const p = pEls[i];
+                const tEls = p.getElementsByTagNameNS(NS.a, 't');
+                let line = '';
+                for (let j = 0; j < tEls.length; j++)
+                    line += tEls[j].textContent ?? '';
+                paragraphs.push(line);
+            }
+            const joined = paragraphs.join('\n');
+            if (joined.length > 0)
+                labelFromText = joined;
+        }
+        let kind = 'unknown';
+        let linkedCell = null;
+        let inputRange = null;
+        let checked = null;
+        let min = null;
+        let max = null;
+        let inc = null;
+        let page = null;
+        let val = null;
+        let dropLines = null;
+        if (ctrlPropXml) {
+            const ctrlDoc = parseXml(ctrlPropXml);
+            let root = ctrlDoc.documentElement;
+            if (root && root.localName !== 'formControlPr') {
+                const found = ctrlDoc.getElementsByTagName('formControlPr').item(0);
+                if (found)
+                    root = found;
+            }
+            if (root) {
+                kind = normaliseFormControlKind(root.getAttribute('objectType'));
+                linkedCell = root.getAttribute('fmlaLink') || null;
+                inputRange = root.getAttribute('fmlaRange') || null;
+                const checkedAttr = root.getAttribute('checked');
+                if (checkedAttr === 'Checked' || checkedAttr === '1' || checkedAttr === 'true') {
+                    checked = true;
+                }
+                else if (checkedAttr === 'Unchecked' || checkedAttr === '0' || checkedAttr === 'false') {
+                    checked = false;
+                }
+                else if (kind === 'checkbox' || kind === 'radio') {
+                    checked = false;
+                }
+                const numAttr = (name) => {
+                    const raw = root.getAttribute(name);
+                    if (raw === null)
+                        return null;
+                    const n = Number(raw);
+                    return Number.isFinite(n) ? n : null;
+                };
+                min = numAttr('min');
+                max = numAttr('max');
+                inc = numAttr('inc');
+                page = numAttr('page');
+                val = numAttr('val');
+                dropLines = numAttr('dropLines');
+            }
+        }
+        else if (shapeName) {
+            const lower = shapeName.toLowerCase();
+            if (lower.startsWith('check box'))
+                kind = 'checkbox';
+            else if (lower.startsWith('option button'))
+                kind = 'radio';
+            else if (lower.startsWith('button'))
+                kind = 'button';
+            else if (lower.startsWith('scroll bar'))
+                kind = 'scrollbar';
+            else if (lower.startsWith('spinner') || lower.startsWith('spin button'))
+                kind = 'spinner';
+            else if (lower.startsWith('drop down'))
+                kind = 'combo';
+            else if (lower.startsWith('list box'))
+                kind = 'list';
+            else if (lower.startsWith('group box'))
+                kind = 'groupBox';
+            else if (lower.startsWith('label'))
+                kind = 'label';
+        }
+        let label = null;
+        if (kind === 'button' || kind === 'label' || kind === 'groupBox') {
+            label = labelFromText ?? shapeName;
+        }
+        else {
+            label = labelFromText ?? shapeName;
+        }
+        return {
+            kind,
+            col: col ?? 0,
+            row: row ?? 0,
+            colOff: colOff ?? 0,
+            rowOff: rowOff ?? 0,
+            endCol,
+            endRow,
+            endColOff: resolveEndOffset(anchor, 'colOff'),
+            endRowOff: resolveEndOffset(anchor, 'rowOff'),
+            label,
+            linkedCell,
+            inputRange,
+            checked,
+            min, max, inc, page, val,
+            dropLines,
+            altText,
+        };
+    }
+    function resolveEndOffset(anchor, attr) {
+        const to = findDirectChildNS(anchor, NS.xdr, 'to');
+        if (!to)
+            return null;
+        const el = findDirectChildNS(to, NS.xdr, attr);
+        if (!el)
+            return null;
+        const n = Number(el.textContent);
+        return Number.isFinite(n) ? n : null;
     }
     function parseShape(el, kind, col, row, endCol, endRow) {
         const cNvPr = el.getElementsByTagNameNS(NS.xdr, 'cNvPr').item(0);
@@ -2319,7 +4114,7 @@
             name: firstAttr('rFont', 'val') ?? firstAttr('name', 'val'),
         };
     }
-    function parseSheet(name, state, xml, sharedStrings, tables = [], images = [], charts = [], shapes = [], pivots = [], comments = [], threadedComments = [], hyperlinkTargets = new Map(), sheetIndex = 0, definedNames = [], metadata = null) {
+    function parseSheet(name, state, xml, sharedStrings, tables = [], images = [], charts = [], shapes = [], formControls = [], embeddings = [], pivots = [], slicers = [], timelines = [], comments = [], threadedComments = [], hyperlinkTargets = new Map(), sheetIndex = 0, definedNames = [], metadata = null, smartArt = []) {
         const doc = parseXml(xml);
         const rowEls = doc.getElementsByTagNameNS(NS.main, 'row');
         const rows = [];
@@ -2403,7 +4198,7 @@
         return {
             name, state, rows, maxCol, maxRow, merges, columns, rowDimensions,
             conditionalFormatting, frozenPanes, autoFilter, tables, images,
-            charts, shapes, pivots, extensions, comments, threadedComments, view, outline,
+            charts, shapes, smartArt, formControls, embeddings, pivots, slicers, timelines, extensions, comments, threadedComments, view, outline,
             hyperlinks, dataValidationLists, pageBreaks, printArea, headerFooter,
             protection,
         };
@@ -2513,6 +4308,20 @@
             const display = el.getAttribute('display');
             const ranges = parseSqref(ref);
             for (const range of ranges) {
+                const width = range.endCol - range.col + 1;
+                const height = range.endRow - range.row + 1;
+                const total = width * height;
+                if (total > MAX_RANGE_EXPANSION_CELLS) {
+                    out.push({
+                        col: range.col,
+                        row: range.row,
+                        target,
+                        location: location || null,
+                        tooltip: tooltip || null,
+                        display: display || null,
+                    });
+                    continue;
+                }
                 for (let r = range.row; r <= range.endRow; r++) {
                     for (let c = range.col; c <= range.endCol; c++) {
                         out.push({
@@ -2551,6 +4360,19 @@
             }
             const ranges = parseSqref(sqref);
             for (const range of ranges) {
+                const width = range.endCol - range.col + 1;
+                const height = range.endRow - range.row + 1;
+                if (width * height > MAX_RANGE_EXPANSION_CELLS) {
+                    const clampedCols = Math.min(width, MAX_RANGE_EXPANSION_CELLS);
+                    out.push({
+                        col: range.col,
+                        row: range.row,
+                        endCol: range.col + clampedCols - 1,
+                        endRow: range.row,
+                        options,
+                    });
+                    continue;
+                }
                 out.push({
                     col: range.col,
                     row: range.row,
@@ -3624,26 +5446,1461 @@
         return icons[effective];
     }
 
+    const DEFAULT_FILL = '#e0e0e0';
+    function wrap(inner) {
+        return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">${inner}</svg>`;
+    }
+    function regularPolygon(sides) {
+        const cx = 50, cy = 50, r = 48;
+        const pts = [];
+        for (let i = 0; i < sides; i++) {
+            const angle = -Math.PI / 2 + (i * 2 * Math.PI) / sides;
+            const x = cx + r * Math.cos(angle);
+            const y = cy + r * Math.sin(angle);
+            pts.push(`${x.toFixed(2)},${y.toFixed(2)}`);
+        }
+        return pts.join(' ');
+    }
+    function starPoints() {
+        const cx = 50, cy = 50, rOuter = 48, rInner = 20;
+        const pts = [];
+        for (let i = 0; i < 10; i++) {
+            const r = i % 2 === 0 ? rOuter : rInner;
+            const angle = -Math.PI / 2 + (i * Math.PI) / 5;
+            const x = cx + r * Math.cos(angle);
+            const y = cy + r * Math.sin(angle);
+            pts.push(`${x.toFixed(2)},${y.toFixed(2)}`);
+        }
+        return pts.join(' ');
+    }
+    function presetBody(preset, stroke) {
+        const s = stroke;
+        switch (preset) {
+            case 'rect':
+            case 'flowChartProcess':
+                return `<rect x="1" y="1" width="98" height="98" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'roundRect':
+                return `<rect x="1" y="1" width="98" height="98" rx="8" ry="8" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'ellipse':
+            case 'flowChartConnector':
+                return `<ellipse cx="50" cy="50" rx="49" ry="49" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'line':
+                return `<line x1="0" y1="0" x2="100" y2="100" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'triangle':
+                return `<polygon points="50,2 98,98 2,98" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'rtTriangle':
+                return `<polygon points="2,2 2,98 98,98" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'diamond':
+            case 'flowChartDecision':
+                return `<polygon points="50,2 98,50 50,98 2,50" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'parallelogram':
+                return `<polygon points="22,2 98,2 78,98 2,98" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'trapezoid':
+                return `<polygon points="22,2 78,2 98,98 2,98" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'pentagon':
+                return `<polygon points="${regularPolygon(5)}" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'hexagon':
+                return `<polygon points="${regularPolygon(6)}" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'octagon':
+                return `<polygon points="${regularPolygon(8)}" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'star5':
+                return `<polygon points="${starPoints()}" fill="${DEFAULT_FILL}" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'rightArrow':
+                return `<path d="M2 30 L60 30 L60 10 L98 50 L60 90 L60 70 L2 70 Z" fill="${DEFAULT_FILL}" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'leftArrow':
+                return `<path d="M98 30 L40 30 L40 10 L2 50 L40 90 L40 70 L98 70 Z" fill="${DEFAULT_FILL}" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'upArrow':
+                return `<path d="M30 98 L30 40 L10 40 L50 2 L90 40 L70 40 L70 98 Z" fill="${DEFAULT_FILL}" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'downArrow':
+                return `<path d="M30 2 L30 60 L10 60 L50 98 L90 60 L70 60 L70 2 Z" fill="${DEFAULT_FILL}" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'leftRightArrow':
+                return `<path d="M2 50 L20 30 L20 40 L80 40 L80 30 L98 50 L80 70 L80 60 L20 60 L20 70 Z" fill="${DEFAULT_FILL}" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'flowChartTerminator':
+                return `<rect x="1" y="1" width="98" height="98" rx="49" ry="49" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'callout1':
+            case 'wedgeRectCallout':
+                return `<rect x="1" y="1" width="98" height="78" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>` +
+                    `<polygon points="15,79 35,79 8,98" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'wedgeEllipseCallout':
+                return `<ellipse cx="50" cy="40" rx="49" ry="39" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>` +
+                    `<polygon points="20,75 38,75 8,98" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            case 'cloudCallout':
+                return `<ellipse cx="30" cy="45" rx="22" ry="20" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>` +
+                    `<ellipse cx="60" cy="35" rx="26" ry="22" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>` +
+                    `<ellipse cx="78" cy="55" rx="18" ry="18" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>` +
+                    `<ellipse cx="50" cy="60" rx="28" ry="18" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>` +
+                    `<circle cx="18" cy="82" r="6" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>` +
+                    `<circle cx="8" cy="94" r="4" fill="none" stroke="${s}" stroke-width="1" vector-effect="non-scaling-stroke"/>`;
+            default:
+                return null;
+        }
+    }
+    function renderShapePreset(preset, opts) {
+        if (preset === null || preset === '')
+            return null;
+        const body = presetBody(preset, opts.stroke);
+        if (body === null)
+            return null;
+        return wrap(body);
+    }
+
+    const SVG_NS$1 = 'http://www.w3.org/2000/svg';
+    const PALETTE$1 = [
+        '#5b9bd5',
+        '#ed7d31',
+        '#a5a5a5',
+        '#ffc000',
+        '#4472c4',
+        '#70ad47',
+        '#264478',
+        '#9e480e',
+    ];
+    const GRID_COLOR = '#ddd';
+    const AXIS_COLOR = '#888';
+    const TEXT_COLOR$1 = '#333';
+    function makeSvg(width, height) {
+        const svg = document.createElementNS(SVG_NS$1, 'svg');
+        svg.setAttribute('xmlns', SVG_NS$1);
+        svg.setAttribute('width', String(width));
+        svg.setAttribute('height', String(height));
+        svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+        svg.setAttribute('class', 'xlsx-chart-svg');
+        return svg;
+    }
+    function el(tag, attrs) {
+        const node = document.createElementNS(SVG_NS$1, tag);
+        for (const [k, v] of Object.entries(attrs))
+            node.setAttribute(k, String(v));
+        return node;
+    }
+    function textEl(x, y, text, attrs = {}) {
+        const t = document.createElementNS(SVG_NS$1, 'text');
+        t.setAttribute('x', String(x));
+        t.setAttribute('y', String(y));
+        t.setAttribute('fill', TEXT_COLOR$1);
+        t.setAttribute('font-family', 'system-ui, sans-serif');
+        t.setAttribute('font-size', '12');
+        for (const [k, v] of Object.entries(attrs))
+            t.setAttribute(k, String(v));
+        t.textContent = text;
+        return t;
+    }
+    function colorFor(series, idx) {
+        if (series.color && /^#[0-9a-f]{6}$/i.test(series.color))
+            return series.color;
+        return PALETTE$1[idx % PALETTE$1.length];
+    }
+    function niceMax(max) {
+        if (!Number.isFinite(max) || max <= 0)
+            return 1;
+        const mag = Math.pow(10, Math.floor(Math.log10(max)));
+        const norm = max / mag;
+        let nice;
+        if (norm <= 1)
+            nice = 1;
+        else if (norm <= 2)
+            nice = 2;
+        else if (norm <= 5)
+            nice = 5;
+        else
+            nice = 10;
+        return nice * mag;
+    }
+    function niceMin(min) {
+        if (min >= 0)
+            return 0;
+        const abs = Math.abs(min);
+        return -niceMax(abs);
+    }
+    function seriesRange(series) {
+        let min = 0;
+        let max = 0;
+        let seen = false;
+        for (const s of series) {
+            for (const v of s.values) {
+                if (v === null || !Number.isFinite(v))
+                    continue;
+                if (!seen) {
+                    min = v;
+                    max = v;
+                    seen = true;
+                    continue;
+                }
+                if (v < min)
+                    min = v;
+                if (v > max)
+                    max = v;
+            }
+        }
+        if (!seen)
+            return { min: 0, max: 1 };
+        if (min === max) {
+            if (max > 0)
+                min = 0;
+            else if (max < 0)
+                max = 0;
+            else {
+                max = 1;
+            }
+        }
+        return { min, max };
+    }
+    function baseLayout(width, height, hasLegend, legendPos) {
+        const top = 40;
+        const right = 40 + (hasLegend && legendPos === 'right' ? 100 : 0);
+        const bottom = 60 + (hasLegend && legendPos === 'bottom' ? 20 : 0);
+        const left = 80 + (hasLegend && legendPos === 'left' ? 80 : 0);
+        const adjustedTop = top + (hasLegend && legendPos === 'top' ? 20 : 0);
+        return {
+            width,
+            height,
+            plotX: left,
+            plotY: adjustedTop,
+            plotW: Math.max(10, width - left - right),
+            plotH: Math.max(10, height - adjustedTop - bottom),
+        };
+    }
+    function appendTitle(svg, title, layout) {
+        const t = textEl(layout.width / 2, 20, title, {
+            'text-anchor': 'middle',
+            'font-size': '14',
+            'font-weight': '600',
+        });
+        t.setAttribute('class', 'xlsx-chart-title');
+        svg.appendChild(t);
+    }
+    function appendLegend(svg, model, layout) {
+        if (model.legend === 'none')
+            return;
+        const entries = model.series
+            .map((s, i) => ({ name: s.name, color: colorFor(s, i) }))
+            .filter((e) => e.name !== null);
+        if (!entries.length)
+            return;
+        const group = document.createElementNS(SVG_NS$1, 'g');
+        group.setAttribute('class', 'xlsx-chart-legend');
+        let x;
+        let y;
+        let stepX = 0;
+        let stepY = 0;
+        const rowHeight = 16;
+        const swatchSize = 10;
+        const gap = 6;
+        if (model.legend === 'right') {
+            x = layout.plotX + layout.plotW + 16;
+            y = layout.plotY + 4;
+            stepY = rowHeight;
+        }
+        else if (model.legend === 'left') {
+            x = 10;
+            y = layout.plotY + 4;
+            stepY = rowHeight;
+        }
+        else if (model.legend === 'top') {
+            x = layout.plotX;
+            y = layout.plotY - 16;
+            stepX = 80;
+        }
+        else {
+            x = layout.plotX;
+            y = layout.height - 16;
+            stepX = 80;
+        }
+        entries.forEach((entry, i) => {
+            const item = document.createElementNS(SVG_NS$1, 'g');
+            item.setAttribute('class', 'xlsx-chart-legend-entry');
+            const lx = x + stepX * i;
+            const ly = y + stepY * i;
+            const rect = el('rect', {
+                x: lx, y: ly, width: swatchSize, height: swatchSize,
+                fill: entry.color,
+            });
+            item.appendChild(rect);
+            const label = textEl(lx + swatchSize + gap, ly + swatchSize - 1, entry.name ?? '', { 'font-size': '11' });
+            item.appendChild(label);
+            group.appendChild(item);
+        });
+        svg.appendChild(group);
+    }
+    function appendYAxis(svg, layout, axisMin, axisMax) {
+        const g = document.createElementNS(SVG_NS$1, 'g');
+        g.setAttribute('class', 'xlsx-chart-yaxis');
+        const ticks = 5;
+        for (let i = 0; i <= ticks; i++) {
+            const frac = i / ticks;
+            const value = axisMin + (axisMax - axisMin) * frac;
+            const y = layout.plotY + layout.plotH - frac * layout.plotH;
+            g.appendChild(el('line', {
+                x1: layout.plotX, x2: layout.plotX + layout.plotW,
+                y1: y, y2: y,
+                stroke: GRID_COLOR, 'stroke-width': 1,
+            }));
+            g.appendChild(textEl(layout.plotX - 6, y + 4, formatTick(value), {
+                'text-anchor': 'end', 'font-size': '10',
+            }));
+        }
+        g.appendChild(el('line', {
+            x1: layout.plotX, x2: layout.plotX,
+            y1: layout.plotY, y2: layout.plotY + layout.plotH,
+            stroke: AXIS_COLOR, 'stroke-width': 1,
+        }));
+        svg.appendChild(g);
+    }
+    function appendXAxisCategory(svg, layout, categories) {
+        if (!categories.length)
+            return;
+        const g = document.createElementNS(SVG_NS$1, 'g');
+        g.setAttribute('class', 'xlsx-chart-xaxis');
+        const slot = layout.plotW / categories.length;
+        categories.forEach((label, i) => {
+            const cx = layout.plotX + slot * (i + 0.5);
+            g.appendChild(textEl(cx, layout.plotY + layout.plotH + 14, label ?? '', {
+                'text-anchor': 'middle', 'font-size': '10',
+            }));
+        });
+        g.appendChild(el('line', {
+            x1: layout.plotX, x2: layout.plotX + layout.plotW,
+            y1: layout.plotY + layout.plotH, y2: layout.plotY + layout.plotH,
+            stroke: AXIS_COLOR, 'stroke-width': 1,
+        }));
+        svg.appendChild(g);
+    }
+    function formatTick(v) {
+        if (!Number.isFinite(v))
+            return '';
+        const abs = Math.abs(v);
+        if (abs >= 1000)
+            return String(Math.round(v));
+        if (abs >= 10 || abs === 0)
+            return String(Math.round(v));
+        const s = v.toFixed(1);
+        return s.endsWith('.0') ? s.slice(0, -2) : s;
+    }
+    function renderColumn(model, layout, svg) {
+        const n = Math.max(model.categories.length, ...model.series.map((s) => s.values.length));
+        if (n === 0)
+            return;
+        const stacked = model.grouping === 'stacked' || model.grouping === 'percentStacked';
+        const percent = model.grouping === 'percentStacked';
+        const { min, max } = stacked
+            ? stackedRange(model.series, n, percent)
+            : seriesRange(model.series);
+        const axisMax = max > 0 ? niceMax(max) : 0;
+        const axisMin = min < 0 ? niceMin(min) : 0;
+        appendYAxis(svg, layout, axisMin, axisMax);
+        const categoryLabels = model.categories.length ? model.categories
+            : Array.from({ length: n }, (_, i) => String(i + 1));
+        appendXAxisCategory(svg, layout, categoryLabels);
+        const slot = layout.plotW / n;
+        const groupPad = slot * 0.2;
+        const seriesCount = Math.max(1, model.series.length);
+        const barW = stacked ? slot - groupPad * 2 : (slot - groupPad * 2) / seriesCount;
+        const range = axisMax - axisMin || 1;
+        const zeroY = layout.plotY + layout.plotH * (axisMax / range);
+        const totals = percent ? categoryTotals(model.series, n) : [];
+        const stackPos = new Array(n).fill(0);
+        const stackNeg = new Array(n).fill(0);
+        model.series.forEach((s, si) => {
+            const group = document.createElementNS(SVG_NS$1, 'g');
+            group.setAttribute('class', 'xlsx-chart-series');
+            group.setAttribute('data-series-index', String(si));
+            if (s.name)
+                group.setAttribute('data-series-name', sanitiseForAttr(s.name));
+            const color = colorFor(s, si);
+            for (let ci = 0; ci < n; ci++) {
+                const vRaw = s.values[ci];
+                const vRawFinite = vRaw !== null && vRaw !== undefined && Number.isFinite(vRaw) ? vRaw : null;
+                const x = stacked
+                    ? layout.plotX + slot * ci + groupPad
+                    : layout.plotX + slot * ci + groupPad + barW * si;
+                let y;
+                let h;
+                if (vRawFinite === null) {
+                    y = zeroY;
+                    h = 0;
+                }
+                else if (stacked) {
+                    const categoryTotal = totals[ci] ?? 0;
+                    const vShare = percent
+                        ? (categoryTotal > 0 ? (vRawFinite / categoryTotal) * 100 : 0)
+                        : vRawFinite;
+                    if (vShare >= 0) {
+                        const base = stackPos[ci];
+                        const top = base + vShare;
+                        const yTop = layout.plotY + layout.plotH - ((top - axisMin) / range) * layout.plotH;
+                        const yBase = layout.plotY + layout.plotH - ((base - axisMin) / range) * layout.plotH;
+                        y = yTop;
+                        h = yBase - yTop;
+                        stackPos[ci] = top;
+                    }
+                    else {
+                        const base = stackNeg[ci];
+                        const bottom = base + vShare;
+                        const yTop = layout.plotY + layout.plotH - ((base - axisMin) / range) * layout.plotH;
+                        const yBot = layout.plotY + layout.plotH - ((bottom - axisMin) / range) * layout.plotH;
+                        y = yTop;
+                        h = yBot - yTop;
+                        stackNeg[ci] = bottom;
+                    }
+                }
+                else if (vRawFinite >= 0) {
+                    const top = layout.plotY + layout.plotH - (vRawFinite / range) * layout.plotH - (axisMin < 0 ? -axisMin / range * layout.plotH : 0);
+                    y = top;
+                    h = zeroY - top;
+                }
+                else {
+                    const bottom = layout.plotY + layout.plotH - ((vRawFinite - axisMin) / range) * layout.plotH;
+                    y = zeroY;
+                    h = bottom - zeroY;
+                }
+                group.appendChild(el('rect', {
+                    x, y, width: Math.max(0, barW - 1), height: Math.max(0, h),
+                    fill: color,
+                }));
+                if (s.dataLabels?.show && vRawFinite !== null) {
+                    const pos = s.dataLabels.position ?? 'outEnd';
+                    const cx = x + Math.max(0, barW - 1) / 2;
+                    let ly;
+                    if (pos === 'ctr')
+                        ly = y + h / 2 + 3;
+                    else if (pos === 'inBase')
+                        ly = y + h - 3;
+                    else
+                        ly = y - 3;
+                    appendDataLabel(group, cx, ly, formatDataLabel(vRawFinite), 'middle');
+                }
+            }
+            svg.appendChild(group);
+        });
+    }
+    function stackedRange(series, n, percent) {
+        if (percent)
+            return { min: 0, max: 100 };
+        let max = 0;
+        let min = 0;
+        for (let ci = 0; ci < n; ci++) {
+            let pos = 0, neg = 0;
+            for (const s of series) {
+                const v = s.values[ci];
+                if (v === null || v === undefined || !Number.isFinite(v))
+                    continue;
+                if (v >= 0)
+                    pos += v;
+                else
+                    neg += v;
+            }
+            if (pos > max)
+                max = pos;
+            if (neg < min)
+                min = neg;
+        }
+        if (max === 0 && min === 0)
+            max = 1;
+        return { min, max };
+    }
+    function categoryTotals(series, n) {
+        const out = new Array(n).fill(0);
+        for (let ci = 0; ci < n; ci++) {
+            for (const s of series) {
+                const v = s.values[ci];
+                if (v === null || v === undefined || !Number.isFinite(v))
+                    continue;
+                if (v > 0)
+                    out[ci] += v;
+            }
+        }
+        return out;
+    }
+    function renderBar(model, layout, svg) {
+        const n = Math.max(model.categories.length, ...model.series.map((s) => s.values.length));
+        if (n === 0)
+            return;
+        const stacked = model.grouping === 'stacked' || model.grouping === 'percentStacked';
+        const percent = model.grouping === 'percentStacked';
+        const { min, max } = stacked
+            ? stackedRange(model.series, n, percent)
+            : seriesRange(model.series);
+        const axisMax = max > 0 ? niceMax(max) : 0;
+        const axisMin = min < 0 ? niceMin(min) : 0;
+        const gx = document.createElementNS(SVG_NS$1, 'g');
+        gx.setAttribute('class', 'xlsx-chart-xaxis');
+        const ticks = 5;
+        for (let i = 0; i <= ticks; i++) {
+            const frac = i / ticks;
+            const value = axisMin + (axisMax - axisMin) * frac;
+            const x = layout.plotX + frac * layout.plotW;
+            gx.appendChild(el('line', {
+                x1: x, x2: x, y1: layout.plotY, y2: layout.plotY + layout.plotH,
+                stroke: GRID_COLOR, 'stroke-width': 1,
+            }));
+            gx.appendChild(textEl(x, layout.plotY + layout.plotH + 14, formatTick(value), {
+                'text-anchor': 'middle', 'font-size': '10',
+            }));
+        }
+        gx.appendChild(el('line', {
+            x1: layout.plotX, x2: layout.plotX + layout.plotW,
+            y1: layout.plotY + layout.plotH, y2: layout.plotY + layout.plotH,
+            stroke: AXIS_COLOR, 'stroke-width': 1,
+        }));
+        svg.appendChild(gx);
+        const categoryLabels = model.categories.length ? model.categories
+            : Array.from({ length: n }, (_, i) => String(i + 1));
+        const gy = document.createElementNS(SVG_NS$1, 'g');
+        gy.setAttribute('class', 'xlsx-chart-yaxis');
+        const slot = layout.plotH / n;
+        categoryLabels.forEach((label, i) => {
+            const cy = layout.plotY + slot * (i + 0.5);
+            gy.appendChild(textEl(layout.plotX - 6, cy + 4, label ?? '', {
+                'text-anchor': 'end', 'font-size': '10',
+            }));
+        });
+        gy.appendChild(el('line', {
+            x1: layout.plotX, x2: layout.plotX,
+            y1: layout.plotY, y2: layout.plotY + layout.plotH,
+            stroke: AXIS_COLOR, 'stroke-width': 1,
+        }));
+        svg.appendChild(gy);
+        const groupPad = slot * 0.2;
+        const seriesCount = Math.max(1, model.series.length);
+        const barH = stacked ? slot - groupPad * 2 : (slot - groupPad * 2) / seriesCount;
+        const range = axisMax - axisMin || 1;
+        const zeroX = layout.plotX + ((0 - axisMin) / range) * layout.plotW;
+        const totals = percent ? categoryTotals(model.series, n) : [];
+        const stackPos = new Array(n).fill(0);
+        const stackNeg = new Array(n).fill(0);
+        model.series.forEach((s, si) => {
+            const group = document.createElementNS(SVG_NS$1, 'g');
+            group.setAttribute('class', 'xlsx-chart-series');
+            group.setAttribute('data-series-index', String(si));
+            if (s.name)
+                group.setAttribute('data-series-name', sanitiseForAttr(s.name));
+            const color = colorFor(s, si);
+            for (let ci = 0; ci < n; ci++) {
+                const vRaw = s.values[ci];
+                const v = vRaw !== null && vRaw !== undefined && Number.isFinite(vRaw) ? vRaw : null;
+                const y = stacked
+                    ? layout.plotY + slot * ci + groupPad
+                    : layout.plotY + slot * ci + groupPad + barH * si;
+                let x;
+                let w;
+                if (v === null) {
+                    x = zeroX;
+                    w = 0;
+                }
+                else if (stacked) {
+                    const categoryTotal = totals[ci] ?? 0;
+                    const vShare = percent
+                        ? (categoryTotal > 0 ? (v / categoryTotal) * 100 : 0)
+                        : v;
+                    if (vShare >= 0) {
+                        const base = stackPos[ci];
+                        const top = base + vShare;
+                        const xStart = layout.plotX + ((base - axisMin) / range) * layout.plotW;
+                        const xEnd = layout.plotX + ((top - axisMin) / range) * layout.plotW;
+                        x = xStart;
+                        w = xEnd - xStart;
+                        stackPos[ci] = top;
+                    }
+                    else {
+                        const base = stackNeg[ci];
+                        const bottom = base + vShare;
+                        const xStart = layout.plotX + ((bottom - axisMin) / range) * layout.plotW;
+                        const xEnd = layout.plotX + ((base - axisMin) / range) * layout.plotW;
+                        x = xStart;
+                        w = xEnd - xStart;
+                        stackNeg[ci] = bottom;
+                    }
+                }
+                else if (v >= 0) {
+                    x = zeroX;
+                    w = (v / range) * layout.plotW;
+                }
+                else {
+                    const end = layout.plotX + ((v - axisMin) / range) * layout.plotW;
+                    x = end;
+                    w = zeroX - end;
+                }
+                group.appendChild(el('rect', {
+                    x, y, width: Math.max(0, w), height: Math.max(0, barH - 1),
+                    fill: color,
+                }));
+                if (s.dataLabels?.show && v !== null) {
+                    const pos = s.dataLabels.position ?? 'outEnd';
+                    const cy = y + Math.max(0, barH - 1) / 2 + 3;
+                    let lx;
+                    let anchor = 'start';
+                    if (pos === 'ctr') {
+                        lx = x + w / 2;
+                        anchor = 'middle';
+                    }
+                    else if (pos === 'inBase') {
+                        lx = x + 3;
+                        anchor = 'start';
+                    }
+                    else {
+                        lx = x + w + 3;
+                        anchor = 'start';
+                    }
+                    appendDataLabel(group, lx, cy, formatDataLabel(v), anchor);
+                }
+            }
+            svg.appendChild(group);
+        });
+    }
+    function renderLine(model, layout, svg) {
+        const n = Math.max(model.categories.length, ...model.series.map((s) => s.values.length));
+        if (n === 0)
+            return;
+        const { min, max } = seriesRange(model.series);
+        const axisMax = max > 0 ? niceMax(max) : 0;
+        const axisMin = min < 0 ? niceMin(min) : 0;
+        appendYAxis(svg, layout, axisMin, axisMax);
+        const categoryLabels = model.categories.length ? model.categories
+            : Array.from({ length: n }, (_, i) => String(i + 1));
+        appendXAxisCategory(svg, layout, categoryLabels);
+        const slot = n > 1 ? layout.plotW / (n - 1) : layout.plotW;
+        const pointX = (ci) => n > 1
+            ? layout.plotX + slot * ci
+            : layout.plotX + layout.plotW / 2;
+        const pointY = (v) => layout.plotY + layout.plotH - ((v - axisMin) / (axisMax - axisMin || 1)) * layout.plotH;
+        model.series.forEach((s, si) => {
+            const group = document.createElementNS(SVG_NS$1, 'g');
+            group.setAttribute('class', 'xlsx-chart-series');
+            group.setAttribute('data-series-index', String(si));
+            if (s.name)
+                group.setAttribute('data-series-name', sanitiseForAttr(s.name));
+            const color = colorFor(s, si);
+            const pts = [];
+            for (let ci = 0; ci < n; ci++) {
+                const vRaw = s.values[ci];
+                const v = vRaw !== null && vRaw !== undefined && Number.isFinite(vRaw) ? vRaw : null;
+                if (v === null)
+                    continue;
+                const px = pointX(ci);
+                const py = pointY(v);
+                pts.push(`${px.toFixed(2)},${py.toFixed(2)}`);
+            }
+            if (pts.length) {
+                group.appendChild(el('polyline', {
+                    points: pts.join(' '),
+                    fill: 'none',
+                    stroke: color,
+                    'stroke-width': 2,
+                }));
+                for (let ci = 0; ci < n; ci++) {
+                    const vRaw = s.values[ci];
+                    const v = vRaw !== null && vRaw !== undefined && Number.isFinite(vRaw) ? vRaw : null;
+                    if (v === null)
+                        continue;
+                    group.appendChild(el('circle', {
+                        cx: pointX(ci), cy: pointY(v), r: 3,
+                        fill: color,
+                    }));
+                    if (s.dataLabels?.show) {
+                        const pos = s.dataLabels.position ?? 't';
+                        let ly;
+                        if (pos === 'b')
+                            ly = pointY(v) + 14;
+                        else if (pos === 'ctr')
+                            ly = pointY(v) + 3;
+                        else
+                            ly = pointY(v) - 6;
+                        appendDataLabel(group, pointX(ci), ly, formatDataLabel(v), 'middle');
+                    }
+                }
+            }
+            svg.appendChild(group);
+        });
+    }
+    function renderScatter(model, layout, svg) {
+        const xRange = scatterXRange(model.series);
+        const { min, max } = seriesRange(model.series);
+        const axisMaxY = max > 0 ? niceMax(max) : 0;
+        const axisMinY = min < 0 ? niceMin(min) : 0;
+        const axisMinX = xRange.min < 0 ? niceMin(xRange.min) : (xRange.min === xRange.max ? 0 : Math.min(0, xRange.min));
+        const axisMaxX = xRange.max > 0 ? niceMax(xRange.max) : xRange.max;
+        const rangeY = axisMaxY - axisMinY || 1;
+        const rangeX = axisMaxX - axisMinX || 1;
+        appendYAxis(svg, layout, axisMinY, axisMaxY);
+        appendXAxisNumeric(svg, layout, axisMinX, axisMaxX);
+        const projX = (v) => layout.plotX + ((v - axisMinX) / rangeX) * layout.plotW;
+        const projY = (v) => layout.plotY + layout.plotH - ((v - axisMinY) / rangeY) * layout.plotH;
+        model.series.forEach((s, si) => {
+            const group = document.createElementNS(SVG_NS$1, 'g');
+            group.setAttribute('class', 'xlsx-chart-series');
+            group.setAttribute('data-series-index', String(si));
+            if (s.name)
+                group.setAttribute('data-series-name', sanitiseForAttr(s.name));
+            const color = colorFor(s, si);
+            const xs = s.xValues ?? [];
+            const ys = s.values;
+            const count = Math.max(xs.length, ys.length);
+            for (let i = 0; i < count; i++) {
+                const xv = xs[i];
+                const yv = ys[i];
+                if (xv === null || xv === undefined || !Number.isFinite(xv))
+                    continue;
+                if (yv === null || yv === undefined || !Number.isFinite(yv))
+                    continue;
+                group.appendChild(el('circle', {
+                    cx: projX(xv).toFixed(2),
+                    cy: projY(yv).toFixed(2),
+                    r: 4,
+                    fill: color,
+                    stroke: '#fff',
+                    'stroke-width': 1,
+                }));
+            }
+            svg.appendChild(group);
+        });
+    }
+    function scatterXRange(series) {
+        let min = 0, max = 0, seen = false;
+        for (const s of series) {
+            const xs = s.xValues;
+            if (!xs)
+                continue;
+            for (const v of xs) {
+                if (v === null || !Number.isFinite(v))
+                    continue;
+                if (!seen) {
+                    min = v;
+                    max = v;
+                    seen = true;
+                    continue;
+                }
+                if (v < min)
+                    min = v;
+                if (v > max)
+                    max = v;
+            }
+        }
+        if (!seen)
+            return { min: 0, max: 1 };
+        if (min === max) {
+            if (max > 0)
+                min = 0;
+            else if (max < 0)
+                max = 0;
+            else {
+                max = 1;
+            }
+        }
+        return { min, max };
+    }
+    function appendXAxisNumeric(svg, layout, axisMin, axisMax) {
+        const g = document.createElementNS(SVG_NS$1, 'g');
+        g.setAttribute('class', 'xlsx-chart-xaxis');
+        const ticks = 5;
+        for (let i = 0; i <= ticks; i++) {
+            const frac = i / ticks;
+            const value = axisMin + (axisMax - axisMin) * frac;
+            const x = layout.plotX + frac * layout.plotW;
+            g.appendChild(el('line', {
+                x1: x, x2: x, y1: layout.plotY + layout.plotH, y2: layout.plotY + layout.plotH + 4,
+                stroke: AXIS_COLOR, 'stroke-width': 1,
+            }));
+            g.appendChild(textEl(x, layout.plotY + layout.plotH + 14, formatTick(value), {
+                'text-anchor': 'middle', 'font-size': '10',
+            }));
+        }
+        g.appendChild(el('line', {
+            x1: layout.plotX, x2: layout.plotX + layout.plotW,
+            y1: layout.plotY + layout.plotH, y2: layout.plotY + layout.plotH,
+            stroke: AXIS_COLOR, 'stroke-width': 1,
+        }));
+        svg.appendChild(g);
+    }
+    function renderArea(model, layout, svg) {
+        const n = Math.max(model.categories.length, ...model.series.map((s) => s.values.length));
+        if (n === 0)
+            return;
+        const stacked = model.grouping === 'stacked' || model.grouping === 'percentStacked';
+        const percent = model.grouping === 'percentStacked';
+        const { min, max } = stacked
+            ? stackedRange(model.series, n, percent)
+            : seriesRange(model.series);
+        const axisMax = max > 0 ? niceMax(max) : 0;
+        const axisMin = min < 0 ? niceMin(min) : 0;
+        const range = axisMax - axisMin || 1;
+        appendYAxis(svg, layout, axisMin, axisMax);
+        const categoryLabels = model.categories.length ? model.categories
+            : Array.from({ length: n }, (_, i) => String(i + 1));
+        appendXAxisCategory(svg, layout, categoryLabels);
+        const slot = n > 1 ? layout.plotW / (n - 1) : layout.plotW;
+        const pointX = (ci) => n > 1
+            ? layout.plotX + slot * ci
+            : layout.plotX + layout.plotW / 2;
+        const yFor = (v) => layout.plotY + layout.plotH - ((v - axisMin) / range) * layout.plotH;
+        const baselineY = yFor(0);
+        const totals = percent ? categoryTotals(model.series, n) : [];
+        const prevTop = new Array(n).fill(0);
+        model.series.forEach((s, si) => {
+            const group = document.createElementNS(SVG_NS$1, 'g');
+            group.setAttribute('class', 'xlsx-chart-series');
+            group.setAttribute('data-series-index', String(si));
+            if (s.name)
+                group.setAttribute('data-series-name', sanitiseForAttr(s.name));
+            const color = colorFor(s, si);
+            const topPts = [];
+            const bottomPts = [];
+            for (let ci = 0; ci < n; ci++) {
+                const vRaw = s.values[ci];
+                const vFinite = vRaw !== null && vRaw !== undefined && Number.isFinite(vRaw) ? vRaw : 0;
+                const x = pointX(ci);
+                if (stacked) {
+                    const share = percent
+                        ? (totals[ci] > 0 ? (vFinite / totals[ci]) * 100 : 0)
+                        : vFinite;
+                    const baseValue = prevTop[ci];
+                    const topValue = baseValue + share;
+                    topPts.push({ x, y: yFor(topValue) });
+                    bottomPts.push({ x, y: yFor(baseValue) });
+                    prevTop[ci] = topValue;
+                }
+                else {
+                    topPts.push({ x, y: yFor(vFinite) });
+                    bottomPts.push({ x, y: baselineY });
+                }
+            }
+            const parts = [];
+            topPts.forEach((p, i) => {
+                parts.push(`${i === 0 ? 'M' : 'L'} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`);
+            });
+            for (let i = bottomPts.length - 1; i >= 0; i--) {
+                const p = bottomPts[i];
+                parts.push(`L ${p.x.toFixed(2)} ${p.y.toFixed(2)}`);
+            }
+            parts.push('Z');
+            const d = parts.join(' ');
+            group.appendChild(el('path', {
+                d,
+                fill: color,
+                'fill-opacity': 0.7,
+                stroke: color,
+                'stroke-width': 1.5,
+                'stroke-opacity': 1,
+            }));
+            svg.appendChild(group);
+        });
+    }
+    function renderPie(model, layout, svg) {
+        renderPieLike(model, layout, svg, 0);
+    }
+    function renderDoughnut(model, layout, svg) {
+        renderPieLike(model, layout, svg, 0.5);
+    }
+    function renderPieLike(model, layout, svg, innerRatio) {
+        const series = model.series[0];
+        if (!series)
+            return;
+        const values = series.values
+            .map((v) => (v !== null && Number.isFinite(v) && v > 0 ? v : 0));
+        const total = values.reduce((a, b) => a + b, 0);
+        if (total <= 0)
+            return;
+        const size = Math.min(layout.plotW, layout.plotH);
+        const cx = layout.plotX + layout.plotW / 2;
+        const cy = layout.plotY + layout.plotH / 2;
+        const rOuter = size / 2 - 4;
+        const rInner = innerRatio > 0 ? rOuter * innerRatio : 0;
+        const group = document.createElementNS(SVG_NS$1, 'g');
+        group.setAttribute('class', 'xlsx-chart-series');
+        group.setAttribute('data-series-index', '0');
+        if (series.name)
+            group.setAttribute('data-series-name', sanitiseForAttr(series.name));
+        let acc = 0;
+        values.forEach((v, i) => {
+            if (v <= 0) {
+                const path = el('path', {
+                    d: `M ${cx} ${cy} Z`,
+                    fill: PALETTE$1[i % PALETTE$1.length],
+                });
+                group.appendChild(path);
+                return;
+            }
+            const startAngle = (acc / total) * Math.PI * 2 - Math.PI / 2;
+            acc += v;
+            const endAngle = (acc / total) * Math.PI * 2 - Math.PI / 2;
+            const x1 = cx + rOuter * Math.cos(startAngle);
+            const y1 = cy + rOuter * Math.sin(startAngle);
+            const x2 = cx + rOuter * Math.cos(endAngle);
+            const y2 = cy + rOuter * Math.sin(endAngle);
+            const large = endAngle - startAngle > Math.PI ? 1 : 0;
+            let d;
+            if (rInner > 0) {
+                const ix2 = cx + rInner * Math.cos(endAngle);
+                const iy2 = cy + rInner * Math.sin(endAngle);
+                const ix1 = cx + rInner * Math.cos(startAngle);
+                const iy1 = cy + rInner * Math.sin(startAngle);
+                d = `M ${x1.toFixed(2)} ${y1.toFixed(2)} `
+                    + `A ${rOuter} ${rOuter} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} `
+                    + `L ${ix2.toFixed(2)} ${iy2.toFixed(2)} `
+                    + `A ${rInner} ${rInner} 0 ${large} 0 ${ix1.toFixed(2)} ${iy1.toFixed(2)} Z`;
+            }
+            else {
+                d = `M ${cx} ${cy} L ${x1.toFixed(2)} ${y1.toFixed(2)} A ${rOuter} ${rOuter} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} Z`;
+            }
+            const color = PALETTE$1[i % PALETTE$1.length];
+            const path = el('path', {
+                d,
+                fill: color,
+                stroke: '#fff',
+                'stroke-width': 1,
+            });
+            group.appendChild(path);
+            if (series.dataLabels?.show) {
+                const mid = (startAngle + endAngle) / 2;
+                const pos = series.dataLabels.position ?? 'ctr';
+                const rLabel = pos === 'outEnd'
+                    ? rOuter * 1.1
+                    : (rInner > 0 ? (rInner + rOuter) / 2 : rOuter * 0.65);
+                const lx = cx + rLabel * Math.cos(mid);
+                const ly = cy + rLabel * Math.sin(mid) + 3;
+                appendDataLabel(group, lx, ly, formatDataLabel(v), 'middle');
+            }
+        });
+        svg.appendChild(group);
+        if (model.legend !== 'none' && model.categories.length) {
+            const legend = document.createElementNS(SVG_NS$1, 'g');
+            legend.setAttribute('class', 'xlsx-chart-legend');
+            const x = layout.plotX + layout.plotW + 16;
+            const y = layout.plotY + 4;
+            const rowH = 16;
+            const swatch = 10;
+            model.categories.forEach((label, i) => {
+                const item = document.createElementNS(SVG_NS$1, 'g');
+                item.setAttribute('class', 'xlsx-chart-legend-entry');
+                const ly = y + rowH * i;
+                item.appendChild(el('rect', {
+                    x, y: ly, width: swatch, height: swatch,
+                    fill: PALETTE$1[i % PALETTE$1.length],
+                }));
+                item.appendChild(textEl(x + swatch + 6, ly + swatch - 1, label ?? '', {
+                    'font-size': '11',
+                }));
+                legend.appendChild(item);
+            });
+            svg.appendChild(legend);
+        }
+    }
+    function renderRadar(model, layout, svg) {
+        const n = Math.max(model.categories.length, ...model.series.map((s) => s.values.length));
+        if (n === 0)
+            return;
+        const { max } = seriesRange(model.series);
+        const axisMax = max > 0 ? niceMax(max) : 1;
+        const size = Math.min(layout.plotW, layout.plotH);
+        const cx = layout.plotX + layout.plotW / 2;
+        const cy = layout.plotY + layout.plotH / 2;
+        const rOuter = size / 2 - 20;
+        const angleFor = (i) => -Math.PI / 2 + (i / n) * Math.PI * 2;
+        const vertexAt = (i, rFrac) => ({
+            x: cx + rOuter * rFrac * Math.cos(angleFor(i)),
+            y: cy + rOuter * rFrac * Math.sin(angleFor(i)),
+        });
+        const gridGroup = document.createElementNS(SVG_NS$1, 'g');
+        gridGroup.setAttribute('class', 'xlsx-chart-radar-grid');
+        const ticks = [0.25, 0.5, 0.75, 1];
+        for (const rFrac of ticks) {
+            const pts = [];
+            for (let i = 0; i < n; i++) {
+                const p = vertexAt(i, rFrac);
+                pts.push(`${p.x.toFixed(2)},${p.y.toFixed(2)}`);
+            }
+            gridGroup.appendChild(el('polygon', {
+                points: pts.join(' '),
+                fill: 'none',
+                stroke: GRID_COLOR,
+                'stroke-width': 1,
+            }));
+        }
+        svg.appendChild(gridGroup);
+        const axesGroup = document.createElementNS(SVG_NS$1, 'g');
+        axesGroup.setAttribute('class', 'xlsx-chart-radar-axes');
+        const categoryLabels = model.categories.length ? model.categories
+            : Array.from({ length: n }, (_, i) => String(i + 1));
+        for (let i = 0; i < n; i++) {
+            const outer = vertexAt(i, 1);
+            axesGroup.appendChild(el('line', {
+                x1: cx, y1: cy,
+                x2: outer.x, y2: outer.y,
+                stroke: AXIS_COLOR, 'stroke-width': 1,
+            }));
+            const labelPt = vertexAt(i, 1.1);
+            const anchor = Math.abs(labelPt.x - cx) < 1 ? 'middle'
+                : (labelPt.x < cx ? 'end' : 'start');
+            axesGroup.appendChild(textEl(labelPt.x, labelPt.y + 4, categoryLabels[i] ?? '', {
+                'text-anchor': anchor, 'font-size': '10',
+            }));
+        }
+        svg.appendChild(axesGroup);
+        model.series.forEach((s, si) => {
+            const group = document.createElementNS(SVG_NS$1, 'g');
+            group.setAttribute('class', 'xlsx-chart-series');
+            group.setAttribute('data-series-index', String(si));
+            if (s.name)
+                group.setAttribute('data-series-name', sanitiseForAttr(s.name));
+            const color = colorFor(s, si);
+            const pts = [];
+            const vertices = [];
+            for (let i = 0; i < n; i++) {
+                const vRaw = s.values[i];
+                const v = vRaw !== null && vRaw !== undefined && Number.isFinite(vRaw) ? vRaw : 0;
+                const rFrac = axisMax > 0 ? Math.max(0, v / axisMax) : 0;
+                const p = vertexAt(i, rFrac);
+                pts.push(`${p.x.toFixed(2)},${p.y.toFixed(2)}`);
+                vertices.push({ x: p.x, y: p.y, v });
+            }
+            if (pts.length) {
+                group.appendChild(el('polygon', {
+                    points: pts.join(' '),
+                    fill: color,
+                    'fill-opacity': 0.3,
+                    stroke: color,
+                    'stroke-width': 2,
+                }));
+                for (const vx of vertices) {
+                    group.appendChild(el('circle', {
+                        cx: vx.x.toFixed(2), cy: vx.y.toFixed(2), r: 3, fill: color,
+                    }));
+                }
+                if (s.dataLabels?.show) {
+                    for (let i = 0; i < n; i++) {
+                        const vx = vertices[i];
+                        const a = angleFor(i);
+                        const lx = vx.x + Math.cos(a) * 8;
+                        const ly = vx.y + Math.sin(a) * 8 + 3;
+                        appendDataLabel(group, lx, ly, formatDataLabel(vx.v), 'middle');
+                    }
+                }
+            }
+            svg.appendChild(group);
+        });
+    }
+    function formatDataLabel(v) {
+        if (!Number.isFinite(v))
+            return '';
+        return formatNumber(String(v), 'General').text;
+    }
+    function appendDataLabel(parent, x, y, text, anchor) {
+        const t = textEl(x, y, text, {
+            'text-anchor': anchor,
+            'font-size': '10',
+        });
+        t.setAttribute('class', 'xlsx-chart-data-label');
+        parent.appendChild(t);
+    }
+    function sanitiseForAttr(s) {
+        let out = '';
+        for (let i = 0; i < s.length; i++) {
+            const c = s.charCodeAt(i);
+            if (c < 0x20 || c === 0x7F)
+                continue;
+            out += s[i];
+        }
+        return out.slice(0, 256);
+    }
+    function renderChart(model, width = 480, height = 300) {
+        if (model.kind === 'unknown')
+            return null;
+        const svg = makeSvg(width, height);
+        const hasLegend = model.legend !== 'none' && model.series.some((s) => s.name);
+        const legendPos = model.legend;
+        const layout = baseLayout(width, height, hasLegend, legendPos);
+        if (model.title)
+            appendTitle(svg, model.title, layout);
+        switch (model.kind) {
+            case 'column':
+                renderColumn(model, layout, svg);
+                appendLegend(svg, model, layout);
+                return svg;
+            case 'bar':
+                renderBar(model, layout, svg);
+                appendLegend(svg, model, layout);
+                return svg;
+            case 'line':
+                renderLine(model, layout, svg);
+                appendLegend(svg, model, layout);
+                return svg;
+            case 'pie':
+                renderPie(model, layout, svg);
+                return svg;
+            case 'doughnut':
+                renderDoughnut(model, layout, svg);
+                return svg;
+            case 'scatter':
+                renderScatter(model, layout, svg);
+                appendLegend(svg, model, layout);
+                return svg;
+            case 'area':
+                renderArea(model, layout, svg);
+                appendLegend(svg, model, layout);
+                return svg;
+            case 'radar':
+                renderRadar(model, layout, svg);
+                appendLegend(svg, model, layout);
+                return svg;
+            default:
+                return null;
+        }
+    }
+
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    const DEFAULT_WIDTH = 480;
+    const DEFAULT_HEIGHT = 320;
+    const NODE_WIDTH = 100;
+    const NODE_HEIGHT = 40;
+    const NODE_RX = 4;
+    const MARGIN_X = 12;
+    const MARGIN_Y = 16;
+    const CYCLE_NODE_WIDTH = 80;
+    const CYCLE_NODE_HEIGHT = 32;
+    const CYCLE_NODE_RX = 4;
+    const PALETTE = [
+        '#5B9BD5',
+        '#ED7D31',
+        '#A5A5A5',
+        '#FFC000',
+        '#4472C4',
+        '#70AD47',
+    ];
+    const CONNECTOR_COLOR = '#888';
+    const TEXT_COLOR = '#ffffff';
+    function renderSmartArtSvg(model, opts = {}) {
+        const roots = model.rootNodes;
+        if (!roots || roots.length === 0)
+            return null;
+        const width = opts.width ?? DEFAULT_WIDTH;
+        const height = opts.height ?? DEFAULT_HEIGHT;
+        const strategy = resolveStrategy(model.layout, opts.layout ?? 'auto');
+        if (strategy === 'cycle') {
+            return renderCycle(model, width, height);
+        }
+        return renderHierarchyOrOrgchart(model, width, height, strategy === 'orgchart');
+    }
+    function resolveStrategy(layoutName, override) {
+        if (override === 'hierarchy' || override === 'orgchart' || override === 'cycle') {
+            return override;
+        }
+        if (layoutName) {
+            if (/orgChart/i.test(layoutName))
+                return 'orgchart';
+            if (/cycle/i.test(layoutName))
+                return 'cycle';
+        }
+        return 'hierarchy';
+    }
+    function renderHierarchyOrOrgchart(model, width, height, orgchart) {
+        const levels = [];
+        function walk(node, depth, parentIndex) {
+            if (!levels[depth])
+                levels[depth] = [];
+            const placed = { node, parentIndex, x: 0, y: 0, depth };
+            levels[depth].push(placed);
+            const myIndex = levels[depth].length - 1;
+            for (const child of node.children) {
+                walk(child, depth + 1, myIndex);
+            }
+        }
+        for (const root of model.rootNodes)
+            walk(root, 0, -1);
+        const depthCount = levels.length;
+        const usableH = Math.max(NODE_HEIGHT, height - MARGIN_Y * 2);
+        for (let d = 0; d < depthCount; d++) {
+            const row = levels[d];
+            const yCentre = depthCount === 1
+                ? height / 2
+                : MARGIN_Y + NODE_HEIGHT / 2 + (usableH - NODE_HEIGHT) * (d / (depthCount - 1));
+            const usableW = Math.max(NODE_WIDTH, width - MARGIN_X * 2);
+            const count = row.length;
+            for (let i = 0; i < count; i++) {
+                const xCentre = count === 1
+                    ? width / 2
+                    : MARGIN_X + NODE_WIDTH / 2 + (usableW - NODE_WIDTH) * (i / (count - 1));
+                row[i].x = xCentre;
+                row[i].y = yCentre;
+            }
+        }
+        const svg = createSvgRoot(width, height);
+        if (orgchart) {
+            for (let d = 1; d < depthCount; d++) {
+                const row = levels[d];
+                const parents = levels[d - 1];
+                const byParent = new Map();
+                for (const placed of row) {
+                    const list = byParent.get(placed.parentIndex) ?? [];
+                    list.push(placed);
+                    byParent.set(placed.parentIndex, list);
+                }
+                for (const [parentIndex, group] of byParent) {
+                    const parent = parents[parentIndex];
+                    if (!parent)
+                        continue;
+                    const parentBottom = parent.y + NODE_HEIGHT / 2;
+                    const childTop = group[0].y - NODE_HEIGHT / 2;
+                    const railY = (parentBottom + childTop) / 2;
+                    if (group.length === 1) {
+                        const line = document.createElementNS(SVG_NS, 'line');
+                        line.setAttribute('x1', String(parent.x));
+                        line.setAttribute('y1', String(parentBottom));
+                        line.setAttribute('x2', String(group[0].x));
+                        line.setAttribute('y2', String(childTop));
+                        line.setAttribute('stroke', CONNECTOR_COLOR);
+                        line.setAttribute('stroke-width', '1');
+                        svg.appendChild(line);
+                        continue;
+                    }
+                    const drop = document.createElementNS(SVG_NS, 'line');
+                    drop.setAttribute('x1', String(parent.x));
+                    drop.setAttribute('y1', String(parentBottom));
+                    drop.setAttribute('x2', String(parent.x));
+                    drop.setAttribute('y2', String(railY));
+                    drop.setAttribute('stroke', CONNECTOR_COLOR);
+                    drop.setAttribute('stroke-width', '1');
+                    svg.appendChild(drop);
+                    let minX = group[0].x;
+                    let maxX = group[0].x;
+                    for (const c of group) {
+                        if (c.x < minX)
+                            minX = c.x;
+                        if (c.x > maxX)
+                            maxX = c.x;
+                    }
+                    const rail = document.createElementNS(SVG_NS, 'line');
+                    rail.setAttribute('x1', String(minX));
+                    rail.setAttribute('y1', String(railY));
+                    rail.setAttribute('x2', String(maxX));
+                    rail.setAttribute('y2', String(railY));
+                    rail.setAttribute('stroke', CONNECTOR_COLOR);
+                    rail.setAttribute('stroke-width', '1');
+                    svg.appendChild(rail);
+                    for (const c of group) {
+                        const leg = document.createElementNS(SVG_NS, 'line');
+                        leg.setAttribute('x1', String(c.x));
+                        leg.setAttribute('y1', String(railY));
+                        leg.setAttribute('x2', String(c.x));
+                        leg.setAttribute('y2', String(c.y - NODE_HEIGHT / 2));
+                        leg.setAttribute('stroke', CONNECTOR_COLOR);
+                        leg.setAttribute('stroke-width', '1');
+                        svg.appendChild(leg);
+                    }
+                }
+            }
+        }
+        else {
+            for (let d = 1; d < depthCount; d++) {
+                const row = levels[d];
+                const parents = levels[d - 1];
+                for (const placed of row) {
+                    const parent = parents[placed.parentIndex];
+                    if (!parent)
+                        continue;
+                    const line = document.createElementNS(SVG_NS, 'line');
+                    line.setAttribute('x1', String(parent.x));
+                    line.setAttribute('y1', String(parent.y + NODE_HEIGHT / 2));
+                    line.setAttribute('x2', String(placed.x));
+                    line.setAttribute('y2', String(placed.y - NODE_HEIGHT / 2));
+                    line.setAttribute('stroke', CONNECTOR_COLOR);
+                    line.setAttribute('stroke-width', '1');
+                    svg.appendChild(line);
+                }
+            }
+        }
+        for (let d = 0; d < depthCount; d++) {
+            const row = levels[d];
+            const fill = PALETTE[d % PALETTE.length];
+            for (const placed of row) {
+                appendNode(svg, placed.x, placed.y, NODE_WIDTH, NODE_HEIGHT, NODE_RX, fill, placed.node.text);
+            }
+        }
+        return svg;
+    }
+    function renderCycle(model, width, height) {
+        const roots = model.rootNodes;
+        let nodes = [];
+        if (roots.length > 1) {
+            nodes = roots;
+        }
+        else if (roots.length === 1) {
+            nodes = roots[0].children.length > 0 ? roots[0].children : roots;
+        }
+        const svg = createSvgRoot(width, height);
+        const defs = document.createElementNS(SVG_NS, 'defs');
+        const marker = document.createElementNS(SVG_NS, 'marker');
+        marker.setAttribute('id', 'xlsx-smartart-arrow');
+        marker.setAttribute('viewBox', '0 0 10 10');
+        marker.setAttribute('refX', '8');
+        marker.setAttribute('refY', '5');
+        marker.setAttribute('markerWidth', '6');
+        marker.setAttribute('markerHeight', '6');
+        marker.setAttribute('orient', 'auto');
+        const arrow = document.createElementNS(SVG_NS, 'polygon');
+        arrow.setAttribute('points', '0,0 10,5 0,10');
+        arrow.setAttribute('fill', CONNECTOR_COLOR);
+        marker.appendChild(arrow);
+        defs.appendChild(marker);
+        svg.appendChild(defs);
+        if (nodes.length === 0)
+            return svg;
+        const cx = width / 2;
+        const cy = height / 2;
+        const radius = Math.max(40, Math.min(width, height) / 3 - 30);
+        const placed = [];
+        const n = nodes.length;
+        for (let i = 0; i < n; i++) {
+            const angle = -Math.PI / 2 + (2 * Math.PI * i) / Math.max(1, n);
+            placed.push({
+                node: nodes[i],
+                x: cx + radius * Math.cos(angle),
+                y: cy + radius * Math.sin(angle),
+            });
+        }
+        if (n >= 2) {
+            const halo = 18;
+            for (let i = 0; i < n; i++) {
+                const a = placed[i];
+                const b = placed[(i + 1) % n];
+                const dax = a.x - cx;
+                const day = a.y - cy;
+                const la = Math.hypot(dax, day) || 1;
+                const ux1 = dax / la;
+                const uy1 = day / la;
+                const dbx = b.x - cx;
+                const dby = b.y - cy;
+                const lb = Math.hypot(dbx, dby) || 1;
+                const ux2 = dbx / lb;
+                const uy2 = dby / lb;
+                const arcRadius = radius + halo;
+                const sx = cx + ux1 * arcRadius;
+                const sy = cy + uy1 * arcRadius;
+                const ex = cx + ux2 * arcRadius;
+                const ey = cy + uy2 * arcRadius;
+                const d = `M ${sx.toFixed(2)} ${sy.toFixed(2)} A ${arcRadius.toFixed(2)} ${arcRadius.toFixed(2)} 0 0 1 ${ex.toFixed(2)} ${ey.toFixed(2)}`;
+                const path = document.createElementNS(SVG_NS, 'path');
+                path.setAttribute('d', d);
+                path.setAttribute('fill', 'none');
+                path.setAttribute('stroke', CONNECTOR_COLOR);
+                path.setAttribute('stroke-width', '1');
+                path.setAttribute('marker-end', 'url(#xlsx-smartart-arrow)');
+                svg.appendChild(path);
+            }
+        }
+        const fill = PALETTE[0];
+        for (const p of placed) {
+            appendNode(svg, p.x, p.y, CYCLE_NODE_WIDTH, CYCLE_NODE_HEIGHT, CYCLE_NODE_RX, fill, p.node.text);
+        }
+        return svg;
+    }
+    function createSvgRoot(width, height) {
+        const svg = document.createElementNS(SVG_NS, 'svg');
+        svg.setAttribute('xmlns', SVG_NS);
+        svg.setAttribute('width', String(width));
+        svg.setAttribute('height', String(height));
+        svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+        svg.setAttribute('class', 'xlsx-smartart-svg');
+        return svg;
+    }
+    function appendNode(svg, cx, cy, w, h, rx, fill, text) {
+        const g = document.createElementNS(SVG_NS, 'g');
+        g.setAttribute('class', 'xlsx-smartart-node');
+        const rect = document.createElementNS(SVG_NS, 'rect');
+        rect.setAttribute('x', String(cx - w / 2));
+        rect.setAttribute('y', String(cy - h / 2));
+        rect.setAttribute('width', String(w));
+        rect.setAttribute('height', String(h));
+        rect.setAttribute('rx', String(rx));
+        rect.setAttribute('ry', String(rx));
+        rect.setAttribute('fill', fill);
+        rect.setAttribute('stroke', fill);
+        g.appendChild(rect);
+        const t = document.createElementNS(SVG_NS, 'text');
+        t.setAttribute('x', String(cx));
+        t.setAttribute('y', String(cy));
+        t.setAttribute('text-anchor', 'middle');
+        t.setAttribute('dominant-baseline', 'middle');
+        t.setAttribute('fill', TEXT_COLOR);
+        t.setAttribute('font-family', 'system-ui, sans-serif');
+        t.setAttribute('font-size', '12');
+        t.textContent = text;
+        g.appendChild(t);
+        svg.appendChild(g);
+    }
+
     const PX_PER_CHAR = 7;
     const PADDING_PX = 5;
     function charWidthToPx(width) {
         return Math.round(width * PX_PER_CHAR + PADDING_PX);
     }
+    const DEFAULT_COL_WIDTH_CHARS = 8.43;
+    const DEFAULT_COL_WIDTH_PX = charWidthToPx(DEFAULT_COL_WIDTH_CHARS);
+    const DEFAULT_ROW_HEIGHT_PT = 15;
+    const DEFAULT_ROW_HEIGHT_PX = Math.round(DEFAULT_ROW_HEIGHT_PT * 4 / 3);
+    const GUTTER_WIDTH_PX = 30;
     class HtmlRenderer {
         async render(workbook, options) {
             const nodes = [];
-            nodes.push(renderStyle(options.className));
+            const hasEmbeddings = workbook.sheets.some((s) => s.embeddings && s.embeddings.length > 0);
+            const hasRenderedCharts = options.renderCharts !== false &&
+                workbook.sheets.some((s) => s.charts && s.charts.some((c) => c.model !== null));
+            const hasSmartArt = workbook.sheets.some((s) => s.smartArt && s.smartArt.length > 0);
+            nodes.push(renderStyle(options.className, {
+                withEmbeddings: hasEmbeddings,
+                withCharts: hasRenderedCharts,
+                withSmartArt: hasSmartArt,
+            }));
             for (const sheet of workbook.sheets) {
                 if (sheet.state !== 'visible')
                     continue;
-                nodes.push(renderSheet(sheet, workbook.styles, workbook.theme, workbook.date1904, options));
+                nodes.push(renderSheet(sheet, workbook, options));
             }
             return nodes;
         }
     }
-    function renderStyle(className) {
+    function renderStyle(className, opts = { withEmbeddings: false }) {
         const style = document.createElement('style');
         style.setAttribute('data-xlsxjs', '');
+        const embeddingCss = opts.withEmbeddings ? `
+.${className} .xlsx-embedding {
+    border: 1px dashed #b0b0b0; border-radius: 2px;
+    padding: 0.5em; margin: 0.5em 0;
+    color: #555; font-size: 0.9em;
+    background: #fafafa;
+}
+.${className} .xlsx-embedding > pre {
+    margin: 0; white-space: pre-wrap;
+    font-family: inherit; font-size: inherit;
+}
+.${className} .xlsx-image-layer > .xlsx-embedding {
+    position: absolute; pointer-events: auto;
+    max-width: 320px;
+}` : '';
+        const chartCss = opts.withCharts ? `
+.${className} figure.xlsx-chart {
+    margin: 0.5em 0; padding: 0;
+}
+.${className} figure.xlsx-chart > svg {
+    display: block; max-width: 100%;
+}` : '';
+        const smartArtCss = opts.withSmartArt ? `
+.${className} .xlsx-smartart {
+    border: 1px dashed #b0b0b0; border-radius: 2px;
+    padding: 0.5em; margin: 0.5em 0;
+    color: #333; font-size: 0.9em;
+    background: #fafbfc;
+}
+.${className} .xlsx-smartart ul {
+    list-style: none; padding-left: 1em; margin: 0;
+}
+.${className} .xlsx-smartart > ul { padding-left: 0; }
+.${className} .xlsx-smartart li { margin: 0.1em 0; }
+.${className} .xlsx-smartart .xlsx-smartart-node {
+    display: inline-block; padding: 1px 4px;
+}
+.${className} .xlsx-image-layer > .xlsx-smartart {
+    position: absolute; pointer-events: auto;
+    max-width: 480px;
+}` : '';
         style.textContent = `
 .${className} { font-family: system-ui, sans-serif; }
 .${className} table { border-collapse: separate; border-spacing: 0; }
@@ -3666,13 +6923,46 @@
     border: 1px solid #e0e0e0; border-radius: 2px;
     padding: 0.5em; margin: 0.5em 0;
     color: #555; font-size: 0.9em;
+    position: relative;
 }
+.${className} .xlsx-shape[data-preset] { border-color: transparent; }
 .${className} .xlsx-shape[data-kind="connector"] {
     border-style: dashed; color: #888;
 }
-.${className} .xlsx-shape pre {
+.${className} .xlsx-shape[data-kind="connector"][data-preset] { border-style: none; }
+.${className} .xlsx-shape > svg {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    pointer-events: none; z-index: 0;
+}
+.${className} .xlsx-shape > pre {
     margin: 0; white-space: pre-line;
     font-family: inherit; font-size: inherit;
+    position: relative; z-index: 1;
+}${embeddingCss}${chartCss}
+.${className} .xlsx-form-control {
+    position: absolute;
+    display: inline-flex; align-items: center; gap: 4px;
+    border: 1px dashed #bbb; border-radius: 2px;
+    padding: 2px 6px; margin: 0;
+    color: #333; background: rgba(255, 255, 255, 0.85);
+    font-size: 0.85em; pointer-events: auto;
+}
+.${className} .xlsx-form-control[data-kind="button"] {
+    border-style: solid; background: #f3f3f3;
+}
+.${className} .xlsx-form-control[data-kind="groupBox"] {
+    border-style: solid; background: transparent;
+}
+.${className} .xlsx-form-control[data-kind="scrollbar"],
+.${className} .xlsx-form-control[data-kind="spinner"] {
+    background: #eef2f7; color: #555;
+}
+.${className} .xlsx-form-control > .xlsx-form-control-glyph {
+    font-size: 1em; line-height: 1; color: #333;
+}
+.${className} .xlsx-form-control > legend {
+    font-size: 0.85em; color: #333; padding: 0 4px;
 }
 .${className} .xlsx-spill-anchor { outline: 1px dashed #0066cc; outline-offset: -1px; }
 .${className} .xlsx-comment-marker { color: #c00; margin-left: 4px; cursor: help; }
@@ -3695,7 +6985,7 @@
 .${className} .xlsx-header, .${className} .xlsx-footer {
     display: grid; grid-template-columns: 1fr 1fr 1fr;
     font-size: 0.85em; color: #666; margin: 0.5em 0;
-}
+}${smartArtCss}
     `.trim();
         return style;
     }
@@ -3905,7 +7195,10 @@
         }
         return out;
     }
-    function renderSheet(sheet, styles, theme, date1904, options) {
+    function renderSheet(sheet, workbook, options) {
+        const styles = workbook.styles;
+        const theme = workbook.theme;
+        const date1904 = workbook.date1904;
         const section = h('section', { class: options.className, 'data-sheet-name': sheet.name });
         applySheetView(section, sheet.view, theme);
         if (sheet.protection?.enabled) {
@@ -4098,58 +7391,93 @@
             caption.textContent = `Table "${t.displayName || t.name}" · ${t.columns.length} column(s) · rows ${t.row + 1}-${t.endRow + 1}`;
             section.appendChild(caption);
         }
-        for (const img of sheet.images) {
-            const fig = document.createElement('figure');
-            fig.className = 'xlsx-image';
-            fig.setAttribute('data-anchor-mode', img.anchorMode);
-            fig.setAttribute('data-anchor-col', String(img.col));
-            fig.setAttribute('data-anchor-row', String(img.row));
-            if (img.endCol !== null)
-                fig.setAttribute('data-anchor-end-col', String(img.endCol));
-            if (img.endRow !== null)
-                fig.setAttribute('data-anchor-end-row', String(img.endRow));
-            fig.style.margin = '0.5rem 0';
-            if (img.anchorMode === 'absolute') {
-                fig.style.position = 'absolute';
-                if (img.absoluteX !== null)
-                    fig.style.left = `${emuToPx(img.absoluteX)}px`;
-                if (img.absoluteY !== null)
-                    fig.style.top = `${emuToPx(img.absoluteY)}px`;
+        const anchoredEmbeddings = sheet.embeddings.filter((e) => e.col !== null && e.row !== null);
+        const unanchoredEmbeddings = sheet.embeddings.filter((e) => e.col === null || e.row === null);
+        const smartArtEntries = sheet.smartArt ?? [];
+        if (sheet.images.length > 0 || sheet.formControls.length > 0 || anchoredEmbeddings.length > 0 || smartArtEntries.length > 0) {
+            const imageLayer = document.createElement('div');
+            imageLayer.className = 'xlsx-image-layer';
+            imageLayer.style.position = 'relative';
+            imageLayer.style.height = '0';
+            imageLayer.style.pointerEvents = 'none';
+            for (const img of sheet.images) {
+                imageLayer.appendChild(renderImage(img, widthByCol, hiddenCols, rowDim));
             }
-            const el = document.createElement('img');
-            el.src = img.dataUrl;
-            if (img.decorative) {
-                el.alt = '';
-                el.setAttribute('aria-hidden', 'true');
+            for (const fc of sheet.formControls) {
+                imageLayer.appendChild(renderFormControl(fc, widthByCol, hiddenCols, rowDim, options, sheet));
             }
-            else if (img.alt) {
-                el.alt = img.alt;
+            for (const emb of anchoredEmbeddings) {
+                const aside = renderEmbedding(emb);
+                const left = GUTTER_WIDTH_PX + sumColsPx(emb.col, widthByCol, hiddenCols);
+                const top = sumRowsPx(emb.row, rowDim);
+                aside.style.left = `${left}px`;
+                aside.style.top = `${top}px`;
+                imageLayer.appendChild(aside);
             }
-            if (img.widthEmu && img.heightEmu) {
-                el.width = emuToPx(img.widthEmu);
-                el.height = emuToPx(img.heightEmu);
+            for (const art of smartArtEntries) {
+                const aside = renderSmartArt(art, options);
+                const left = GUTTER_WIDTH_PX + sumColsPx(art.col, widthByCol, hiddenCols);
+                const top = sumRowsPx(art.row, rowDim);
+                aside.style.left = `${left}px`;
+                aside.style.top = `${top}px`;
+                imageLayer.appendChild(aside);
             }
-            el.style.maxWidth = '100%';
-            fig.appendChild(el);
-            section.appendChild(fig);
+            section.insertBefore(imageLayer, table);
         }
         for (const chart of sheet.charts) {
-            const ph = document.createElement('div');
-            ph.className = 'xlsx-chart-placeholder';
-            ph.setAttribute('data-chart-kind', chart.kind);
-            if (chart.chartType)
-                ph.setAttribute('data-chart-type', chart.chartType);
-            ph.setAttribute('data-anchor-col', String(chart.col));
-            ph.setAttribute('data-anchor-row', String(chart.row));
-            if (chart.endCol !== null)
-                ph.setAttribute('data-anchor-end-col', String(chart.endCol));
-            if (chart.endRow !== null)
-                ph.setAttribute('data-anchor-end-row', String(chart.endRow));
-            ph.textContent = `[chart: ${chart.chartType ?? chart.kind}]`;
-            section.appendChild(ph);
+            let svg = null;
+            if (options.renderCharts !== false && chart.model) {
+                try {
+                    svg = renderChart(chart.model);
+                }
+                catch {
+                    svg = null;
+                }
+            }
+            if (svg) {
+                const figure = document.createElement('figure');
+                figure.className = 'xlsx-chart';
+                figure.setAttribute('data-chart-kind', chart.kind);
+                if (chart.chartType)
+                    figure.setAttribute('data-chart-type', chart.chartType);
+                if (chart.model?.kind)
+                    figure.setAttribute('data-chart-plot', chart.model.kind);
+                figure.setAttribute('data-anchor-col', String(chart.col));
+                figure.setAttribute('data-anchor-row', String(chart.row));
+                if (chart.endCol !== null)
+                    figure.setAttribute('data-anchor-end-col', String(chart.endCol));
+                if (chart.endRow !== null)
+                    figure.setAttribute('data-anchor-end-row', String(chart.endRow));
+                figure.appendChild(svg);
+                section.appendChild(figure);
+            }
+            else {
+                const ph = document.createElement('div');
+                ph.className = 'xlsx-chart-placeholder';
+                ph.setAttribute('data-chart-kind', chart.kind);
+                if (chart.chartType)
+                    ph.setAttribute('data-chart-type', chart.chartType);
+                ph.setAttribute('data-anchor-col', String(chart.col));
+                ph.setAttribute('data-anchor-row', String(chart.row));
+                if (chart.endCol !== null)
+                    ph.setAttribute('data-anchor-end-col', String(chart.endCol));
+                if (chart.endRow !== null)
+                    ph.setAttribute('data-anchor-end-row', String(chart.endRow));
+                ph.textContent = `[chart: ${chart.chartType ?? chart.kind}]`;
+                section.appendChild(ph);
+            }
         }
         for (const shape of sheet.shapes) {
             section.appendChild(renderShape(shape));
+        }
+        for (const slicer of sheet.slicers) {
+            section.appendChild(renderSlicer(slicer, options));
+        }
+        for (const timeline of sheet.timelines) {
+            section.appendChild(renderTimeline(timeline, options));
+        }
+        for (const emb of unanchoredEmbeddings) {
+            section.appendChild(renderEmbedding(emb));
         }
         if (sheet.headerFooter?.oddHeader) {
             section.appendChild(renderHeaderFooter('xlsx-header', sheet.headerFooter.oddHeader));
@@ -4158,6 +7486,86 @@
             section.appendChild(renderHeaderFooter('xlsx-footer', sheet.headerFooter.oddFooter));
         }
         return section;
+    }
+    function columnPx(col, widthByCol, hiddenCols) {
+        if (hiddenCols.has(col))
+            return 0;
+        const w = widthByCol.get(col);
+        return w !== undefined ? charWidthToPx(w) : DEFAULT_COL_WIDTH_PX;
+    }
+    function rowPx(row, rowDim) {
+        const d = rowDim.get(row);
+        if (d?.hidden)
+            return 0;
+        if (d?.height != null)
+            return Math.round(d.height * 4 / 3);
+        return DEFAULT_ROW_HEIGHT_PX;
+    }
+    function sumColsPx(col, widthByCol, hiddenCols) {
+        let total = 0;
+        for (let c = 0; c < col; c++)
+            total += columnPx(c, widthByCol, hiddenCols);
+        return total;
+    }
+    function sumRowsPx(row, rowDim) {
+        let total = 0;
+        for (let r = 0; r < row; r++)
+            total += rowPx(r, rowDim);
+        return total;
+    }
+    function renderImage(img, widthByCol, hiddenCols, rowDim) {
+        const fig = document.createElement('figure');
+        fig.className = 'xlsx-image';
+        fig.setAttribute('data-anchor-mode', img.anchorMode);
+        fig.setAttribute('data-anchor-col', String(img.col));
+        fig.setAttribute('data-anchor-row', String(img.row));
+        if (img.endCol !== null)
+            fig.setAttribute('data-anchor-end-col', String(img.endCol));
+        if (img.endRow !== null)
+            fig.setAttribute('data-anchor-end-row', String(img.endRow));
+        fig.style.margin = '0';
+        fig.style.position = 'absolute';
+        fig.style.pointerEvents = 'auto';
+        if (img.anchorMode === 'absolute') {
+            if (img.absoluteX !== null)
+                fig.style.left = `${emuToPx(img.absoluteX)}px`;
+            if (img.absoluteY !== null)
+                fig.style.top = `${emuToPx(img.absoluteY)}px`;
+        }
+        else {
+            const left = GUTTER_WIDTH_PX + sumColsPx(img.col, widthByCol, hiddenCols) + emuToPx(img.colOff);
+            const top = sumRowsPx(img.row, rowDim) + emuToPx(img.rowOff);
+            fig.style.left = `${left}px`;
+            fig.style.top = `${top}px`;
+        }
+        const el = document.createElement('img');
+        el.src = img.dataUrl;
+        if (img.decorative) {
+            el.alt = '';
+            el.setAttribute('aria-hidden', 'true');
+        }
+        else if (img.alt) {
+            el.alt = img.alt;
+        }
+        let widthPx = null;
+        let heightPx = null;
+        if (img.anchorMode === 'twoCell' && img.endCol !== null && img.endRow !== null) {
+            const spanW = sumColsPx(img.endCol, widthByCol, hiddenCols) - sumColsPx(img.col, widthByCol, hiddenCols) - emuToPx(img.colOff);
+            widthPx = spanW > 0 ? spanW : (img.widthEmu ? emuToPx(img.widthEmu) : null);
+            const spanH = sumRowsPx(img.endRow, rowDim) - sumRowsPx(img.row, rowDim) - emuToPx(img.rowOff);
+            heightPx = spanH > 0 ? spanH : (img.heightEmu ? emuToPx(img.heightEmu) : null);
+        }
+        else if (img.widthEmu && img.heightEmu) {
+            widthPx = emuToPx(img.widthEmu);
+            heightPx = emuToPx(img.heightEmu);
+        }
+        if (widthPx !== null && heightPx !== null) {
+            el.width = widthPx;
+            el.height = heightPx;
+        }
+        el.style.maxWidth = '100%';
+        fig.appendChild(el);
+        return fig;
     }
     function renderShape(shape) {
         const aside = document.createElement('aside');
@@ -4175,10 +7583,536 @@
             aside.setAttribute('data-anchor-end-col', String(shape.endCol));
         if (shape.endRow !== null)
             aside.setAttribute('data-anchor-end-row', String(shape.endRow));
+        const svg = renderShapePreset(shape.preset, { stroke: '#888' });
+        if (svg) {
+            const tmp = document.createElement('div');
+            tmp.innerHTML = svg;
+            const svgEl = tmp.firstElementChild;
+            if (svgEl)
+                aside.appendChild(svgEl);
+        }
         if (shape.text && shape.text.length > 0) {
             const pre = document.createElement('pre');
             pre.textContent = shape.text;
             aside.appendChild(pre);
+        }
+        return aside;
+    }
+    function renderSmartArt(art, options) {
+        const aside = document.createElement('aside');
+        aside.className = 'xlsx-smartart';
+        aside.style.position = 'absolute';
+        aside.style.pointerEvents = 'auto';
+        if (art.model?.layout)
+            aside.setAttribute('data-layout', art.model.layout);
+        if (art.name)
+            aside.setAttribute('data-name', art.name);
+        aside.setAttribute('data-anchor-col', String(art.col));
+        aside.setAttribute('data-anchor-row', String(art.row));
+        if (art.endCol !== null)
+            aside.setAttribute('data-anchor-end-col', String(art.endCol));
+        if (art.endRow !== null)
+            aside.setAttribute('data-anchor-end-row', String(art.endRow));
+        const roots = art.model?.rootNodes ?? [];
+        const layout = options.smartArtLayout ?? 'tree';
+        let svg = null;
+        if (layout !== 'tree' && art.model) {
+            try {
+                svg = renderSmartArtSvg(art.model);
+            }
+            catch {
+                svg = null;
+            }
+        }
+        if (svg)
+            aside.appendChild(svg);
+        if (layout === 'tree' || layout === 'both' || !svg) {
+            aside.appendChild(renderSmartArtList(roots, 0));
+        }
+        return aside;
+    }
+    function renderSmartArtList(nodes, depth) {
+        const ul = document.createElement('ul');
+        for (const node of nodes) {
+            const li = document.createElement('li');
+            li.setAttribute('data-level', String(depth));
+            const span = document.createElement('span');
+            span.className = 'xlsx-smartart-node';
+            span.textContent = node.text;
+            li.appendChild(span);
+            if (node.children.length > 0) {
+                li.appendChild(renderSmartArtList(node.children, depth + 1));
+            }
+            ul.appendChild(li);
+        }
+        return ul;
+    }
+    function renderFormControl(fc, widthByCol, hiddenCols, rowDim, options, sheet, workbook) {
+        const aside = document.createElement('aside');
+        aside.className = 'xlsx-form-control';
+        aside.setAttribute('data-kind', fc.kind);
+        aside.setAttribute('data-anchor-col', String(fc.col));
+        aside.setAttribute('data-anchor-row', String(fc.row));
+        if (fc.endCol !== null)
+            aside.setAttribute('data-anchor-end-col', String(fc.endCol));
+        if (fc.endRow !== null)
+            aside.setAttribute('data-anchor-end-row', String(fc.endRow));
+        if (fc.linkedCell)
+            aside.setAttribute('data-linked-cell', fc.linkedCell);
+        if (fc.inputRange)
+            aside.setAttribute('data-input-range', fc.inputRange);
+        if (fc.checked !== null)
+            aside.setAttribute('data-checked', String(fc.checked));
+        if (fc.min !== null)
+            aside.setAttribute('data-min', String(fc.min));
+        if (fc.max !== null)
+            aside.setAttribute('data-max', String(fc.max));
+        if (fc.inc !== null)
+            aside.setAttribute('data-inc', String(fc.inc));
+        if (fc.page !== null)
+            aside.setAttribute('data-page', String(fc.page));
+        if (fc.val !== null)
+            aside.setAttribute('data-val', String(fc.val));
+        if (fc.dropLines !== null)
+            aside.setAttribute('data-drop-lines', String(fc.dropLines));
+        if (fc.altText)
+            aside.setAttribute('aria-label', fc.altText);
+        const left = GUTTER_WIDTH_PX + sumColsPx(fc.col, widthByCol, hiddenCols) + emuToPx(fc.colOff);
+        const top = sumRowsPx(fc.row, rowDim) + emuToPx(fc.rowOff);
+        aside.style.left = `${left}px`;
+        aside.style.top = `${top}px`;
+        if (options.interactiveFormControls) {
+            populateInteractiveFormControl(aside, fc, sheet);
+            return aside;
+        }
+        if (fc.kind === 'checkbox' || fc.kind === 'radio') {
+            const glyph = document.createElement('span');
+            glyph.className = 'xlsx-form-control-glyph';
+            if (fc.kind === 'checkbox') {
+                glyph.textContent = fc.checked ? '☑' : '☐';
+            }
+            else {
+                glyph.textContent = fc.checked ? '●' : '○';
+            }
+            aside.appendChild(glyph);
+        }
+        if (fc.kind === 'groupBox') {
+            const legend = document.createElement('legend');
+            if (fc.label)
+                legend.textContent = fc.label;
+            aside.appendChild(legend);
+            return aside;
+        }
+        if (fc.label) {
+            const txt = document.createElement('span');
+            txt.className = 'xlsx-form-control-label';
+            txt.textContent = fc.label;
+            aside.appendChild(txt);
+        }
+        return aside;
+    }
+    function populateInteractiveFormControl(aside, fc, sheet, workbook) {
+        switch (fc.kind) {
+            case 'checkbox': {
+                const glyph = document.createElement('span');
+                glyph.className = 'xlsx-form-control-glyph';
+                glyph.textContent = fc.checked ? '☑' : '☐';
+                aside.appendChild(glyph);
+                const input = document.createElement('input');
+                input.type = 'checkbox';
+                input.checked = !!fc.checked;
+                input.addEventListener('change', () => {
+                    glyph.textContent = input.checked ? '☑' : '☐';
+                    if (fc.linkedCell) {
+                        const container = resolveRenderRoot(aside);
+                        if (container) {
+                            applyFormControlUpdate(container, fc.linkedCell, input.checked ? 'TRUE' : 'FALSE');
+                        }
+                    }
+                });
+                aside.appendChild(input);
+                if (fc.label) {
+                    const label = document.createElement('span');
+                    label.className = 'xlsx-form-control-label';
+                    label.textContent = fc.label;
+                    aside.appendChild(label);
+                }
+                return;
+            }
+            case 'radio': {
+                const glyph = document.createElement('span');
+                glyph.className = 'xlsx-form-control-glyph';
+                glyph.textContent = fc.checked ? '●' : '○';
+                aside.appendChild(glyph);
+                const input = document.createElement('input');
+                input.type = 'radio';
+                input.name = radioGroupName(fc);
+                input.checked = !!fc.checked;
+                input.addEventListener('change', () => {
+                    glyph.textContent = input.checked ? '●' : '○';
+                    if (fc.linkedCell && input.checked) {
+                        const container = resolveRenderRoot(aside);
+                        if (container) {
+                            applyFormControlUpdate(container, fc.linkedCell, 'TRUE');
+                        }
+                    }
+                });
+                aside.appendChild(input);
+                if (fc.label) {
+                    const label = document.createElement('span');
+                    label.className = 'xlsx-form-control-label';
+                    label.textContent = fc.label;
+                    aside.appendChild(label);
+                }
+                return;
+            }
+            case 'scrollbar': {
+                const input = document.createElement('input');
+                input.type = 'range';
+                if (fc.min !== null)
+                    input.min = String(fc.min);
+                if (fc.max !== null)
+                    input.max = String(fc.max);
+                if (fc.inc !== null)
+                    input.step = String(fc.inc);
+                if (fc.val !== null)
+                    input.value = String(fc.val);
+                input.addEventListener('input', () => {
+                    if (fc.linkedCell) {
+                        const container = resolveRenderRoot(aside);
+                        if (container) {
+                            applyFormControlUpdate(container, fc.linkedCell, input.value);
+                        }
+                    }
+                });
+                aside.appendChild(input);
+                return;
+            }
+            case 'spinner': {
+                const input = document.createElement('input');
+                input.type = 'number';
+                if (fc.min !== null)
+                    input.min = String(fc.min);
+                if (fc.max !== null)
+                    input.max = String(fc.max);
+                if (fc.inc !== null)
+                    input.step = String(fc.inc);
+                if (fc.val !== null)
+                    input.value = String(fc.val);
+                input.addEventListener('input', () => {
+                    if (fc.linkedCell) {
+                        const container = resolveRenderRoot(aside);
+                        if (container) {
+                            applyFormControlUpdate(container, fc.linkedCell, input.value);
+                        }
+                    }
+                });
+                aside.appendChild(input);
+                return;
+            }
+            case 'combo':
+            case 'list': {
+                const select = document.createElement('select');
+                const optionTexts = fc.inputRange ? resolveInputRangeValues(fc.inputRange, sheet) : [];
+                for (const text of optionTexts) {
+                    const opt = document.createElement('option');
+                    opt.textContent = text;
+                    opt.setAttribute('value', text);
+                    select.appendChild(opt);
+                }
+                select.addEventListener('change', () => {
+                    if (fc.linkedCell) {
+                        const container = resolveRenderRoot(aside);
+                        if (container) {
+                            applyFormControlUpdate(container, fc.linkedCell, select.value);
+                        }
+                    }
+                });
+                aside.appendChild(select);
+                return;
+            }
+            case 'button': {
+                const btn = document.createElement('button');
+                btn.setAttribute('type', 'button');
+                if (fc.label)
+                    btn.textContent = fc.label;
+                aside.appendChild(btn);
+                return;
+            }
+            case 'groupBox': {
+                const legend = document.createElement('legend');
+                if (fc.label)
+                    legend.textContent = fc.label;
+                aside.appendChild(legend);
+                return;
+            }
+            case 'label':
+            case 'dialog':
+            case 'unknown':
+            default: {
+                if (fc.label) {
+                    const txt = document.createElement('span');
+                    txt.className = 'xlsx-form-control-label';
+                    txt.textContent = fc.label;
+                    aside.appendChild(txt);
+                }
+                return;
+            }
+        }
+    }
+    function radioGroupName(fc, sheet) {
+        const rangeOk = fc.inputRange && /^\$?[A-Z]+\$?[0-9]+(:\$?[A-Z]+\$?[0-9]+)?$/.test(fc.inputRange);
+        const sheetIndexKey = String(Math.max(0, fc.col));
+        const key = rangeOk ? fc.inputRange : `${sheetIndexKey}`;
+        const sanitized = key.replace(/[$:]/g, '_');
+        return `xlsx-radio-${sanitized}`;
+    }
+    function resolveInputRangeValues(inputRange, sheet, _workbook) {
+        if (inputRange.includes('!')) {
+            console.warn(`xlsx-preview: sheet-prefixed form-control inputRange "${inputRange}" not supported; skipping`);
+            return [];
+        }
+        const clean = inputRange.replace(/\$/g, '');
+        const m = /^([A-Z]+[0-9]+)(?::([A-Z]+[0-9]+))?$/.exec(clean);
+        if (!m)
+            return [];
+        const start = parseCellRef(m[1]);
+        if (!start)
+            return [];
+        const end = m[2] ? parseCellRef(m[2]) : start;
+        if (!end)
+            return [];
+        const out = [];
+        for (let r = start.row; r <= end.row; r++) {
+            for (let c = start.col; c <= end.col; c++) {
+                const cell = sheet.rows[r]?.find((x) => x.col === c);
+                if (cell && cell.value !== '')
+                    out.push(cell.value);
+            }
+        }
+        return out;
+    }
+    function resolveRenderRoot(el) {
+        let cur = el;
+        while (cur) {
+            if (cur.tagName === 'SECTION' && cur.classList.contains('xlsx'))
+                return cur;
+            cur = cur.parentElement;
+        }
+        return null;
+    }
+    function applyFormControlUpdate(container, linkedCell, newValue) {
+        if (linkedCell.includes('!')) {
+            console.warn(`xlsx-preview: sheet-prefixed linkedCell "${linkedCell}" not supported; skipping update`);
+            return;
+        }
+        const clean = linkedCell.replace(/\$/g, '');
+        const ref = parseCellRef(clean);
+        if (!ref)
+            return;
+        const section = container.classList?.contains('xlsx') && container.tagName === 'SECTION'
+            ? container
+            : container.querySelector('section.xlsx');
+        if (!section)
+            return;
+        const tbody = section.querySelector('tbody');
+        if (!tbody)
+            return;
+        const tr = tbody.children[ref.row];
+        if (!tr)
+            return;
+        const td = tr.children[ref.col + 1];
+        if (!td)
+            return;
+        td.textContent = newValue;
+    }
+    function renderSlicer(slicer, options) {
+        const aside = document.createElement('aside');
+        aside.className = 'xlsx-slicer';
+        aside.setAttribute('aria-hidden', 'false');
+        aside.setAttribute('data-name', slicer.name);
+        if (slicer.caption)
+            aside.setAttribute('data-caption', slicer.caption);
+        if (slicer.sourceName)
+            aside.setAttribute('data-source', slicer.sourceName);
+        if (slicer.style)
+            aside.setAttribute('data-style', slicer.style);
+        const header = document.createElement('header');
+        header.textContent = slicer.caption ?? slicer.name;
+        aside.appendChild(header);
+        if (options.interactiveSlicers) {
+            populateInteractiveSlicer(aside, slicer);
+            return aside;
+        }
+        const ul = document.createElement('ul');
+        for (const item of slicer.selectedItems) {
+            const li = document.createElement('li');
+            li.textContent = item;
+            ul.appendChild(li);
+        }
+        aside.appendChild(ul);
+        return aside;
+    }
+    function populateInteractiveSlicer(aside, slicer) {
+        const itemsSource = slicer.allItems.length > 0 ? slicer.allItems : slicer.selectedItems;
+        const selectedSet = new Set(slicer.selectedItems);
+        const state = new Map();
+        const dispatch = () => {
+            const current = [];
+            for (const [btn, label] of state) {
+                if (btn.getAttribute('aria-pressed') === 'true')
+                    current.push(label);
+            }
+            const win = (aside.ownerDocument?.defaultView ?? (typeof window !== 'undefined' ? window : null));
+            const CE = win?.CustomEvent ?? (typeof CustomEvent !== 'undefined' ? CustomEvent : null);
+            if (!CE)
+                return;
+            aside.dispatchEvent(new CE('xlsx:slicer-change', {
+                bubbles: true,
+                detail: { slicer: slicer.name, selectedItems: current },
+            }));
+        };
+        for (const label of itemsSource) {
+            const btn = document.createElement('button');
+            btn.setAttribute('type', 'button');
+            btn.className = 'xlsx-slicer-chip';
+            const pressed = selectedSet.has(label);
+            btn.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+            btn.textContent = label;
+            state.set(btn, label);
+            btn.addEventListener('click', () => {
+                const nextPressed = btn.getAttribute('aria-pressed') !== 'true';
+                btn.setAttribute('aria-pressed', nextPressed ? 'true' : 'false');
+                dispatch();
+            });
+            aside.appendChild(btn);
+        }
+    }
+    function renderTimeline(timeline, options) {
+        const aside = document.createElement('aside');
+        aside.className = 'xlsx-timeline';
+        aside.setAttribute('aria-hidden', 'false');
+        aside.setAttribute('data-name', timeline.name);
+        if (timeline.caption)
+            aside.setAttribute('data-caption', timeline.caption);
+        if (timeline.sourceName)
+            aside.setAttribute('data-source', timeline.sourceName);
+        if (timeline.level)
+            aside.setAttribute('data-level', timeline.level);
+        if (timeline.style)
+            aside.setAttribute('data-style', timeline.style);
+        const header = document.createElement('header');
+        header.textContent = timeline.caption ?? timeline.name;
+        aside.appendChild(header);
+        const range = timeline.selectedRange;
+        const rangeStart = range?.start ?? null;
+        const rangeEnd = range?.end ?? null;
+        if (options.interactiveSlicers && timeline.bounds) {
+            populateInteractiveTimeline(aside, timeline, timeline.bounds, rangeStart, rangeEnd);
+            return aside;
+        }
+        if (rangeStart || rangeEnd) {
+            const label = document.createElement('span');
+            label.textContent = `${rangeStart ?? ''} → ${rangeEnd ?? ''}`;
+            aside.appendChild(label);
+        }
+        return aside;
+    }
+    function populateInteractiveTimeline(aside, timeline, bounds, rangeStart, rangeEnd) {
+        const minMs = Date.parse(bounds.min);
+        const maxMs = Date.parse(bounds.max);
+        if (!Number.isFinite(minMs) || !Number.isFinite(maxMs) || maxMs <= minMs) {
+            if (rangeStart || rangeEnd) {
+                const label = document.createElement('span');
+                label.textContent = `${rangeStart ?? ''} → ${rangeEnd ?? ''}`;
+                aside.appendChild(label);
+            }
+            return;
+        }
+        const startMsRaw = rangeStart ? Date.parse(rangeStart) : minMs;
+        const endMsRaw = rangeEnd ? Date.parse(rangeEnd) : maxMs;
+        const startMs = Number.isFinite(startMsRaw) ? Math.max(minMs, Math.min(maxMs, startMsRaw)) : minMs;
+        const endMs = Number.isFinite(endMsRaw) ? Math.max(minMs, Math.min(maxMs, endMsRaw)) : maxMs;
+        const slider = document.createElement('div');
+        slider.className = 'xlsx-timeline-slider';
+        const minHandle = document.createElement('input');
+        minHandle.type = 'range';
+        minHandle.setAttribute('data-handle', 'start');
+        minHandle.min = String(minMs);
+        minHandle.max = String(maxMs);
+        minHandle.value = String(startMs);
+        const maxHandle = document.createElement('input');
+        maxHandle.type = 'range';
+        maxHandle.setAttribute('data-handle', 'end');
+        maxHandle.min = String(minMs);
+        maxHandle.max = String(maxMs);
+        maxHandle.value = String(endMs);
+        slider.appendChild(minHandle);
+        slider.appendChild(maxHandle);
+        aside.appendChild(slider);
+        const label = document.createElement('span');
+        label.className = 'xlsx-timeline-label';
+        const fmt = (ms) => new Date(ms).toISOString();
+        label.textContent = `${fmt(startMs)} → ${fmt(endMs)}`;
+        aside.appendChild(label);
+        const onInput = () => {
+            let a = Number(minHandle.value);
+            let b = Number(maxHandle.value);
+            if (!Number.isFinite(a))
+                a = minMs;
+            if (!Number.isFinite(b))
+                b = maxMs;
+            const lo = Math.min(a, b);
+            const hi = Math.max(a, b);
+            label.textContent = `${fmt(lo)} → ${fmt(hi)}`;
+            const win = (aside.ownerDocument?.defaultView ?? (typeof window !== 'undefined' ? window : null));
+            const CE = win?.CustomEvent ?? (typeof CustomEvent !== 'undefined' ? CustomEvent : null);
+            if (!CE)
+                return;
+            aside.dispatchEvent(new CE('xlsx:timeline-change', {
+                bubbles: true,
+                detail: { timeline: timeline.name, start: new Date(lo), end: new Date(hi) },
+            }));
+        };
+        minHandle.addEventListener('input', onInput);
+        maxHandle.addEventListener('input', onInput);
+    }
+    function renderEmbedding(emb) {
+        const aside = document.createElement('aside');
+        aside.className = 'xlsx-embedding';
+        aside.setAttribute('data-kind', emb.kind);
+        if (emb.progId)
+            aside.setAttribute('data-progid', emb.progId);
+        if (emb.fileName)
+            aside.setAttribute('data-filename', emb.fileName);
+        aside.setAttribute('data-content-type', emb.contentType);
+        aside.setAttribute('data-size', String(emb.size));
+        if (emb.col !== null)
+            aside.setAttribute('data-anchor-col', String(emb.col));
+        if (emb.row !== null)
+            aside.setAttribute('data-anchor-row', String(emb.row));
+        if (emb.endCol !== null)
+            aside.setAttribute('data-anchor-end-col', String(emb.endCol));
+        if (emb.endRow !== null)
+            aside.setAttribute('data-anchor-end-row', String(emb.endRow));
+        if (emb.altText)
+            aside.setAttribute('aria-label', emb.altText);
+        const pre = document.createElement('pre');
+        const lines = [];
+        lines.push(`${emb.kind}: ${emb.fileName ?? '(no filename)'}`);
+        lines.push(`type: ${emb.contentType}`);
+        lines.push(`size: ${emb.size} bytes`);
+        if (emb.progId)
+            lines.push(`progId: ${emb.progId}`);
+        pre.textContent = lines.join('\n');
+        aside.appendChild(pre);
+        if (emb.dataUrl) {
+            const a = document.createElement('a');
+            a.href = emb.dataUrl;
+            a.setAttribute('download', emb.fileName ?? 'embedded');
+            a.setAttribute('rel', 'noopener');
+            a.textContent = `Download ${emb.fileName ?? 'embedded file'}`;
+            aside.appendChild(a);
         }
         return aside;
     }
@@ -4308,7 +8242,8 @@
                 formatColor = res.color;
             }
         }
-        if (options.showFormulas && cell.formula != null) {
+        const emptyFormula = cell.formula != null && (cell.value === '' || cell.value == null);
+        if ((options.showFormulas && cell.formula != null) || emptyFormula) {
             const a1 = `=${cell.formula}`;
             text = options.formulaNotation === 'r1c1' ? a1ToR1c1(a1, cell.row, cell.col) : a1;
             td.textContent = text;
@@ -4761,12 +8696,837 @@
         td.classList.add('xlsx-cf');
     }
 
+    const ERROR = Symbol('formula-error');
+    const CELL_REF_TOKEN = /^\$?([A-Z]+)\$?([1-9][0-9]*)/;
+    function lex(src) {
+        const out = [];
+        let i = 0;
+        while (i < src.length) {
+            const c = src[i];
+            if (c === ' ' || c === '\t' || c === '\n' || c === '\r') {
+                i++;
+                continue;
+            }
+            if (c === '"') {
+                let j = i + 1;
+                let s = '';
+                while (j < src.length) {
+                    if (src[j] === '"') {
+                        if (src[j + 1] === '"') {
+                            s += '"';
+                            j += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    s += src[j];
+                    j++;
+                }
+                out.push({ kind: 'str', text: s });
+                i = j + 1;
+                continue;
+            }
+            if ((c >= '0' && c <= '9') || (c === '.' && src[i + 1] >= '0' && src[i + 1] <= '9')) {
+                let j = i;
+                while (j < src.length && ((src[j] >= '0' && src[j] <= '9') || src[j] === '.'))
+                    j++;
+                if (j < src.length && (src[j] === 'e' || src[j] === 'E')) {
+                    j++;
+                    if (src[j] === '+' || src[j] === '-')
+                        j++;
+                    while (j < src.length && src[j] >= '0' && src[j] <= '9')
+                        j++;
+                }
+                const text = src.slice(i, j);
+                out.push({ kind: 'num', text, numeric: Number(text) });
+                i = j;
+                continue;
+            }
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c === '_' || c === '$') {
+                const upper = src.slice(i, i + 24).toUpperCase();
+                const m = CELL_REF_TOKEN.exec(upper);
+                if (m) {
+                    const refText = src.slice(i, i + m[0].length);
+                    const col = columnLettersToIndex(m[1]);
+                    const row = Number(m[2]) - 1;
+                    if (col >= 0) {
+                        out.push({ kind: 'ref', text: refText, ref: { col, row } });
+                        i += m[0].length;
+                        continue;
+                    }
+                }
+                if (c === '$') {
+                    i++;
+                    continue;
+                }
+                let j = i;
+                while (j < src.length && ((src[j] >= 'A' && src[j] <= 'Z') ||
+                    (src[j] >= 'a' && src[j] <= 'z') ||
+                    (src[j] >= '0' && src[j] <= '9') ||
+                    src[j] === '_' || src[j] === '.'))
+                    j++;
+                const id = src.slice(i, j).toUpperCase();
+                if (id === 'TRUE')
+                    out.push({ kind: 'bool', text: 'TRUE' });
+                else if (id === 'FALSE')
+                    out.push({ kind: 'bool', text: 'FALSE' });
+                else
+                    out.push({ kind: 'ident', text: id });
+                i = j;
+                continue;
+            }
+            if (c === '#') {
+                let j = i + 1;
+                while (j < src.length && src[j] !== ' ' && src[j] !== ',' && src[j] !== ')' && src[j] !== '(')
+                    j++;
+                out.push({ kind: 'err', text: src.slice(i, j) });
+                i = j;
+                continue;
+            }
+            if (c === '(') {
+                out.push({ kind: 'lparen', text: c });
+                i++;
+                continue;
+            }
+            if (c === ')') {
+                out.push({ kind: 'rparen', text: c });
+                i++;
+                continue;
+            }
+            if (c === ',') {
+                out.push({ kind: 'comma', text: c });
+                i++;
+                continue;
+            }
+            if (c === ':') {
+                out.push({ kind: 'colon', text: c });
+                i++;
+                continue;
+            }
+            if (c === '+') {
+                out.push({ kind: 'plus', text: c });
+                i++;
+                continue;
+            }
+            if (c === '-') {
+                out.push({ kind: 'minus', text: c });
+                i++;
+                continue;
+            }
+            if (c === '*') {
+                out.push({ kind: 'star', text: c });
+                i++;
+                continue;
+            }
+            if (c === '/') {
+                out.push({ kind: 'slash', text: c });
+                i++;
+                continue;
+            }
+            if (c === '^') {
+                out.push({ kind: 'caret', text: c });
+                i++;
+                continue;
+            }
+            if (c === '%') {
+                out.push({ kind: 'percent', text: c });
+                i++;
+                continue;
+            }
+            if (c === '&') {
+                out.push({ kind: 'amp', text: c });
+                i++;
+                continue;
+            }
+            if (c === '=') {
+                out.push({ kind: 'eq', text: c });
+                i++;
+                continue;
+            }
+            if (c === '<') {
+                if (src[i + 1] === '=') {
+                    out.push({ kind: 'lte', text: '<=' });
+                    i += 2;
+                    continue;
+                }
+                if (src[i + 1] === '>') {
+                    out.push({ kind: 'neq', text: '<>' });
+                    i += 2;
+                    continue;
+                }
+                out.push({ kind: 'lt', text: '<' });
+                i++;
+                continue;
+            }
+            if (c === '>') {
+                if (src[i + 1] === '=') {
+                    out.push({ kind: 'gte', text: '>=' });
+                    i += 2;
+                    continue;
+                }
+                out.push({ kind: 'gt', text: '>' });
+                i++;
+                continue;
+            }
+            i++;
+        }
+        out.push({ kind: 'eof', text: '' });
+        return out;
+    }
+    class Parser {
+        constructor(toks) {
+            this.toks = toks;
+            this.pos = 0;
+        }
+        peek() { return this.toks[this.pos]; }
+        eat(kind) {
+            if (this.toks[this.pos].kind === kind)
+                return this.toks[this.pos++];
+            return null;
+        }
+        expect(kind) {
+            const t = this.eat(kind);
+            if (!t)
+                throw new Error(`expected ${kind}, got ${this.toks[this.pos].kind}`);
+            return t;
+        }
+        parseExpr() { return this.parseCompare(); }
+        parseCompare() {
+            let left = this.parseConcat();
+            while (true) {
+                const t = this.peek();
+                if (t.kind === 'eq' || t.kind === 'neq' || t.kind === 'lt' ||
+                    t.kind === 'lte' || t.kind === 'gt' || t.kind === 'gte') {
+                    this.pos++;
+                    const right = this.parseConcat();
+                    left = { kind: 'bin', op: t.kind, left, right };
+                }
+                else
+                    break;
+            }
+            return left;
+        }
+        parseConcat() {
+            let left = this.parseAdd();
+            while (this.peek().kind === 'amp') {
+                this.pos++;
+                const right = this.parseAdd();
+                left = { kind: 'bin', op: '&', left, right };
+            }
+            return left;
+        }
+        parseAdd() {
+            let left = this.parseMul();
+            while (true) {
+                const t = this.peek();
+                if (t.kind === 'plus' || t.kind === 'minus') {
+                    this.pos++;
+                    const right = this.parseMul();
+                    left = { kind: 'bin', op: t.kind === 'plus' ? '+' : '-', left, right };
+                }
+                else
+                    break;
+            }
+            return left;
+        }
+        parseMul() {
+            let left = this.parsePow();
+            while (true) {
+                const t = this.peek();
+                if (t.kind === 'star' || t.kind === 'slash') {
+                    this.pos++;
+                    const right = this.parsePow();
+                    left = { kind: 'bin', op: t.kind === 'star' ? '*' : '/', left, right };
+                }
+                else
+                    break;
+            }
+            return left;
+        }
+        parsePow() {
+            const left = this.parseUnary();
+            if (this.peek().kind === 'caret') {
+                this.pos++;
+                const right = this.parsePow();
+                return { kind: 'bin', op: '^', left, right };
+            }
+            return left;
+        }
+        parseUnary() {
+            const t = this.peek();
+            if (t.kind === 'minus') {
+                this.pos++;
+                return { kind: 'unary', op: '-', arg: this.parseUnary() };
+            }
+            if (t.kind === 'plus') {
+                this.pos++;
+                return { kind: 'unary', op: '+', arg: this.parseUnary() };
+            }
+            return this.parsePostfix();
+        }
+        parsePostfix() {
+            let arg = this.parsePrimary();
+            while (this.peek().kind === 'percent') {
+                this.pos++;
+                arg = { kind: 'postfix', op: '%', arg };
+            }
+            return arg;
+        }
+        parsePrimary() {
+            const t = this.peek();
+            if (t.kind === 'num') {
+                this.pos++;
+                return { kind: 'num', value: t.numeric };
+            }
+            if (t.kind === 'str') {
+                this.pos++;
+                return { kind: 'str', value: t.text };
+            }
+            if (t.kind === 'bool') {
+                this.pos++;
+                return { kind: 'bool', value: t.text === 'TRUE' };
+            }
+            if (t.kind === 'err') {
+                this.pos++;
+                return { kind: 'err', value: t.text };
+            }
+            if (t.kind === 'lparen') {
+                this.pos++;
+                const inner = this.parseExpr();
+                this.expect('rparen');
+                return inner;
+            }
+            if (t.kind === 'ref') {
+                this.pos++;
+                const { col, row } = t.ref;
+                if (this.peek().kind === 'colon') {
+                    this.pos++;
+                    const t2 = this.expect('ref');
+                    const { col: col2, row: row2 } = t2.ref;
+                    return {
+                        kind: 'range',
+                        col1: Math.min(col, col2), row1: Math.min(row, row2),
+                        col2: Math.max(col, col2), row2: Math.max(row, row2),
+                    };
+                }
+                return { kind: 'ref', col, row };
+            }
+            if (t.kind === 'ident') {
+                this.pos++;
+                if (this.peek().kind === 'lparen') {
+                    this.pos++;
+                    const args = [];
+                    if (this.peek().kind !== 'rparen') {
+                        args.push(this.parseExpr());
+                        while (this.peek().kind === 'comma') {
+                            this.pos++;
+                            args.push(this.parseExpr());
+                        }
+                    }
+                    this.expect('rparen');
+                    return { kind: 'call', name: t.text, args };
+                }
+                return { kind: 'err', value: '#NAME?' };
+            }
+            throw new Error(`unexpected token ${t.kind} (${t.text})`);
+        }
+    }
+    function parseFormula(src) {
+        const body = src.startsWith('=') ? src.slice(1) : src;
+        const toks = lex(body);
+        const p = new Parser(toks);
+        const ast = p.parseExpr();
+        if (p.peek().kind !== 'eof') {
+            throw new Error(`trailing tokens after expr: ${p.peek().kind}`);
+        }
+        return ast;
+    }
+    function toNumber(v) {
+        if (v === ERROR)
+            return ERROR;
+        if (v === null)
+            return 0;
+        if (typeof v === 'number')
+            return v;
+        if (typeof v === 'boolean')
+            return v ? 1 : 0;
+        if (typeof v === 'string') {
+            if (v === '')
+                return 0;
+            if (v.startsWith('#'))
+                return ERROR;
+            const n = Number(v);
+            if (Number.isNaN(n))
+                return ERROR;
+            return n;
+        }
+        return ERROR;
+    }
+    function toBool(v) {
+        if (v === ERROR)
+            return ERROR;
+        if (v === null)
+            return false;
+        if (typeof v === 'boolean')
+            return v;
+        if (typeof v === 'number')
+            return v !== 0;
+        if (typeof v === 'string') {
+            const u = v.toUpperCase();
+            if (u === 'TRUE')
+                return true;
+            if (u === 'FALSE')
+                return false;
+            if (v.startsWith('#'))
+                return ERROR;
+            const n = Number(v);
+            if (Number.isNaN(n))
+                return ERROR;
+            return n !== 0;
+        }
+        return ERROR;
+    }
+    function flatten(v) {
+        if (v === ERROR)
+            return [ERROR];
+        if (Array.isArray(v)) {
+            const out = [];
+            for (const x of v)
+                for (const y of flatten(x))
+                    out.push(y);
+            return out;
+        }
+        return [v];
+    }
+    const FUNCTIONS = {
+        SUM: (args) => {
+            let total = 0;
+            for (const a of args) {
+                for (const v of flatten(a)) {
+                    if (v === ERROR)
+                        return ERROR;
+                    if (v === null)
+                        continue;
+                    if (typeof v === 'string') {
+                        if (v === '')
+                            continue;
+                        const n = Number(v);
+                        if (Number.isNaN(n))
+                            continue;
+                        total += n;
+                        continue;
+                    }
+                    if (typeof v === 'boolean') {
+                        total += v ? 1 : 0;
+                        continue;
+                    }
+                    total += v;
+                }
+            }
+            return total;
+        },
+        AVERAGE: (args) => {
+            let total = 0;
+            let n = 0;
+            for (const a of args) {
+                for (const v of flatten(a)) {
+                    if (v === ERROR)
+                        return ERROR;
+                    if (v === null)
+                        continue;
+                    if (typeof v === 'string') {
+                        if (v === '')
+                            continue;
+                        const num = Number(v);
+                        if (Number.isNaN(num))
+                            continue;
+                        total += num;
+                        n++;
+                        continue;
+                    }
+                    if (typeof v === 'boolean') {
+                        total += v ? 1 : 0;
+                        n++;
+                        continue;
+                    }
+                    total += v;
+                    n++;
+                }
+            }
+            if (n === 0)
+                return ERROR;
+            return total / n;
+        },
+        MIN: (args) => {
+            let m = null;
+            for (const a of args) {
+                for (const v of flatten(a)) {
+                    if (v === ERROR)
+                        return ERROR;
+                    if (v === null)
+                        continue;
+                    let num;
+                    if (typeof v === 'number')
+                        num = v;
+                    else if (typeof v === 'boolean')
+                        num = v ? 1 : 0;
+                    else if (typeof v === 'string') {
+                        if (v === '')
+                            continue;
+                        const parsed = Number(v);
+                        if (Number.isNaN(parsed))
+                            continue;
+                        num = parsed;
+                    }
+                    else
+                        continue;
+                    m = m === null ? num : Math.min(m, num);
+                }
+            }
+            return m === null ? 0 : m;
+        },
+        MAX: (args) => {
+            let m = null;
+            for (const a of args) {
+                for (const v of flatten(a)) {
+                    if (v === ERROR)
+                        return ERROR;
+                    if (v === null)
+                        continue;
+                    let num;
+                    if (typeof v === 'number')
+                        num = v;
+                    else if (typeof v === 'boolean')
+                        num = v ? 1 : 0;
+                    else if (typeof v === 'string') {
+                        if (v === '')
+                            continue;
+                        const parsed = Number(v);
+                        if (Number.isNaN(parsed))
+                            continue;
+                        num = parsed;
+                    }
+                    else
+                        continue;
+                    m = m === null ? num : Math.max(m, num);
+                }
+            }
+            return m === null ? 0 : m;
+        },
+        COUNT: (args) => {
+            let n = 0;
+            for (const a of args) {
+                const flat = flatten(a);
+                const fromRange = Array.isArray(a);
+                for (const v of flat) {
+                    if (v === ERROR)
+                        continue;
+                    if (typeof v === 'number')
+                        n++;
+                    else if (!fromRange && typeof v === 'string' && v !== '') {
+                        const parsed = Number(v);
+                        if (!Number.isNaN(parsed))
+                            n++;
+                    }
+                }
+            }
+            return n;
+        },
+        COUNTA: (args) => {
+            let n = 0;
+            for (const a of args) {
+                for (const v of flatten(a)) {
+                    if (v === ERROR) {
+                        n++;
+                        continue;
+                    }
+                    if (v === null)
+                        continue;
+                    if (typeof v === 'string' && v === '')
+                        continue;
+                    n++;
+                }
+            }
+            return n;
+        },
+        IF: (args) => {
+            if (args.length < 2)
+                return ERROR;
+            const cond = toBool(args[0]);
+            if (cond === ERROR)
+                return ERROR;
+            if (cond)
+                return args[1];
+            return args.length >= 3 ? args[2] : false;
+        },
+        AND: (args) => {
+            let seen = false;
+            for (const a of args) {
+                for (const v of flatten(a)) {
+                    if (v === ERROR)
+                        return ERROR;
+                    if (v === null)
+                        continue;
+                    const b = toBool(v);
+                    if (b === ERROR)
+                        return ERROR;
+                    if (!b)
+                        return false;
+                    seen = true;
+                }
+            }
+            return seen;
+        },
+        OR: (args) => {
+            let seen = false;
+            for (const a of args) {
+                for (const v of flatten(a)) {
+                    if (v === ERROR)
+                        return ERROR;
+                    if (v === null)
+                        continue;
+                    const b = toBool(v);
+                    if (b === ERROR)
+                        return ERROR;
+                    if (b)
+                        return true;
+                    seen = true;
+                }
+            }
+            return seen ? false : ERROR;
+        },
+        NOT: (args) => {
+            if (args.length !== 1)
+                return ERROR;
+            const b = toBool(args[0]);
+            if (b === ERROR)
+                return ERROR;
+            return !b;
+        },
+    };
+    function cmp(a, b) {
+        if (a === null)
+            a = 0;
+        if (b === null)
+            b = 0;
+        if (typeof a === 'number' && typeof b === 'number')
+            return a < b ? -1 : a > b ? 1 : 0;
+        if (typeof a === 'string' && typeof b === 'string') {
+            const la = a.toLowerCase();
+            const lb = b.toLowerCase();
+            return la < lb ? -1 : la > lb ? 1 : 0;
+        }
+        if (typeof a === 'boolean' && typeof b === 'boolean')
+            return a === b ? 0 : a ? 1 : -1;
+        const rank = (v) => typeof v === 'number' ? 0 : typeof v === 'string' ? 1 : 2;
+        const ra = rank(a);
+        const rb = rank(b);
+        return ra < rb ? -1 : ra > rb ? 1 : 0;
+    }
+    function evalAst(ast, resolver, depth = 0) {
+        if (depth > 1024)
+            return ERROR;
+        switch (ast.kind) {
+            case 'num': return ast.value;
+            case 'str': return ast.value;
+            case 'bool': return ast.value;
+            case 'err': return ERROR;
+            case 'ref': {
+                const v = resolver(ast.col, ast.row);
+                if (typeof v === 'string' && v.startsWith('#'))
+                    return ERROR;
+                return v;
+            }
+            case 'range': {
+                const out = [];
+                for (let r = ast.row1; r <= ast.row2; r++) {
+                    for (let c = ast.col1; c <= ast.col2; c++) {
+                        const v = resolver(c, r);
+                        if (typeof v === 'string' && v.startsWith('#'))
+                            return ERROR;
+                        out.push(v);
+                    }
+                }
+                return out;
+            }
+            case 'unary': {
+                const v = evalAst(ast.arg, resolver, depth + 1);
+                if (v === ERROR)
+                    return ERROR;
+                const n = toNumber(v);
+                if (n === ERROR)
+                    return ERROR;
+                return ast.op === '-' ? -n : n;
+            }
+            case 'postfix': {
+                const v = evalAst(ast.arg, resolver, depth + 1);
+                if (v === ERROR)
+                    return ERROR;
+                const n = toNumber(v);
+                if (n === ERROR)
+                    return ERROR;
+                return n / 100;
+            }
+            case 'bin': {
+                const l = evalAst(ast.left, resolver, depth + 1);
+                const r = evalAst(ast.right, resolver, depth + 1);
+                if (l === ERROR || r === ERROR)
+                    return ERROR;
+                switch (ast.op) {
+                    case '+':
+                    case '-':
+                    case '*':
+                    case '/':
+                    case '^': {
+                        const ln = toNumber(l);
+                        const rn = toNumber(r);
+                        if (ln === ERROR || rn === ERROR)
+                            return ERROR;
+                        switch (ast.op) {
+                            case '+': return ln + rn;
+                            case '-': return ln - rn;
+                            case '*': return ln * rn;
+                            case '/': return rn === 0 ? ERROR : ln / rn;
+                            case '^': return Math.pow(ln, rn);
+                        }
+                        return ERROR;
+                    }
+                    case '&': {
+                        const stringify = (v) => {
+                            if (v === null)
+                                return '';
+                            if (typeof v === 'boolean')
+                                return v ? 'TRUE' : 'FALSE';
+                            if (Array.isArray(v))
+                                return stringify(v.length > 0 ? v[0] : null);
+                            return String(v);
+                        };
+                        return stringify(l) + stringify(r);
+                    }
+                    case 'eq':
+                    case 'neq':
+                    case 'lt':
+                    case 'lte':
+                    case 'gt':
+                    case 'gte': {
+                        const c = cmp(l, r);
+                        if (c === ERROR)
+                            return ERROR;
+                        switch (ast.op) {
+                            case 'eq': return c === 0;
+                            case 'neq': return c !== 0;
+                            case 'lt': return c < 0;
+                            case 'lte': return c <= 0;
+                            case 'gt': return c > 0;
+                            case 'gte': return c >= 0;
+                        }
+                        return ERROR;
+                    }
+                }
+                return ERROR;
+            }
+            case 'call': {
+                const fn = FUNCTIONS[ast.name];
+                if (!fn)
+                    return ERROR;
+                const args = ast.args.map((a) => evalAst(a, resolver, depth + 1));
+                return fn(args);
+            }
+        }
+    }
+    function evaluateFormula(source, resolver) {
+        let ast;
+        try {
+            ast = parseFormula(source);
+        }
+        catch {
+            return { value: '#ERROR!', kind: 'error' };
+        }
+        const result = evalAst(ast, resolver);
+        if (result === ERROR)
+            return { value: '#ERROR!', kind: 'error' };
+        if (Array.isArray(result)) {
+            const first = result.length > 0 ? result[0] : null;
+            return formatScalar(first);
+        }
+        return formatScalar(result);
+    }
+    function formatScalar(v) {
+        if (v === null)
+            return { value: '', kind: 'string' };
+        if (typeof v === 'number') {
+            if (!Number.isFinite(v))
+                return { value: '#ERROR!', kind: 'error' };
+            return { value: String(v), kind: 'number' };
+        }
+        if (typeof v === 'boolean')
+            return { value: v ? 'TRUE' : 'FALSE', kind: 'boolean' };
+        if (typeof v === 'string') {
+            if (v.startsWith('#'))
+                return { value: v, kind: 'error' };
+            return { value: v, kind: 'string' };
+        }
+        return { value: '#ERROR!', kind: 'error' };
+    }
+    function makeSheetResolver(sheet) {
+        return (col, row) => {
+            const rowArr = sheet.rows[row];
+            if (!rowArr)
+                return null;
+            const cell = rowArr[col];
+            if (!cell)
+                return null;
+            if (cell.kind === 'empty')
+                return null;
+            if (cell.kind === 'number') {
+                if (cell.value === '')
+                    return null;
+                const n = Number(cell.value);
+                return Number.isNaN(n) ? null : n;
+            }
+            if (cell.kind === 'boolean')
+                return cell.value === 'TRUE' || cell.value === '1' || cell.value.toLowerCase() === 'true';
+            if (cell.kind === 'error')
+                return cell.value || '#ERROR!';
+            return cell.value;
+        };
+    }
+    function evaluateSheetFormulas(sheet, opts) {
+        const force = opts?.force === true;
+        const resolver = makeSheetResolver(sheet);
+        const updates = [];
+        for (const row of sheet.rows) {
+            if (!row)
+                continue;
+            for (const cell of row) {
+                if (!cell || !cell.formula)
+                    continue;
+                if (!force && cell.value !== '' && cell.value != null)
+                    continue;
+                const r = evaluateFormula(cell.formula, resolver);
+                updates.push({ cell, value: r.value, kind: r.kind });
+            }
+        }
+        for (const u of updates) {
+            u.cell.value = u.value;
+            u.cell.kind = u.kind;
+        }
+    }
+
     const defaultOptions = {
         className: 'xlsx',
         inWrapper: true,
         debug: false,
         showFormulas: false,
         formulaNotation: 'a1',
+        inlineEmbeddings: false,
+        parseOleCfb: false,
+        renderCharts: true,
+        interactiveFormControls: false,
+        interactiveSlicers: false,
+        smartArtLayout: 'tree',
+        evaluateFormulas: false,
+        evaluateFormulasForce: false,
         h,
     };
     function mergeOptions(userOptions) {
@@ -4774,7 +9534,13 @@
     }
     async function parseAsync(data, userOptions) {
         const ops = mergeOptions(userOptions);
-        return Workbook.load(data, new WorkbookParser(ops));
+        const wb = await Workbook.load(data, new WorkbookParser(ops));
+        if (ops.evaluateFormulas && wb.parsed) {
+            for (const sheet of wb.parsed.sheets) {
+                evaluateSheetFormulas(sheet, { force: ops.evaluateFormulasForce });
+            }
+        }
+        return wb;
     }
     async function renderWorkbook(workbook, userOptions) {
         const ops = mergeOptions(userOptions);
@@ -4796,31 +9562,45 @@
         return wb;
     }
 
+    exports.MAX_EMBEDDING_BYTES = MAX_EMBEDDING_BYTES;
     exports.XlsxEncryptedError = XlsxEncryptedError;
     exports.a1ToR1c1 = a1ToR1c1;
+    exports.applyFormControlUpdate = applyFormControlUpdate;
     exports.applyTint = applyTint;
+    exports.bytesToDataUrl = bytesToDataUrl;
     exports.defaultOptions = defaultOptions;
     exports.emuToPx = emuToPx;
+    exports.evalAst = evalAst;
+    exports.evaluateFormula = evaluateFormula;
     exports.evaluateRule = evaluateRule;
+    exports.evaluateSheetFormulas = evaluateSheetFormulas;
     exports.formatNumber = formatNumber;
     exports.indexedColor = indexedColor;
     exports.interpolateColorScale = interpolateColorScale;
     exports.isSafeHyperlinkHref = isSafeHyperlinkHref;
     exports.lookupNumberFormat = lookupNumberFormat;
+    exports.makeSheetResolver = makeSheetResolver;
     exports.parseAsync = parseAsync;
+    exports.parseCfb = parseCfb;
+    exports.parseChart = parseChart;
     exports.parseColorElement = parseColorElement;
     exports.parseConditionalFormatting = parseConditionalFormatting;
+    exports.parseFormula = parseFormula;
+    exports.parseSmartArt = parseSmartArt;
     exports.parseStyles = parseStyles;
     exports.parseTheme = parseTheme;
     exports.parseThreadedComments = parseThreadedComments;
     exports.r1c1ToA1 = r1c1ToA1;
     exports.renderAsync = renderAsync;
+    exports.renderChart = renderChart;
+    exports.renderSmartArtSvg = renderSmartArtSvg;
     exports.renderWorkbook = renderWorkbook;
     exports.resolveCfvo = resolveCfvo;
     exports.resolveColor = resolveColor;
     exports.resolveEffectiveXf = resolveEffectiveXf;
     exports.sanitizeFontFamily = sanitizeFontFamily;
     exports.sanitizeHexColor = sanitizeHexColor;
+    exports.sanitizeMediaMime = sanitizeMediaMime;
 
 }));
 //# sourceMappingURL=xlsx-preview.js.map

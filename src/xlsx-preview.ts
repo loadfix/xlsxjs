@@ -4,6 +4,9 @@ import { WorkbookParser } from './workbook-parser';
 import { HtmlRenderer } from './html-renderer';
 export { applyFormControlUpdate } from './html-renderer';
 import { h } from './html';
+import { evaluateSheetFormulas } from './formula-eval';
+export { evaluateFormula, parseFormula, evalAst, evaluateSheetFormulas, makeSheetResolver } from './formula-eval';
+export type { FormulaValue, CellResolver, SheetLike as FormulaSheet, CellLike as FormulaCell } from './formula-eval';
 
 export type { Workbook as ParsedWorkbook, Sheet, SheetView, Cell, RichTextRun, SharedString, PhoneticRun, FrozenPanes, AutoFilter, TableDef, SheetChart, SheetPivot, SheetSlicer, SheetTimeline, SheetExtensionUri, SheetImage, SheetEmbedding, SheetComment, ThreadedCommentEntry, SheetOutline, DefinedName, ColumnWidth, RowDimension, Hyperlink, DataValidationList, PageBreaks, PrintAreaRange, HeaderFooter, HeaderFooterZones, SheetSmartArt, SmartArtModel, SmartArtNode, CfbModel, CfbStream } from './workbook-parser';
 export { parseThreadedComments, isSafeHyperlinkHref, parseSmartArt, parseCfb } from './workbook-parser';
@@ -86,6 +89,21 @@ export interface Options {
     // `model.layout` — cycle / orgchart variants will grow native layouts in
     // a future wave; for now the hierarchy layout is a reasonable fallback.
     smartArtLayout: 'tree' | 'svg' | 'both';
+    // Opt-in formula evaluation. When true, every cell with a `<f>` element
+    // gets its formula parsed and evaluated post-load; cells whose cached
+    // `<v>` was empty (or when `evaluateFormulasForce` is set, every formula
+    // cell) are rewritten to the computed value. Only a minimal POC set of
+    // functions is covered — SUM / AVERAGE / MIN / MAX / COUNT / COUNTA /
+    // IF / AND / OR / NOT, plus arithmetic and cell ranges. Formulas outside
+    // that surface evaluate to the string "#ERROR!" and land in the cell
+    // as a kind="error" value. Default off; existing golden snapshots stay
+    // byte-stable.
+    evaluateFormulas: boolean;
+    // When true, the evaluator overrides any existing cached `<v>` with its
+    // own computed result. Only has effect alongside `evaluateFormulas`.
+    // Default false — Excel's own cache is authoritative for files that
+    // actually went through a saved-from-Excel pipeline.
+    evaluateFormulasForce: boolean;
     h: typeof h;
 }
 
@@ -101,6 +119,8 @@ export const defaultOptions: Options = {
     interactiveFormControls: false,
     interactiveSlicers: false,
     smartArtLayout: 'tree',
+    evaluateFormulas: false,
+    evaluateFormulasForce: false,
     h,
 };
 
@@ -110,7 +130,13 @@ function mergeOptions(userOptions?: Partial<Options>): Options {
 
 export async function parseAsync(data: Blob | ArrayBuffer | Uint8Array, userOptions?: Partial<Options>): Promise<Workbook> {
     const ops = mergeOptions(userOptions);
-    return Workbook.load(data, new WorkbookParser(ops));
+    const wb = await Workbook.load(data, new WorkbookParser(ops));
+    if (ops.evaluateFormulas && wb.parsed) {
+        for (const sheet of wb.parsed.sheets) {
+            evaluateSheetFormulas(sheet, { force: ops.evaluateFormulasForce });
+        }
+    }
+    return wb;
 }
 
 export async function renderWorkbook(workbook: Workbook, userOptions?: Partial<Options>): Promise<Node[]> {
